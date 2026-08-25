@@ -128,7 +128,10 @@ export function scheduledResume(
  * and saves `spec-to-deploy.yaml` would be a lie about the thing you are editing. There the name
  * IS the subject; here it is a reference to one.
  */
-const WORKFLOW_DISPLAY_NAMES: Readonly<Record<string, string>> = { 'spec-to-deploy': 'default' }
+const WORKFLOW_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  'spec-to-deploy': 'default',
+  'spec-to-deploy-codex': 'default (codex)',
+}
 
 /** The display text for a workflow name. Unmapped names pass through verbatim, so a real pick
  *  (`plan-first`, a repo's own file) always shows itself. */

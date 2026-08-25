@@ -1,5 +1,14 @@
 # Unreleased
 
+## 🛠 Fixed
+
+- **Workspace revision checks now follow the project worktrees.** `tested-revision-shipped`
+  captures and verifies every persisted workspace project against its own tested tree. Scratch
+  control files such as `.cezar-control-path` and gate logs no longer reject a valid project
+  commit, while a real post-test source change still fails closed and names its project and path.
+  Existing single-project and persisted single-tree attestations remain valid. See
+  `.ai/specs/2026-08-25-workspace-revision-attestation.md`.
+
 ## 🔄 Synced from upstream
 
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
@@ -274,6 +283,20 @@
   owns it, and reconcile's duplicate is deleted.
 
 ## 🩹 Fixed
+- 🩹 **A manual-deploy handoff card is now legible, and the `deploy` step no longer fights it.**
+  (spec `.ai/specs/2026-08-24-manual-deploy-not-a-bug.md`.) Three fixes: the `deploy` step's prompt
+  now reads `.ai/deploy-targets.json` first and refuses to deploy, activate, restart or flip a
+  target marked `"manual": true`, closing the gap where the postcondition parked but the agent's
+  own instructions told it to ship anyway; `allServicesDeployed`'s manual-deploy `handoff.reason`
+  now names only the failing manual targets, their `manualReason` and their probe's own output,
+  dropping every probe's shell source and every passing target (`detail`, the full per-target log,
+  is unchanged): this closes the defect where a card could render 2,000 characters of truncated
+  bash instead of the one instruction a human needs; and a Resolve that comes back red now
+  re-persists that same concise reason instead of reverting to the untruncated probe-source report.
+  `AGENTS.md` is corrected in two places to match: cezar's own agent-run deploys are `manual: true`
+  since commit `c328ec06` and a headless `spec-to-deploy` run on cezar structurally parks at
+  `deploy` for a person to resolve, and that parked state is the expected terminal state, not a
+  defect. No API, schema or route changed.
 - 🩹 **Codex approval requests no longer hang unattended runs.** The app-server can send command,
   file-change, permission and legacy approval requests even when cezar asked for
   `approvalPolicy: never`. Cezar now answers them with the most permissive valid decision, reports

@@ -280,6 +280,9 @@ environment traps, not regressions:
 - `catalog.test.ts` C18 ("stays under 40ms CPU... per MiB of scanned corpus", 70.29 observed) —
   previously documented host-load flake.
 - `config-api.test.ts` ("uses the coding agents' native model settings as the initial defaults") —
+  **CORRECTED 2026-08-24 by `.ai/specs/2026-08-24-config-api-env-isolation.md`:** the fixture now
+  saves, deletes and restores `CLAUDE_CONFIG_DIR` and `ANTHROPIC_MODEL`, and a hostile ambient
+  override regression test keeps the guard exercised. The original diagnosis remains below.
   **newly diagnosed this run**: `CLAUDE_CONFIG_DIR` (this agent's own Claude Code config dir) leaks
   into the test's child process; the test saves/restores `HOME`/`CEZ_HOME`/`CODEX_HOME`/
   `XDG_CONFIG_HOME` but not `CLAUDE_CONFIG_DIR`, so `agentHomePaths()` resolves `~/.claude` to the

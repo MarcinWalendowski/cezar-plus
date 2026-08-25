@@ -12,7 +12,7 @@ import {
   loadAgentAccountUsage,
 } from '../workspace/agent-account-usage.ts';
 import { RunManager } from './run.ts';
-import type { WorkflowDef } from './types.ts';
+import { pinWorkflowRunner, type WorkflowDef } from './types.ts';
 import { localCliAuthor } from '../runs/task-author.ts';
 
 const run = promisify(execFile);
@@ -424,7 +424,7 @@ describe('out-of-quota fallback — a resume pinned to a now-held account', () =
     // Codex doesn't gate on `CEZ_DRY_RUN` (only claude-cli-runner does) — it always shells out to
     // whatever `CEZ_CODEX_BIN` names, `codex` by default. The reroute here can land on codex, so
     // this suite needs its own mock too, same fixture `run.test.ts`'s codex tests use.
-    process.env.CEZ_CODEX_BIN = join(import.meta.dirname, '../core/__fixtures__/codex/mock-codex-app-server.mjs');
+    process.env.CEZ_CODEX_BIN = join(import.meta.dirname, '../../scripts/mock-codex-app-server.mjs');
     home = mkdtempSync(join(tmpdir(), 'cez-fallback-resume-home-'));
     process.env.CEZ_HOME = home;
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-fallback-resume-'));
@@ -475,7 +475,7 @@ describe('out-of-quota fallback — a resume pinned to a now-held account', () =
     // exactly this, with no account-aware path of their own — that pairing is the bug.
     const resumed = await manager.continueRun(record.id, { text: 'mock:done' });
     expect(resumed.ok).toBe(true);
-    // `waiting`, not `done`: the codex mock (`__fixtures__/codex/mock-codex-app-server.mjs`) plays
+    // `waiting`, not `done`: the codex mock (`scripts/mock-codex-app-server.mjs`) plays
     // one fixed scripted turn regardless of the prompt text — it has no `mock:done`-style scripting
     // like the claude mock — and a codex session parks at `waiting` after a turn the same way a
     // live one would. The fact under test is which ACCOUNT the continuation reached, not how that
@@ -521,4 +521,104 @@ describe('out-of-quota fallback — a resume pinned to a now-held account', () =
     expect(store.getRun(record.id)?.agentProfile).toBeUndefined();
     expect(store.getRun(record.id)?.runner).toBe('claude');
   }, 40_000);
+});
+
+/**
+ * The honest-degradation half of `spec-to-deploy-codex` (`.ai/specs/2026-08-24-codex-only-
+ * default-workflow.md`, D6, V5). Nine steps pinned to codex means nine `downgradePinnedRunner`
+ * calls where the default chain has two, but the mechanism itself is unchanged — this is the same
+ * `downgradePinnedRunner` `step-runner-account.test.ts` already exercises on a claude pin, now
+ * exercised on a DERIVED codex pin, so this feature does not accidentally invent a second, silent
+ * meaning of "codex only".
+ */
+describe('spec-to-deploy-codex — a derived step downgrades when every codex account is out of quota', () => {
+  let repoRoot: string;
+  let home: string;
+  let store: RunStore;
+  let manager: RunManager | undefined;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  // A tiny base workflow, pinned by the same `pinWorkflowRunner` D1 uses for the real
+  // `spec-to-deploy-codex` — proves the mechanism against the actual derivation rather than a
+  // hand-written `runner: 'codex'` step that merely resembles it.
+  const base: WorkflowDef = {
+    name: 'tiny',
+    source: 'built-in',
+    steps: [{ id: 'work', name: 'Work', prompt: '{{task}}' }],
+  };
+  const workflow = pinWorkflowRunner(base, 'codex', { name: 'tiny-codex' });
+
+  function managerWith(fallback: boolean): RunManager {
+    const limits = (): WorkspaceResourceLimits => ({
+      maxParallel: 2,
+      memoryLimitMb: null,
+      fallbackAcrossAccountsWhenLimited: fallback,
+    });
+    return new RunManager(store, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: limits(), load: async () => limits() }),
+    });
+  }
+
+  beforeEach(async () => {
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    savedEnv.CEZ_HOME = process.env.CEZ_HOME;
+    process.env.CEZ_DRY_RUN = '1';
+    home = mkdtempSync(join(tmpdir(), 'cez-fallback-codex-home-'));
+    process.env.CEZ_HOME = home;
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-fallback-codex-'));
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    // The opposite fixture from the suite above: codex is the one wholly out of quota, claude is
+    // open, so a step pinned to codex has somewhere to downgrade TO.
+    await mergeWriteAgentAccountUsage((s) =>
+      recordLimited(s, 'codex:default', { source: 'usage-limit', until: new Date(Date.now() + 3_600_000).toISOString() }),
+    );
+  });
+
+  afterEach(() => {
+    manager?.dispose();
+    manager = undefined;
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('resolves the derived step onto claude and appends the note naming the substitution', async () => {
+    manager = managerWith(true);
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      worktree: false,
+    });
+    await expect.poll(() => store.getRun(record.id)?.status, { timeout: 20_000 }).toMatch(/^(done|review|failed)$/);
+    expect(store.getRun(record.id)?.steps.find((s) => s.id === 'work')?.backend).toBe('claude');
+    const note = store
+      .readEvents(record.id)
+      .map((e) => String(e.message ?? ''))
+      .find((m) => m.includes('every codex account is out of quota'));
+    // Both ends named: what was pinned and what it actually ran on instead.
+    expect(note).toBeDefined();
+    expect(note).toContain('running on claude:default instead');
+
+    // The metric that makes the downgrade COUNTABLE (V9), asserted from the same fixture as the
+    // human-readable note above — neither replaces the other.
+    const metric = store
+      .readEvents(record.id)
+      .find((e) => e.type === 'metric' && (e as { name?: unknown }).name === 'run.step.runner_downgraded');
+    expect(metric).toMatchObject({
+      name: 'run.step.runner_downgraded',
+      stepId: 'work',
+      workflow: 'tiny-codex',
+      plannedRunner: 'codex',
+      actualRunner: 'claude',
+      reason: 'quota',
+    });
+  }, 30_000);
 });

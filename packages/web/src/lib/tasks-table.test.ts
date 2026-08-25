@@ -147,6 +147,12 @@ describe('displayWorkflowName', () => {
     expect(displayWorkflowName('spec-to-deploy')).toBe('default')
   })
 
+  it('prints spec-to-deploy-codex as `default (codex)` — the derived sibling, not the default itself', () => {
+    // `.ai/specs/2026-08-24-codex-only-default-workflow.md` D5. Distinct from `spec-to-deploy`'s
+    // label so the two adjacent picker entries read as related, not identical.
+    expect(displayWorkflowName('spec-to-deploy-codex')).toBe('default (codex)')
+  })
+
   it('passes every other name through verbatim, including the old floor quick-task', () => {
     // The control against a mapping that swallows real picks. A repo's own workflow, the built-in
     // `note-to-spec`, `quick-task` (now an ordinary named pick), and the placeholders must all

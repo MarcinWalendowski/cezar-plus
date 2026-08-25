@@ -229,3 +229,46 @@ export const FILED_SEARCH_PARAMS = {
   priority: 'fpriority',
   sort: 'fsort',
 } as const
+
+// Selection for 2026-08-24-bulk-start-filed-tasks.md.
+
+export function filedTaskKey(entry: WorkspaceTodoEntry): string {
+  return `${entry.project}:${entry.todo.id}`
+}
+
+export function toggleFiledSelection(selected: ReadonlySet<string>, key: string): Set<string> {
+  const next = new Set(selected)
+  if (!next.delete(key)) next.add(key)
+  return next
+}
+
+export function setFiledSelection(
+  selected: ReadonlySet<string>,
+  keys: readonly string[],
+  on: boolean,
+): Set<string> {
+  const next = new Set(selected)
+  for (const key of keys) {
+    if (on) next.add(key)
+    else next.delete(key)
+  }
+  return next
+}
+
+export function selectedFiledEntries(
+  entries: readonly WorkspaceTodoEntry[],
+  selected: ReadonlySet<string>,
+): WorkspaceTodoEntry[] {
+  return entries.filter((entry) => selected.has(filedTaskKey(entry)))
+}
+
+export function filedSelectionState(
+  keys: readonly string[],
+  selected: ReadonlySet<string>,
+): 'none' | 'some' | 'all' {
+  if (keys.length === 0) return 'none'
+  let hit = 0
+  for (const key of keys) if (selected.has(key)) hit += 1
+  if (hit === 0) return 'none'
+  return hit === keys.length ? 'all' : 'some'
+}

@@ -1,5 +1,10 @@
 # The one-shot `cezar run` CLI must not exit while its brokered run is still in flight
 
+**CORRECTED 2026-08-23 by `.ai/specs/2026-08-23-headless-run-drains-event-loop.md`:** the
+step-scoped broker timer fixed one drain window but did not give the headless CLI a run-lifetime
+handle across multi-step hand-offs. The original result remains below as the verified result for
+that narrower mechanism.
+
 **Status: IMPLEMENTED, TESTED and SHIPPED 2026-08-22.** Commit `3e6d1b7e` ("fix: keep a
 one-shot brokered run's interval ref'd so the process outlives the session"), pushed to
 `origin/main` (fast-forward from `6fdbe35e`) on `prod-host`. P1+P2 both landed in
@@ -25,10 +30,32 @@ named `097d1b15` as the likely regression. Direct commit-content comparison inst
 headless `cezar run`: its parent has no broker construction in `ClaudeCliRunner.startSession`,
 while `954c6a55` wires `spawnBroker` and `BrokeredSession` into that path. Commit `097d1b15`
 changed the default workflow and explains why the observed first step was "Gather the record",
-but it did not create the exit mechanism. This attribution is supported by the direct diff, not
-yet by the literal `git bisect` required by task `9bf5030d`; that task remains partial. The
-shipping result above is unchanged: `3e6d1b7e` fixed the defect and its own package, unit, and
-built-CLI verification remains the authoritative acceptance record.
+but it did not create the exit mechanism. **Confirmed 2026-08-24 by the literal `git bisect`** this paragraph
+previously said was still owed (~~This attribution is supported by the direct diff, not yet by the
+literal `git bisect` required by task `9bf5030d`; that task remains partial.~~): a scoped,
+`GIT_*`/`CEZ_*`-scrubbed bisect over `bad=387ba439 good=3f4e9c33` (29 commits, both endpoints
+measured by hand first) returns `first bad commit: 954c6a55`. The direct-diff attribution was
+right. Transcript and per-probe table:
+`.ai/specs/2026-08-22-headless-run-exit0-bisect-and-verify.md` → Verification → "Executed
+2026-08-24". The shipping result above is unchanged: `3e6d1b7e` fixed the defect and its own
+package, unit, and built-CLI verification remains the authoritative acceptance record — and
+task `9bf5030d` has now independently confirmed the fix holds on current `origin/main`
+(`c328ec06`): a headless dry run whose provider fails mid-workflow exits **1** with its record at
+`"status": "failed"`, never 0-with-`running`.
+
+**CORRECTED 2026-08-24 by `8219c6f0`:** the separate dry-run Codex escape described below is fixed.
+Under `CEZ_DRY_RUN=1`, Codex now resolves to the bundled app-server mock, and the integrated
+packed-release E2E passed 25/25 without a provider call. The original diagnosis remains below for
+history.
+
+**Separate defect found while confirming this, NOT covered by `3e6d1b7e`:** on current main the
+release e2e case is red again for an unrelated reason — under `CEZ_DRY_RUN=1` the `spec-to-deploy`
+workflow routes its `review-spec` step to **codex**, which the dry-run mock does not cover
+(`task-classifier.ts:36`: "the `CEZ_DRY_RUN` mock only exists for claude and pi"), so the packaged
+release e2e calls a real paid codex account. Do not read a red `test:package` case 8 on main as a
+regression of this spec's fix without first checking which of the two failures it is: this one
+names a provider and exits non-zero, the original exited **0** with stdout stopping at `── step:
+Gather the record`.
 
 ## TLDR
 

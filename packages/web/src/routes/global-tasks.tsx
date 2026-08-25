@@ -62,10 +62,15 @@ import {
   NO_FILED_FILTERS,
   applyFiledPatch,
   filedFacetCounts,
+  filedSelectionState,
   filedStatus,
+  filedTaskKey,
   filedTasksExcludingFacet,
   filterFiledTasks,
+  selectedFiledEntries,
+  setFiledSelection,
   sortFiledTasks,
+  toggleFiledSelection,
   type FiledFacetId,
   type FiledPriority,
   type FiledSort,
@@ -739,6 +744,7 @@ function FiledTasks({
 }) {
   const todos = useWorkspaceTodos()
   const start = useStartFiledTask()
+  const startMany = useStartFiledTasks()
   const update = useUpdateFiledTodo()
   const now = useNow(30_000)
   const isDesktop = useIsDesktop()
@@ -748,6 +754,7 @@ function FiledTasks({
   const nodeRoster = useTaskNodeRoster()
   const [detail, setDetail] = React.useState<WorkspaceTodoEntry | null>(null)
   const [shown, setShown] = React.useState(FILED_ROW_PAGE_SIZE)
+  const [selected, setSelected] = React.useState<ReadonlySet<string>>(() => new Set())
 
   const all = todos.data?.todos ?? []
   // Unfiltered-by-facet/query, so the section's own "is there anything filed at all" question and
@@ -782,6 +789,17 @@ function FiledTasks({
 
   const rows = sorted.slice(0, shown)
   const hasMore = sorted.length > rows.length
+  const rowKeys = rows.map(filedTaskKey)
+  const selectAllState = filedSelectionState(rowKeys, selected)
+  const batch = selectedFiledEntries(rows, selected)
+  const clearSelection = () => setSelected(new Set())
+  const runSelected = () => {
+    if (batch.length === 0 || startMany.isPending) return
+    startMany.mutate(batch, { onSettled: () => setSelected(new Set()) })
+  }
+  const selectRow = (entry: WorkspaceTodoEntry) =>
+    setSelected((current) => toggleFiledSelection(current, filedTaskKey(entry)))
+  const selectAll = (on: boolean) => setSelected((current) => setFiledSelection(current, rowKeys, on))
 
   return (
     <section data-slot="filed-tasks" data-view={view}>
@@ -803,6 +821,38 @@ function FiledTasks({
         onSortChange={onSortChange}
       />
 
+      {batch.length > 0 ? (
+        <div
+          data-slot="filed-selection-bar"
+          className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 shadow-xs"
+        >
+          <span data-slot="filed-selection-count" className="text-[12.5px] font-medium">
+            {batch.length} selected
+          </span>
+          <span className="flex-1" aria-hidden="true" />
+          <button
+            type="button"
+            data-action="start-selected-filed-tasks"
+            disabled={startMany.isPending}
+            onClick={runSelected}
+            className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border px-3 text-[12.5px] font-medium hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-wait disabled:opacity-50"
+          >
+            <PlayIcon className="size-3.5" aria-hidden="true" />
+            {startMany.isPending
+              ? 'Starting...'
+              : `Run ${batch.length} task${batch.length === 1 ? '' : 's'}`}
+          </button>
+          <button
+            type="button"
+            data-action="clear-filed-selection"
+            onClick={clearSelection}
+            className="inline-flex min-h-8 items-center rounded-md px-2.5 text-[12.5px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+          >
+            Clear
+          </button>
+        </div>
+      ) : null}
+
       {filtered.length === 0 ? (
         <p data-slot="filed-tasks-empty" className="mt-2 text-[12.5px] text-soft-foreground">
           No filed tasks match these filters.
@@ -820,6 +870,8 @@ function FiledTasks({
               onOpenDetail={() => setDetail(entry)}
               onStart={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
               onArchive={(archived) => update.mutate({ entry, patch: { archived } })}
+              selected={selected.has(filedTaskKey(entry))}
+              onToggleSelect={() => selectRow(entry)}
               startBusy={start.isPending}
               archiveBusy={update.isPending}
             />
@@ -844,6 +896,13 @@ function FiledTasks({
             <table className="w-full border-collapse">
               <thead>
                 <tr>
+                  <Th className="w-[40px]">
+                    <SelectAllCheckbox
+                      state={selectAllState}
+                      onChange={selectAll}
+                      label="Select every filed task shown"
+                    />
+                  </Th>
                   <Th className="w-[104px]">Status</Th>
                   <Th>Task</Th>
                   <Th className="w-[124px]">Project</Th>
@@ -866,6 +925,8 @@ function FiledTasks({
                     onOpenDetail={() => setDetail(entry)}
                     onStart={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
                     onArchive={(archived) => update.mutate({ entry, patch: { archived } })}
+                    selected={selected.has(filedTaskKey(entry))}
+                    onToggleSelect={() => selectRow(entry)}
                     startBusy={start.isPending}
                     archiveBusy={update.isPending}
                   />
@@ -969,6 +1030,54 @@ function FiledControlsRow({
   )
 }
 
+function SelectAllCheckbox({
+  state,
+  onChange,
+  label,
+}: {
+  state: 'none' | 'some' | 'all'
+  onChange: (on: boolean) => void
+  label: string
+}) {
+  const ref = React.useRef<HTMLInputElement>(null)
+  React.useEffect(() => {
+    if (ref.current) ref.current.indeterminate = state === 'some'
+  }, [state])
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      data-slot="filed-select-all"
+      aria-label={label}
+      checked={state === 'all'}
+      onChange={(event) => onChange(event.target.checked)}
+      className="size-3.5 shrink-0 cursor-pointer align-middle"
+    />
+  )
+}
+
+function FiledRowCheckbox({
+  entry,
+  checked,
+  onChange,
+}: {
+  entry: WorkspaceTodoEntry
+  checked: boolean
+  onChange: () => void
+}) {
+  return (
+    <input
+      type="checkbox"
+      data-slot="filed-select"
+      data-todo-id={entry.todo.id}
+      aria-label={`Select ${entry.todo.summary}`}
+      checked={checked}
+      onChange={onChange}
+      className="size-3.5 shrink-0 cursor-pointer align-middle"
+    />
+  )
+}
+
 /** A closed-enum status pill — `todo`/`in-progress`/`blocked`/`done` painted in the design
  *  system's dot grammar, same idiom `TaskRow`'s attention pill above uses. */
 function FiledStatusPill({ status }: { status: FiledStatus }) {
@@ -998,6 +1107,8 @@ function FiledRow({
   onOpenDetail,
   onStart,
   onArchive,
+  selected,
+  onToggleSelect,
   startBusy,
   archiveBusy,
 }: {
@@ -1007,6 +1118,8 @@ function FiledRow({
   onOpenDetail: () => void
   onStart: () => void
   onArchive: (archived: boolean) => void
+  selected: boolean
+  onToggleSelect: () => void
   startBusy: boolean
   archiveBusy: boolean
 }) {
@@ -1022,7 +1135,11 @@ function FiledRow({
       data-project={entry.project}
       data-todo-id={entry.todo.id}
       className="hover:bg-muted"
+      data-selected={selected ? '' : undefined}
     >
+      <td className={TD_BASE}>
+        <FiledRowCheckbox entry={entry} checked={selected} onChange={onToggleSelect} />
+      </td>
       <td className={TD_BASE}>
         <FiledStatusPill status={status} />
       </td>
@@ -1124,6 +1241,8 @@ function FiledCard({
   onOpenDetail,
   onStart,
   onArchive,
+  selected,
+  onToggleSelect,
   startBusy,
   archiveBusy,
 }: {
@@ -1133,6 +1252,8 @@ function FiledCard({
   onOpenDetail: () => void
   onStart: () => void
   onArchive: (archived: boolean) => void
+  selected: boolean
+  onToggleSelect: () => void
   startBusy: boolean
   archiveBusy: boolean
 }) {
@@ -1146,6 +1267,9 @@ function FiledCard({
       className="rounded-lg border border-border bg-card px-3.5 py-3 shadow-xs"
     >
       <div className="flex items-start gap-2.5">
+        <span className="mt-0.5 shrink-0">
+          <FiledRowCheckbox entry={entry} checked={selected} onChange={onToggleSelect} />
+        </span>
         <span className="mt-px shrink-0">
           <FiledStatusPill status={status} />
         </span>
@@ -1390,6 +1514,35 @@ function useStartFiledTask() {
       void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
       void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.runsIndex })
       void navigate(scopeTo(projectId, `/tasks/${result.run.id}`))
+    },
+    onError: (error) => toast(error.message, { tone: 'danger' }),
+  })
+}
+
+function useStartFiledTasks() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (entries: readonly WorkspaceTodoEntry[]) => {
+      const failures: string[] = []
+      let started = 0
+      for (const entry of entries) {
+        try {
+          await startWorkspaceTodo(entry.project, entry.todo.id)
+          started += 1
+        } catch (error: unknown) {
+          failures.push(error instanceof Error ? error.message : String(error))
+        }
+      }
+      return { started, total: entries.length, failures }
+    },
+    onSuccess: ({ started, total, failures }) => {
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
+      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.runsIndex })
+      if (failures.length > 0) {
+        toast(`Started ${started} of ${total}: ${failures[0]}`, { tone: 'danger' })
+        return
+      }
+      toast(`Started ${started} task${started === 1 ? '' : 's'}`)
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
   })

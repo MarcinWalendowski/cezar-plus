@@ -32,6 +32,29 @@ type UsageAccountingHarness = {
   ): void;
 };
 
+type AttestationCapture = { ok: true } | { ok: false; reason: string };
+
+type AttestationHarness = {
+  recordTestAttestation(
+    runId: string,
+    state: { cwd: string },
+    stepId: string,
+    emit: (event: { type: string; stepId?: string; [key: string]: unknown }) => void,
+  ): Promise<AttestationCapture>;
+  recordShippedAttestation(
+    runId: string,
+    state: { cwd: string },
+    stepId: string,
+    emit: (event: { type: string; stepId?: string; [key: string]: unknown }) => void,
+  ): Promise<AttestationCapture>;
+  captureAttestationOrFail(
+    runId: string,
+    state: { cwd: string },
+    step: { id: string },
+    emit: (event: { type: string; stepId?: string; [key: string]: unknown }) => void,
+  ): Promise<{ ok: true } | { ok: false; runError: string }>;
+};
+
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 
@@ -57,6 +80,204 @@ describe('appendTurnText', () => {
     expect(appendTurnText('', 'first')).toBe('first');
     expect(appendTurnText('first', '')).toBe('first');
     expect(appendTurnText(appendTurnText('', 'first'), 'second')).toBe('first\nsecond');
+  });
+});
+
+describe('workspace test attestation scope', () => {
+  let scratch: string;
+  let projectA: string;
+  let projectZ: string;
+  let store: RunStore;
+  let manager: RunManager;
+
+  beforeEach(async () => {
+    scratch = mkdtempSync(join(tmpdir(), 'cez-attestation-scratch-'));
+    projectA = mkdtempSync(join(tmpdir(), 'cez-attestation-project-a-'));
+    projectZ = mkdtempSync(join(tmpdir(), 'cez-attestation-project-z-'));
+    for (const root of [scratch, projectA, projectZ]) {
+      await run('git', [...GIT_ID, 'init', '-b', 'main'], { cwd: root });
+      writeFileSync(join(root, 'seed.txt'), `${root}\n`);
+      await run('git', [...GIT_ID, 'add', '.'], { cwd: root });
+      await run('git', [...GIT_ID, 'commit', '-m', 'seed'], { cwd: root });
+    }
+    store = RunStore.open(join(scratch, '.ai/cezar'));
+    manager = new RunManager(store, scratch, {
+      semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 0 } }),
+    });
+  });
+
+  afterEach(() => {
+    manager?.dispose();
+    store.flush();
+    rmSync(scratch, { recursive: true, force: true });
+    rmSync(projectA, { recursive: true, force: true });
+    rmSync(projectZ, { recursive: true, force: true });
+  });
+
+  function makeRun(steps: Array<{ id: string }> = [{ id: 'run-tests' }, { id: 'commit-push' }]) {
+    return store.createRun({
+      author: localCliAuthor(),
+      title: 'workspace attestation',
+      workflow: 'spec-to-deploy',
+      task: 'workspace attestation',
+      steps: steps.map((s) => ({ id: s.id, name: s.id, kind: 'agent' as const })),
+    });
+  }
+
+  it('records two project worktrees in deterministic order and excludes scratch control files from their trees', async () => {
+    const record = makeRun();
+    // Registered z-project BEFORE a-project — the opposite of the localeCompare order the
+    // implementation must produce (`run.ts`'s `.sort((a, b) => a.root.localeCompare(b.root))`).
+    store.updateRun(record.id, {
+      workspaceProjects: [
+        { id: 'z-project', name: 'z-project', root: '/projects/z-project', status: 'ok' },
+        { id: 'a-project', name: 'a-project', root: '/projects/a-project', status: 'ok' },
+      ],
+      workspaceWorktrees: [
+        { root: '/projects/z-project', worktreePath: projectZ, branch: 'cez/z-project', baseBranch: 'main' },
+        { root: '/projects/a-project', worktreePath: projectA, branch: 'cez/a-project', baseBranch: 'main' },
+      ],
+    });
+    writeFileSync(join(scratch, '.cezar-control-path'), 'scratch only\n');
+    const events: Array<{ type: string; stepId?: string; [key: string]: unknown }> = [];
+
+    const capture = await (manager as unknown as AttestationHarness).recordTestAttestation(
+      record.id,
+      { cwd: scratch },
+      'run-tests',
+      (event) => events.push(event),
+    );
+    expect(capture).toEqual({ ok: true });
+
+    const attestation = store.getRun(record.id)?.testAttestation;
+    expect(attestation?.projects).toHaveLength(2);
+    // localeCompare order ('a' < 'z'), NOT registration order (z was registered first).
+    expect(attestation?.projects?.map((p) => p.root)).toEqual(['/projects/a-project', '/projects/z-project']);
+    expect(events).toContainEqual(expect.objectContaining({ message: 'tests attested 2 project trees' }));
+    for (const [root, project] of [
+      ['/projects/a-project', projectA],
+      ['/projects/z-project', projectZ],
+    ] as const) {
+      const treeSha = attestation?.projects?.find((p) => p.root === root)?.treeSha ?? '';
+      const names = await run('git', ['ls-tree', '-r', '--name-only', treeSha], { cwd: project });
+      expect(names.stdout).not.toContain('.cezar-control-path');
+    }
+  });
+
+  it('clears an older attestation and fails run-tests, leaving commit-push pending, when a fresh project capture fails', async () => {
+    const record = makeRun();
+    store.updateRun(record.id, {
+      testAttestation: {
+        stepId: 'run-tests',
+        treeSha: '1'.repeat(40),
+        at: new Date().toISOString(),
+      },
+      workspaceProjects: [{ id: 'gone', name: 'gone', root: '/projects/gone', status: 'ok' }],
+      workspaceWorktrees: [{
+        root: '/projects/gone',
+        worktreePath: join(scratch, 'gone'),
+        branch: 'cez/gone',
+        baseBranch: 'main',
+      }],
+    });
+
+    const capture = await (manager as unknown as AttestationHarness).captureAttestationOrFail(
+      record.id,
+      { cwd: scratch },
+      { id: 'run-tests' },
+      () => undefined,
+    );
+
+    expect(capture.ok).toBe(false);
+    if (!capture.ok) expect(capture.runError).toContain('/projects/gone');
+    expect(store.getRun(record.id)?.testAttestation).toBeUndefined();
+    const run = store.getRun(record.id);
+    expect(run?.steps.find((s) => s.id === 'run-tests')?.status).toBe('failed');
+    expect(run?.steps.find((s) => s.id === 'run-tests')?.error).toContain('/projects/gone');
+    // captureAttestationOrFail only ever finishes the step it was called for — the step loop's
+    // own `if (!capture.ok) { runError = ...; break; }` (shared with every other post-condition
+    // failure, see "a step is green only when its post-condition holds") is what keeps the loop
+    // from reaching commit-push at all.
+    expect(run?.steps.find((s) => s.id === 'commit-push')?.status).toBe('pending');
+  });
+
+  it('fails closed, naming the project, when a granted worktree path exists but is not a git repository', async () => {
+    const record = makeRun();
+    // OUTSIDE `scratch` deliberately: nested under it, `git add -A` would just walk up and find
+    // scratch's own `.git`, masking the defect this test exists to catch.
+    const notAGitRepo = mkdtempSync(join(tmpdir(), 'cez-attestation-not-a-repo-'));
+    try {
+      writeFileSync(join(notAGitRepo, 'file.txt'), 'plain directory, no .git\n');
+      store.updateRun(record.id, {
+        workspaceProjects: [{ id: 'plain', name: 'plain', root: '/projects/plain', status: 'ok' }],
+        workspaceWorktrees: [{
+          root: '/projects/plain',
+          worktreePath: notAGitRepo,
+          branch: 'cez/plain',
+          baseBranch: 'main',
+        }],
+      });
+
+      const capture = await (manager as unknown as AttestationHarness).recordTestAttestation(
+        record.id,
+        { cwd: scratch },
+        'run-tests',
+        () => undefined,
+      );
+
+      expect(capture.ok).toBe(false);
+      if (!capture.ok) expect(capture.reason).toContain('/projects/plain');
+      expect(store.getRun(record.id)?.testAttestation).toBeUndefined();
+    } finally {
+      rmSync(notAGitRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed with no attestation stored when the scratch capture itself fails', async () => {
+    const record = makeRun();
+    // No `.git` in this scratch dir at all, so `git add -A` under a fresh GIT_INDEX_FILE fails
+    // before any project is ever consulted.
+    const notAGitScratch = mkdtempSync(join(tmpdir(), 'cez-attestation-scratch-broken-'));
+    try {
+      const capture = await (manager as unknown as AttestationHarness).recordTestAttestation(
+        record.id,
+        { cwd: notAGitScratch },
+        'run-tests',
+        () => undefined,
+      );
+      expect(capture.ok).toBe(false);
+      expect(store.getRun(record.id)?.testAttestation).toBeUndefined();
+    } finally {
+      rmSync(notAGitScratch, { recursive: true, force: true });
+    }
+  });
+
+  it('commit-push fails closed, naming the project, when a project HEAD cannot be resolved for the shipped stamp', async () => {
+    const record = makeRun();
+    const treeSha = await run('git', ['rev-parse', 'HEAD^{tree}'], { cwd: projectA }).then((r) => r.stdout.trim());
+    store.updateRun(record.id, {
+      testAttestation: {
+        stepId: 'run-tests',
+        treeSha: '2'.repeat(40),
+        at: new Date().toISOString(),
+        projects: [{ root: '/projects/a-project', worktreePath: projectA, treeSha }],
+      },
+    });
+    // Delete the project's `.git` AFTER the attestation was recorded, so `recordShippedAttestation`
+    // is the thing that discovers `rev-parse HEAD` no longer resolves — not the capture itself.
+    rmSync(join(projectA, '.git'), { recursive: true, force: true });
+
+    const capture = await (manager as unknown as AttestationHarness).recordShippedAttestation(
+      record.id,
+      { cwd: scratch },
+      'commit-push',
+      () => undefined,
+    );
+
+    expect(capture.ok).toBe(false);
+    if (!capture.ok) expect(capture.reason).toContain('/projects/a-project');
+    // Half-attested must not read as shipped: no `shippedSha` was stamped onto the stored record.
+    expect(store.getRun(record.id)?.testAttestation?.shippedSha).toBeUndefined();
   });
 });
 
@@ -1020,6 +1241,129 @@ describe('a chain of 2 selected skills runs BOTH steps, in order (#410)', () => 
     expect(notes.length).toBe(2);
     expect(notes[0]).toContain('you are running step 1 of 2');
     expect(notes[1]).toContain('you are running step 2 of 2');
+  }, 30_000);
+});
+
+/**
+ * `run.workflow.selected` (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, Analytics, V9):
+ * emitted once per CREATED run from `startRun`, not from `execute()` — the distinction matters
+ * because `execute()` is re-entered (`pump`'s dequeue, `reattachBrokeredRun`'s post-restart
+ * re-adopt), and an event emitted there would overcount exactly the long, interrupted runs a rate
+ * most needs to count honestly.
+ */
+describe('run.workflow.selected metric — once per created run, not per execute() entry (V9)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-workflow-selected-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    manager?.dispose();
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  function selectedEvents(runId: string) {
+    return store
+      .readEvents(runId)
+      .filter((e) => e.type === 'metric' && (e as { name?: unknown }).name === 'run.workflow.selected');
+  }
+
+  async function waitTerminal(runId: string): Promise<void> {
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + 20_000;
+    while (!terminal.has(store.getRun(runId)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  it('fires exactly once at creation — before the run has executed at all — and a second execute() entry does not add a second one', async () => {
+    const workflow: WorkflowDef = {
+      name: 'spec-to-deploy-codex',
+      source: 'built-in',
+      steps: [
+        { id: 'a', name: 'a', prompt: '{{task}}', runner: 'claude' },
+        { id: 'b', name: 'b', prompt: '{{task}}', runner: 'claude' },
+      ],
+    };
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      runner: 'codex',
+      worktree: false,
+    });
+
+    // Read events SYNCHRONOUSLY, immediately after `startRun` returns and before any `await` runs
+    // in this test — `startRun` fires `void this.pump()` but returns before pump's async body gets
+    // a single microtask, so nothing has executed yet. Emitting from `execute()` instead of
+    // `startRun` would read as a count of 0 here.
+    const before = selectedEvents(record.id);
+    expect(before).toHaveLength(1);
+    expect(before[0]).toMatchObject({
+      name: 'run.workflow.selected',
+      runId: record.id,
+      workflow: 'spec-to-deploy-codex',
+      requestedRunner: 'codex',
+      stepCount: 2,
+    });
+
+    await waitTerminal(record.id);
+    expect(selectedEvents(record.id)).toHaveLength(1);
+
+    // A second `execute()` entry — the same re-entry point `pump`'s dequeue and
+    // `reattachBrokeredRun`'s post-restart re-adopt use — must not add a second event. Called
+    // directly here rather than through the live-spool machinery `recover-brokered.test.ts`
+    // exercises: the fact under test is whether `execute()` itself ever emits this event, which it
+    // must not, however many times it runs.
+    const finishedRecord = store.getRun(record.id)!;
+    const input = (
+      manager as unknown as {
+        queuedInputFromRecord: (r: RunRecord, g: boolean | undefined) => unknown;
+      }
+    ).queuedInputFromRecord(finishedRecord, false);
+    await (
+      manager as unknown as {
+        execute: (runId: string, wf: WorkflowDef, input: unknown) => Promise<void>;
+      }
+    ).execute(record.id, workflow, input);
+
+    expect(selectedEvents(record.id)).toHaveLength(1);
+  }, 30_000);
+
+  it('also fires for a run started on the default (non-codex) workflow — the rate needs its denominator', async () => {
+    const workflow: WorkflowDef = {
+      name: 'spec-to-deploy',
+      source: 'built-in',
+      steps: [{ id: 'a', name: 'a', prompt: '{{task}}' }],
+    };
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      worktree: false,
+    });
+    const before = selectedEvents(record.id);
+    expect(before).toHaveLength(1);
+    expect(before[0]).toMatchObject({ workflow: 'spec-to-deploy', stepCount: 1 });
+
+    await waitTerminal(record.id);
+    expect(selectedEvents(record.id)).toHaveLength(1);
   }, 30_000);
 });
 
@@ -2491,9 +2835,9 @@ describe('native Codex requestUserInput parks and resumes the run (#565)', () =>
   beforeEach(async () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-565-'));
     delete process.env.CEZ_DRY_RUN;
-    // Resolved from this file, not the cwd: the fixture is a sibling of the source under test,
-    // so the path holds wherever vitest is invoked from and survives the tree moving.
-    process.env.CEZ_CODEX_BIN = join(import.meta.dirname, '../core/__fixtures__/codex/mock-codex-app-server.mjs');
+    // Resolved from this file, not the cwd: the bundled dry-run mock lives at the package root's
+    // scripts/, so the path holds wherever vitest is invoked from and survives the tree moving.
+    process.env.CEZ_CODEX_BIN = join(import.meta.dirname, '../../scripts/mock-codex-app-server.mjs');
     await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
     writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
     await run('git', ['add', '-A'], { cwd: repoRoot });

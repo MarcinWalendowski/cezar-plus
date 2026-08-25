@@ -49,6 +49,13 @@ import { runBackupCommand } from './backup/cli.ts';
 import { runKnowledgeCommand } from './knowledge/cli.ts';
 import { runTodoCommand } from './todo-cli.ts';
 import { localCliAuthor } from './runs/task-author.ts';
+import {
+  RUN_KEEPALIVE_MS,
+  runExitGuard,
+  runWedgeTick,
+  type RunExitGuardState,
+  type RunWedgeState,
+} from './runs/run-exit-guard.ts';
 import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 // FIX 6 (D13 repair pass 1): the production `listRegisteredProjectRoots` supplier lives in
 // `./registered-project-roots.ts` for the same reason `./auth-boot-gate.ts` was extracted from this
@@ -136,7 +143,8 @@ Options:
   -p, --port <n>              cockpit port (default 4321; server-install: this
                               instance's loopback port — auto-picked per domain)
       --repo <dir>            repo to operate on (default: cwd)
-      --workflow <name>       workflow for \`run\` (default: spec-to-deploy)
+      --workflow <name>       workflow for \`run\` (default: spec-to-deploy;
+                              spec-to-deploy-codex pins every step to codex)
       --model <model>         model override for \`run\`
       --no-open               don't open the browser
       --platform <id>         server-install target (ubuntu-vps | macosx-ngrok | hetzner)
@@ -816,7 +824,7 @@ async function serveCommand(
           appendFileSync(join(dataDir, 'worktree-reaps.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), runId: outcome.id, repoRoot, ...outcome })}\n`);
         },
       }).then((orphans) => {
-        if (orphans.removed.length > 0) console.log(`  cleaned ${orphans.removed.length} orphaned worktree(s): ${orphans.removed.map((id) => id.slice(0, 8)).join(', ')}`);
+        if (orphans.removed.length > 0) console.log(`  cleaned ${orphans.removed.length} orphaned worktree(s): ${orphans.removed.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
         if (orphans.kept.length > 0) console.log(`  kept ${orphans.kept.length} unsafe-to-reclaim worktree(s): ${orphans.kept.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
         if (orphans.declined.length > 0) console.log(`  declined to reclaim ${orphans.declined.length} worktree(s): ${orphans.declined.map((d) => `${d.id.slice(0, 8)} (${d.reason})`).join(', ')}`);
       }).catch(() => undefined);
@@ -1077,13 +1085,55 @@ async function runCommand(
 
   // A person typing at a terminal is a `user` with id `local` — the `approverOf` rule
   // (spec 2026-08-21-task-author-provenance). There is no session and no request here.
+  let runId: string | undefined;
+  let settled = false;
+  let pendingFinal: import('@loki-labs/better-cezar-contract').RunStatus | undefined;
+  let resolveFinal: ((status: import('@loki-labs/better-cezar-contract').RunStatus) => void) | undefined;
+  const settle = (status: import('@loki-labs/better-cezar-contract').RunStatus): void => {
+    if (settled) return;
+    if (!resolveFinal) {
+      pendingFinal = status;
+      return;
+    }
+    settled = true;
+    resolveFinal(status);
+  };
+  const exitGuardState: RunExitGuardState = { handled: false };
+  const wedgeState: RunWedgeState = { misses: 0 };
+  let keepAlive: NodeJS.Timeout;
+  const beforeExit = (): void => {
+    if (runId) runExitGuard(store, runId, exitGuardState);
+  };
+  process.on('beforeExit', beforeExit);
+  keepAlive = setInterval(() => {
+    if (!runId) return;
+    runWedgeTick({
+      store,
+      runId,
+      state: wedgeState,
+      liveness: () => manager.runLiveness(runId as string),
+      settle,
+      clearKeepAlive: () => clearInterval(keepAlive),
+    });
+  }, RUN_KEEPALIVE_MS);
+
   const run = manager.startRun(workflow, { task, model, author: localCliAuthor('cli-run') });
+  runId = run.id;
   // `review` is terminal here too (spec 009) — headless runs must not hang on
   // the GUI's review gate; the diff waits on the task branch/cockpit instead.
-  const final = await new Promise<string>((resolveStatus) => {
-    store.on('run', (r) => {
-      if (r.id === run.id && ['done', 'review', 'failed', 'cancelled'].includes(r.status)) resolveStatus(r.status);
-    });
+  const onRun = (r: import('@loki-labs/better-cezar-contract').RunRecord): void => {
+    if (r.id === run.id && ['done', 'review', 'failed', 'cancelled'].includes(r.status)) settle(r.status);
+  };
+  store.on('run', onRun);
+  const final = await new Promise<import('@loki-labs/better-cezar-contract').RunStatus>((resolveStatus) => {
+    resolveFinal = resolveStatus;
+    const current = store.getRun(run.id);
+    if (pendingFinal) settle(pendingFinal);
+    else if (current && ['done', 'review', 'failed', 'cancelled'].includes(current.status)) settle(current.status);
+  }).finally(() => {
+    clearInterval(keepAlive);
+    process.off('beforeExit', beforeExit);
+    store.off('run', onRun);
   });
   store.flush();
   const record = store.getRun(run.id);

@@ -751,6 +751,17 @@ const SPEC_TO_DEPLOY_STEP_MODEL = 'sonnet';
 const SPEC_AUTHORING_MODEL = 'opus';
 
 /**
+ * **CORRECTED 2026-08-24 (`.ai/specs/2026-08-24-codex-only-default-workflow.md`):** only `spec`
+ * still pins `runner: 'claude'` here. `review-spec` moved to `runner: 'codex'`
+ * (`CODEX_REVIEW`/`gpt-5.6-sol` at `xhigh`, Claude opus kept only as its `byRunner.claude`
+ * fallback) per `.ai/specs/2026-08-24-default-workflow-ten-stages.md` D1, so "these two steps are
+ * opus, on Claude" and "the other six steps carry no runner" below are both stale — it is one step
+ * pinned to Claude, one pinned to codex, and seven of nine carrying no runner at all. See
+ * `pinWorkflowRunner`/`SPEC_TO_DEPLOY_CODEX_NAME` below for the opt-in sibling that pins all nine
+ * to codex, `spec` included.
+ *
+ * Original text follows, unedited:
+ *
  * `spec` and `review-spec` pin the RUNNER as well as the model, and the runner pin is what makes
  * "always opus" true rather than aspirational.
  *
@@ -834,6 +845,16 @@ const CODEX_MECHANICAL = { model: 'gpt-5.6-luna', effort: 'medium' } as const;
 const CODEX_WRITE = { model: 'gpt-5.6-luna', effort: 'high' } as const;
 
 /**
+ * **CORRECTED 2026-08-24 (`.ai/specs/2026-08-24-codex-only-default-workflow.md`):** the claim
+ * below was already half-false when written — `spec`'s `byRunner: { codex: CODEX_COMPLEX }` names
+ * this row directly (see `SPEC_TO_DEPLOY_WORKFLOW`'s `spec` step) — and `review-spec` has pinned
+ * `runner: 'codex'`, not `'claude'`, since `.ai/specs/2026-08-24-default-workflow-ten-stages.md`
+ * D1. `spec`'s `runner: SPEC_AUTHORING_RUNNER` pin was the one thing still keeping this row
+ * unreachable on a codex run; `pinWorkflowRunner`/`SPEC_TO_DEPLOY_CODEX_NAME` below derive an
+ * opt-in sibling that drops it, so `CODEX_COMPLEX` is live on that sibling's `spec` step.
+ *
+ * Original text follows, unedited:
+ *
  * The fourth row of the owner's table — *"Complex bug, architecture, auth, payments, migrations"*.
  *
  * No `spec-to-deploy` step names it, which is not an oversight: that chain splits the complex work
@@ -1457,6 +1478,13 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         'Original task, for context:',
         '{{task}}',
         '',
+        'Read `.ai/deploy-targets.json` first, if it exists. A target with `"manual": true` is one a',
+        'PERSON deploys, for the reason its `manualReason` gives. You must NOT deploy, activate,',
+        'restart, flip or otherwise ship it, and you must not work around it. Deploy only the targets',
+        'where `manual` is absent or false. If every target is manual, deploy nothing and say so in',
+        'your report: the step will park for a human, and that parked state is the correct outcome,',
+        'not a failure to route around.',
+        '',
         'First DISCOVER how this repo deploys, then run it:',
         '- Look for a deploy script (package.json `deploy`/`release`/`publish`, a `scripts/deploy*`,',
         '  a Makefile target, `wrangler deploy`, a CI/deploy doc in the repo or its knowledge base).',
@@ -1493,3 +1521,38 @@ export const DEFAULT_WORKFLOW_NAME = SPEC_TO_DEPLOY_WORKFLOW.name;
  *  (e.g. a repo shipped no catalog and the built-in registry was somehow empty). Pairs with
  *  {@link DEFAULT_WORKFLOW_NAME}. */
 export const DEFAULT_WORKFLOW: WorkflowDef = SPEC_TO_DEPLOY_WORKFLOW;
+
+/**
+ * The codex-pinned sibling of `spec-to-deploy` (`.ai/specs/2026-08-24-codex-only-default-
+ * workflow.md`, D1): every agent step of `base`, pinned to `runner`, so the chain's own name is
+ * true regardless of `input.runner`, `config.defaultRunner`, or which account a wildcard pool
+ * resolves to. A `check` step (no `runner` to pin) passes through untouched.
+ *
+ * PURE — `base` is not mutated, and every field other than `runner` is carried over unchanged
+ * (V2 asserts this as an identity: strip `runner` from a derived step and it deep-equals the base
+ * step). `model` is deliberately left as authored rather than stripped — `resolveStepModel` never
+ * reads it once `byRunner[runner]` names a model, which every `spec-to-deploy` step does today.
+ *
+ * Derivation, not a second literal, is the point: every future edit to `base` (prompts,
+ * `allowedTools`, a tenth stage) reaches the derived workflow automatically, so the two cannot
+ * silently fork the way two independently maintained step lists would.
+ */
+export function pinWorkflowRunner(
+  base: WorkflowDef,
+  runner: RunnerId,
+  over: Partial<Pick<WorkflowDef, 'name' | 'description'>>,
+): WorkflowDef {
+  return {
+    ...base,
+    ...over,
+    steps: base.steps.map((step) => (stepKind(step) === 'agent' ? { ...step, runner } : step)),
+  };
+}
+
+/** The `-codex` sibling's name suffix (`.ai/specs/2026-08-24-codex-only-default-workflow.md`,
+ *  D1/D5) — the identity on the wire, in `RunRecord.workflow`, and the `--workflow` CLI flag. */
+export const CODEX_ONLY_WORKFLOW_SUFFIX = '-codex';
+
+/** `spec-to-deploy-codex` — every agent step of {@link SPEC_TO_DEPLOY_WORKFLOW} pinned to codex.
+ *  See {@link pinWorkflowRunner} and `loadWorkflows` (`workflows/load.ts`), which registers it. */
+export const SPEC_TO_DEPLOY_CODEX_NAME = `${SPEC_TO_DEPLOY_WORKFLOW.name}${CODEX_ONLY_WORKFLOW_SUFFIX}`;

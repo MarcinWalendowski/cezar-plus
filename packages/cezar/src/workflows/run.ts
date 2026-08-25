@@ -123,7 +123,7 @@ import {
   discardWorkspaceWorktrees,
   materializeWorkspaceWorktrees,
 } from '../workspace/workspace-worktrees.ts';
-import type { PendingApproval, PendingHandoff, TestAttestation, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
+import type { PendingApproval, PendingHandoff, TestAttestation, TestAttestationProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
@@ -146,6 +146,11 @@ import {
 import { classifyTask } from '../task-classifier.ts';
 
 const CHECK_OUTPUT_CAP = 20_000;
+
+/** What a test/shipped attestation capture reports back to the step loop, so a git failure in any
+ * granted worktree makes the step red instead of silently erasing the prior evidence and leaving
+ * the caller to mark 'done' unconditionally. */
+type AttestationCapture = { ok: true } | { ok: false; reason: string };
 
 /**
  * The workflow "▶ Run" turns a filed todo into (`server.ts`'s `POST /todos/:id/start`): a
@@ -1539,6 +1544,21 @@ export class RunManager {
     // Persist the full definition so a queued run survives a restart (#367) —
     // ad-hoc "(planned)" chains exist nowhere else to re-resolve from.
     this.store.updateRun(run.id, { workflowDef: workflow });
+    // Name the number now (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, Analytics): is
+    // anyone picking the codex chain, and how far does `input.runner` (the engine pill) survive
+    // before pool resolution can override it (`run.ts:5054-5068`)? Emitted at CREATION, not from
+    // `execute()`: `execute` re-enters on every reattachment and chain re-entry
+    // (`pump`/`reattachBrokeredRun`), which would turn "once per run" into a silent overcount on
+    // exactly the long, interrupted runs a rate most needs to count honestly. `startRun` holds no
+    // `emit` closure, so this writes the way `recordResourceKill` already does.
+    this.store.appendEvent(run.id, {
+      type: 'metric',
+      name: 'run.workflow.selected',
+      runId: run.id,
+      workflow: workflow.name,
+      requestedRunner: input.runner,
+      stepCount: workflow.steps.length,
+    });
     // Initial pasted images must be visible while the run is still queued (#612),
     // and must survive a restart before a slot opens. Persist them before the job
     // enters `pendingJobs`; `hydrateQueuedInput` reconstructs their content blocks
@@ -3169,6 +3189,21 @@ export class RunManager {
           `this step asks for ${step.model ? `${step.model} on ` : ''}${pinned}, and every ${pinned} account is out of quota — ` +
           `running on ${accountUsageKey(choice.provider, choice.accountId)} instead`,
       });
+      // Named now (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, Analytics), alongside
+      // the note above: nine steps can downgrade on `spec-to-deploy-codex` where the default chain
+      // has two, so the promise is degraded LOUDLY rather than silently. `reason` is a named field
+      // rather than an implied constant so a future second downgrade cause does not silently merge
+      // into the quota number — `downgradePinnedRunner` fires on quota exhaustion only, today.
+      this.store.appendEvent(runId, {
+        type: 'metric',
+        stepId: step.id,
+        name: 'run.step.runner_downgraded',
+        runId,
+        workflow: this.store.getRun(runId)?.workflow,
+        plannedRunner: pinned,
+        actualRunner: choice.provider,
+        reason: 'quota',
+      });
       return choice.provider as RunnerId;
     } catch {
       return undefined;
@@ -3666,6 +3701,21 @@ export class RunManager {
 
   isActive(runId: string): boolean {
     return this.active.has(runId) || this.starting.has(runId) || this.queue.includes(runId);
+  }
+
+  /**
+   * Whether a run can still make progress in this process. This is intentionally wider than
+   * isActive(), whose narrower answer controls server-side mutations.
+   */
+  runLiveness(runId: string): { live: boolean; reason: string } {
+    if (this.active.has(runId)) return { live: true, reason: 'active step chain' };
+    if (this.starting.has(runId)) return { live: true, reason: 'starting' };
+    if (this.queue.includes(runId)) return { live: true, reason: 'queued' };
+    if (this.waiting.has(runId)) return { live: true, reason: 'waiting for input' };
+    if (this.monitoring.has(runId)) return { live: true, reason: 'monitoring' };
+    if (this.autoResumeTimers.has(runId)) return { live: true, reason: 'auto-resume scheduled' };
+    if (this.pendingJobs.has(runId)) return { live: true, reason: 'pending job' };
+    return { live: false, reason: 'no active step, scheduled resume, or queued job' };
   }
 
   /**
@@ -5373,6 +5423,12 @@ export class RunManager {
       });
       emit({ type: 'step-start', stepId: step.id, name: step.name ?? step.id, kind, iteration });
 
+      const runFault = process.env.CEZ_RUN_FAULT;
+      const [faultName, faultStepId] = runFault?.split(':', 2) ?? [];
+      if (faultName === 'stall-step' && kind === 'agent' && (!faultStepId || faultStepId === step.id)) {
+        await new Promise<never>(() => {});
+      }
+
       if (kind === 'agent') {
         // The last agent step of the workflow is interactive: after its turn
         // the session stays open for follow-ups until finish/idle/cancel.
@@ -5638,8 +5694,10 @@ export class RunManager {
           }
         }
 
-        if (step.id === 'run-tests') await this.recordTestAttestation(runId, state, step.id, emit);
-        if (step.id === 'commit-push') await this.recordShippedAttestation(runId, state, step.id, emit);
+        {
+          const capture = await this.captureAttestationOrFail(runId, state, step, emit);
+          if (!capture.ok) { runError = capture.runError; break; }
+        }
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -5680,8 +5738,10 @@ export class RunManager {
           runError = `step "${step.id}" did not meet its post-condition: ${verdict.detail}`;
           break;
         }
-        if (step.id === 'run-tests') await this.recordTestAttestation(runId, state, step.id, emit);
-        if (step.id === 'commit-push') await this.recordShippedAttestation(runId, state, step.id, emit);
+        {
+          const capture = await this.captureAttestationOrFail(runId, state, step, emit);
+          if (!capture.ok) { runError = capture.runError; break; }
+        }
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -5831,7 +5891,10 @@ export class RunManager {
         }
         const next: PendingHandoff = {
           ...pending,
-          reason: checked.detail.slice(0, 2_000),
+          // A manual-deploy handoff carries a concise `handoff.reason`; a plain red recheck with
+          // NO handoff (a non-manual target failing on the same recheck, `:348-353`) does not, and
+          // `detail` is the only text there is to show in that case: the fallback is load-bearing.
+          reason: (checked.handoff?.reason ?? checked.detail).slice(0, 2_000),
           ...(checked.handoff?.kind ? { kind: checked.handoff.kind } : {}),
           ...(checked.handoff?.targets ? { targets: checked.handoff.targets.slice(0, 50) } : {}),
         };
@@ -5862,13 +5925,18 @@ export class RunManager {
     return outcome;
   }
 
-  /** Capture the final green test tree without touching the repository's real Git index. */
+  /** Capture the final green test tree without touching the repository's real Git index. A git
+   * failure anywhere — scratch or any granted project worktree — reports `ok: false` rather than
+   * silently returning, so the caller can make `run-tests` red instead of leaving the prior
+   * attestation erased and the step green with nothing behind it. */
   private async recordTestAttestation(
     runId: string,
     state: ActiveRun,
     stepId: string,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
-  ): Promise<void> {
+  ): Promise<AttestationCapture> {
+    // A failed fresh capture must not leave an older green tree authorizing this test attempt.
+    this.store.updateRun(runId, { testAttestation: undefined });
     const temp = await mkdtemp(join(tmpdir(), 'cez-test-attestation-'));
     const index = join(temp, 'index');
     try {
@@ -5876,40 +5944,118 @@ export class RunManager {
       const added = await runGit(state.cwd, ['add', '-A'], env);
       const tree = added.ok ? await runGit(state.cwd, ['write-tree'], env) : added;
       if (!tree.ok || !tree.stdout.trim()) {
-        emit({ type: 'note', stepId, message: `could not record test attestation: ${tree.stderr.trim() || 'git write-tree failed'}` });
-        return;
+        const reason = `could not record test attestation: ${tree.stderr.trim() || 'git write-tree failed'}`;
+        emit({ type: 'note', stepId, message: reason });
+        return { ok: false, reason };
       }
       const head = await runGit(state.cwd, ['rev-parse', 'HEAD']);
+      const run = this.store.getRun(runId);
+      const workspaceWorktrees = [...(run?.workspaceWorktrees ?? [])]
+        .filter((worktree) => !worktree.reclaimedAt)
+        .sort((a, b) => a.root.localeCompare(b.root));
+      const projects: NonNullable<TestAttestation['projects']> = [];
+      for (const worktree of workspaceWorktrees) {
+        const projectTemp = await mkdtemp(join(tmpdir(), 'cez-test-attestation-project-'));
+        try {
+          const projectEnv = { ...process.env, GIT_INDEX_FILE: join(projectTemp, 'index') };
+          const projectAdded = await runGit(worktree.worktreePath, ['add', '-A'], projectEnv);
+          const projectTree = projectAdded.ok
+            ? await runGit(worktree.worktreePath, ['write-tree'], projectEnv)
+            : projectAdded;
+          const projectHead = await runGit(worktree.worktreePath, ['rev-parse', 'HEAD']);
+          if (!projectTree.ok || !projectTree.stdout.trim()) {
+            const reason = `could not record test attestation for ${worktree.root}: ${projectTree.stderr.trim() || 'git write-tree failed'}`;
+            emit({ type: 'note', stepId, message: reason });
+            return { ok: false, reason };
+          }
+          projects.push({
+            root: worktree.root,
+            worktreePath: worktree.worktreePath,
+            treeSha: projectTree.stdout.trim(),
+            ...(projectHead.ok ? { headSha: projectHead.stdout.trim() } : {}),
+          });
+        } finally {
+          rmSync(projectTemp, { recursive: true, force: true });
+        }
+      }
       const attestation: TestAttestation = {
         stepId,
         treeSha: tree.stdout.trim(),
         ...(head.ok ? { headSha: head.stdout.trim() } : {}),
+        ...(projects.length > 0 ? { projects } : {}),
         at: new Date().toISOString(),
       };
       this.store.updateRun(runId, { testAttestation: attestation });
-      emit({ type: 'note', stepId, message: `tests attested tree ${attestation.treeSha}` });
+      emit({
+        type: 'note',
+        stepId,
+        message: projects.length > 0
+          ? `tests attested ${projects.length} project trees`
+          : `tests attested tree ${attestation.treeSha}`,
+      });
+      return { ok: true };
     } finally {
       rmSync(temp, { recursive: true, force: true });
     }
   }
 
+  /** Stamp the shipped SHA onto the attestation `recordTestAttestation` captured. A project whose
+   * `HEAD` cannot be resolved is reported as a failure naming that project's root, rather than
+   * silently kept without a `shippedSha` while the step still reports success. */
   private async recordShippedAttestation(
     runId: string,
     state: ActiveRun,
     stepId: string,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
-  ): Promise<void> {
+  ): Promise<AttestationCapture> {
     const attestation = this.store.getRun(runId)?.testAttestation;
-    if (!attestation) return;
+    if (!attestation) return { ok: true };
     const head = await runGit(state.cwd, ['rev-parse', 'HEAD']);
     if (!head.ok || !head.stdout.trim()) {
-      emit({ type: 'note', stepId, message: `could not record shipped SHA: ${head.stderr.trim() || 'HEAD is unavailable'}` });
-      return;
+      const reason = `could not record shipped SHA: ${head.stderr.trim() || 'HEAD is unavailable'}`;
+      emit({ type: 'note', stepId, message: reason });
+      return { ok: false, reason };
+    }
+    let projectFailure: string | undefined;
+    const projects = attestation.projects
+      ? await Promise.all(attestation.projects.map(async (project): Promise<TestAttestationProject> => {
+          const projectHead = await runGit(project.worktreePath, ['rev-parse', 'HEAD']);
+          if (!projectHead.ok || !projectHead.stdout.trim()) {
+            projectFailure ??= `${project.root}: could not record shipped SHA: ${projectHead.stderr.trim() || 'HEAD is unavailable'}`;
+            return project;
+          }
+          return { ...project, shippedSha: projectHead.stdout.trim() };
+        }))
+      : undefined;
+    if (projectFailure) {
+      emit({ type: 'note', stepId, message: projectFailure });
+      return { ok: false, reason: projectFailure };
     }
     this.store.updateRun(runId, {
-      testAttestation: { ...attestation, shippedSha: head.stdout.trim() },
+      testAttestation: { ...attestation, shippedSha: head.stdout.trim(), ...(projects ? { projects } : {}) },
     });
     emit({ type: 'note', stepId, message: `shipped revision attested at ${head.stdout.trim()}` });
+    return { ok: true };
+  }
+
+  /** The one place `run-tests`/`commit-push` route through to capture an attestation, so the two
+   * step-loop branches that call it cannot drift (spec 2026-08-25-workspace-revision-attestation,
+   * Phase 3a item 4) and a capture failure stops the run the way a failed post-condition does —
+   * not with an unconditional `finishStep(..., 'done', ...)`. */
+  private async captureAttestationOrFail(
+    runId: string,
+    state: ActiveRun,
+    step: WorkflowStepDef,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): Promise<{ ok: true } | { ok: false; runError: string }> {
+    let capture: AttestationCapture | undefined;
+    if (step.id === 'run-tests') capture = await this.recordTestAttestation(runId, state, step.id, emit);
+    if (step.id === 'commit-push') capture = await this.recordShippedAttestation(runId, state, step.id, emit);
+    if (capture && !capture.ok) {
+      this.finishStep(runId, step.id, 'failed', capture.reason, emit);
+      return { ok: false, runError: `step "${step.id}" could not record its attestation: ${capture.reason}` };
+    }
+    return { ok: true };
   }
 
   // ---- the human approval gate (spec 2026-08-20-split-steps-spec-review-and-approval-gate, P3) --
@@ -6270,10 +6416,15 @@ export class RunManager {
 
     // A resumed step keeps the session id it already owns — that id IS the work done so far.
     const sessionId = resumeFrom?.sessionId ?? randomUUID();
-    // Never blocked (`.ai/specs/2026-08-23-never-block-a-task.md`). A step may pin its own runner,
-    // and `spec-to-deploy` pins `runner: claude` + `opus` on `spec`/`review-spec` from the owner's
-    // 2026-08-22 "writing spec + spec review should be by opus always". When EVERY account of that
-    // provider is out of quota, that pin has nowhere to go and the step used to die there.
+    // Never blocked (`.ai/specs/2026-08-23-never-block-a-task.md`). A step may pin its own runner.
+    // CORRECTED 2026-08-24 (`.ai/specs/2026-08-24-codex-only-default-workflow.md`): this used to
+    // say "`spec-to-deploy` pins `runner: claude` + `opus` on `spec`/`review-spec`" from the
+    // owner's 2026-08-22 "writing spec + spec review should be by opus always" — stale since
+    // `.ai/specs/2026-08-24-default-workflow-ten-stages.md` D1 moved `review-spec` to `runner:
+    // 'codex'`. Today only `spec` pins Claude; the opt-in `spec-to-deploy-codex` sibling
+    // (`pinWorkflowRunner` in `workflows/types.ts`) pins all nine steps to codex instead. When
+    // EVERY account of a pinned provider is out of quota, that pin has nowhere to go and the step
+    // used to die there.
     //
     // The owner's 2026-08-23 ruling is that availability outranks the pin: proceed on whatever is
     // available and say so. So the quality pin is now a preference with a fallback, not a

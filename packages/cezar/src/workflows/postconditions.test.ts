@@ -289,6 +289,65 @@ describe('all-services-deployed', () => {
     expect(result.detail).toContain('manual deployment required');
     expect(result.handoff?.reason).toContain('activate it by hand');
   });
+
+  /**
+   * spec `.ai/specs/2026-08-24-manual-deploy-not-a-bug.md` D2: this is the exact shape that
+   * produced the task the spec fixes, one manual target red and one target green, and it is the
+   * shape a naive fix gets wrong (iterating `parsed.targets` quietly re-admits the passing one).
+   * `handoff.reason` is the card's text; `detail` is the full log and must lose nothing.
+   */
+  it('the manual-deploy handoff.reason names only the failing manual target, not the probe source or a passing target', async () => {
+    declare([
+      {
+        name: 'cezar service (backend)',
+        probe: 'echo "live=9c896e32 head=e38cb619, the running server is NOT serving this HEAD"; exit 1',
+        manual: true,
+        manualReason: 'a person activates cezar, not an agent',
+      },
+      { name: 'cezar UI (web)', probe: 'true', manual: true, manualReason: 'a person activates cezar, not an agent' },
+    ]);
+
+    const result = await allServicesDeployed({ cwd: repo });
+
+    expect(result.ok).toBe(false);
+    expect(result.handoff?.targets).toEqual(['cezar service (backend)']);
+
+    const reason = result.handoff?.reason ?? '';
+    // The failing target's own name, its manualReason and its probe's stdout.
+    expect(reason).toContain('cezar service (backend)');
+    expect(reason).toContain('a person activates cezar, not an agent');
+    expect(reason).toContain('live=9c896e32 head=e38cb619');
+    // The passing target is absent, and neither probe's shell source leaks in.
+    expect(reason).not.toContain('cezar UI (web)');
+    expect(reason).not.toContain('echo "live=9c896e32');
+
+    // `detail` is the full log: both targets, both probe sources, unchanged.
+    expect(result.detail).toContain('cezar service (backend)');
+    expect(result.detail).toContain('cezar UI (web)');
+    expect(result.detail).toContain('echo "live=9c896e32');
+  });
+
+  // Regression test for the truncation that produced the task: cezar's own two real probes, run
+  // through the same manual-deploy shape, must keep `handoff.reason` well under the 2,000-character
+  // slice `awaitHandoff` applies.
+  it('handoff.reason stays under 2000 characters with cezar-sized real probes', async () => {
+    const bigProbe = (label: string) =>
+      [
+        'set -u',
+        `# ${label} probe, sized like cezar's own ~1,400/~1,100 character bash probes.`,
+        ...Array.from({ length: 20 }, (_, i) => `# padding line ${i} to simulate a realistic probe body`),
+        'echo "diagnostic: the running server is NOT serving this HEAD"',
+        'exit 1',
+      ].join('\n');
+    declare([
+      { name: 'cezar service (backend)', probe: bigProbe('backend'), manual: true, manualReason: 'activate it by hand' },
+      { name: 'cezar UI (web)', probe: bigProbe('ui').replace('exit 1', 'exit 0'), manual: true, manualReason: 'activate it by hand' },
+    ]);
+
+    const result = await allServicesDeployed({ cwd: repo });
+
+    expect(result.handoff?.reason.length).toBeLessThan(2_000);
+  });
 });
 
 describe('tested-revision-shipped', () => {
@@ -357,6 +416,101 @@ describe('tested-revision-shipped', () => {
         attestation: { stepId: 'run-tests', treeSha: 'deadbeef', at: new Date().toISOString() },
       }),
     ).resolves.toMatchObject({ ok: false });
+  });
+
+  it('checks workspace project trees instead of scratch runner artifacts, across two projects', async () => {
+    const projectA = mkdtempSync(join(tmpdir(), 'cez-postcond-project-a-'));
+    const projectB = mkdtempSync(join(tmpdir(), 'cez-postcond-project-b-'));
+    try {
+      await git(projectA, ['init', '-b', 'main']);
+      writeFileSync(join(projectA, 'a.ts'), 'export const value = 1;\n');
+      await git(projectA, ['add', '.']);
+      await git(projectA, ['commit', '-m', 'project seed']);
+      const seedA = await gitText(projectA, ['rev-parse', 'HEAD']);
+      const treeA = await gitText(projectA, ['rev-parse', 'HEAD^{tree}']);
+
+      await git(projectB, ['init', '-b', 'main']);
+      writeFileSync(join(projectB, 'b.ts'), 'export const value = 1;\n');
+      await git(projectB, ['add', '.']);
+      await git(projectB, ['commit', '-m', 'project seed']);
+      const seedB = await gitText(projectB, ['rev-parse', 'HEAD']);
+      const treeB = await gitText(projectB, ['rev-parse', 'HEAD^{tree}']);
+
+      // The four scratch-only incident artifacts live in the run cwd, never in either project —
+      // this is what P3's original defect attested by mistake (Problem, run `2914e8d5`).
+      for (const artifact of [
+        '.cezar-control-path',
+        '.cezar-gate-path',
+        'cezar-control-171c8647.log',
+        'cezar-gates-171c8647.log',
+      ]) writeFileSync(join(repo, artifact), 'scratch only\n');
+
+      const attestation = {
+        stepId: 'run-tests',
+        treeSha: '0'.repeat(40),
+        at: new Date().toISOString(),
+        projects: [
+          { root: '/projects/a', worktreePath: projectA, treeSha: treeA },
+          { root: '/projects/b', worktreePath: projectB, treeSha: treeB },
+        ],
+      };
+      await expect(testedRevisionShipped({ cwd: repo, stepId: 'commit-push', attestation })).resolves.toMatchObject({
+        ok: true,
+        detail: expect.stringContaining('all 2 project HEADs'),
+      });
+
+      // Record-only edits in BOTH projects at once stay green (item 3, unchanged behaviour).
+      mkdirSync(join(projectA, '.ai', 'specs'), { recursive: true });
+      writeFileSync(join(projectA, '.ai', 'specs', 'record.md'), 'record\n');
+      await git(projectA, ['add', '.']);
+      await git(projectA, ['commit', '-m', 'record-only A']);
+      mkdirSync(join(projectB, '.ai', 'specs'), { recursive: true });
+      writeFileSync(join(projectB, '.ai', 'specs', 'record.md'), 'record\n');
+      await git(projectB, ['add', '.']);
+      await git(projectB, ['commit', '-m', 'record-only B']);
+      await expect(testedRevisionShipped({ cwd: repo, stepId: 'commit-push', attestation })).resolves.toMatchObject({
+        ok: true,
+      });
+      await git(projectA, ['reset', '--hard', seedA]);
+      await git(projectB, ['reset', '--hard', seedB]);
+
+      // A source change in project A ONLY fails, naming A's root and path and NOT B's (item 2).
+      writeFileSync(join(projectA, 'a.ts'), 'export const value = 2;\n');
+      await git(projectA, ['add', '.']);
+      await git(projectA, ['commit', '-m', 'post-test source A']);
+      const changedA = await testedRevisionShipped({ cwd: repo, stepId: 'commit-push', attestation });
+      expect(changedA.ok).toBe(false);
+      expect(changedA.detail).toContain('/projects/a: a.ts');
+      expect(changedA.detail).not.toContain('/projects/b:');
+      await git(projectA, ['reset', '--hard', seedA]);
+
+      // Mirrored: a change in project B ONLY fails, naming B's root and path and NOT A's.
+      writeFileSync(join(projectB, 'b.ts'), 'export const value = 2;\n');
+      await git(projectB, ['add', '.']);
+      await git(projectB, ['commit', '-m', 'post-test source B']);
+      const changedB = await testedRevisionShipped({ cwd: repo, stepId: 'commit-push', attestation });
+      expect(changedB.ok).toBe(false);
+      expect(changedB.detail).toContain('/projects/b: b.ts');
+      expect(changedB.detail).not.toContain('/projects/a:');
+    } finally {
+      rmSync(projectA, { recursive: true, force: true });
+      rmSync(projectB, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when an attested workspace worktree is gone', async () => {
+    const result = await testedRevisionShipped({
+      cwd: repo,
+      stepId: 'commit-push',
+      attestation: {
+        stepId: 'run-tests',
+        treeSha: '0'.repeat(40),
+        at: new Date().toISOString(),
+        projects: [{ root: '/projects/gone', worktreePath: join(repo, 'gone'), treeSha: '1'.repeat(40) }],
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain('/projects/gone');
   });
 });
 

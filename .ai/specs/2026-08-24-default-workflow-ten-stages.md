@@ -1,6 +1,6 @@
 # The default workflow becomes ten stages
 
-**Status:** Partial 2026-08-24. Implementation exists in the task worktree. Typecheck and the focused 57-test gate pass, while the full suite has 9 reproduced baseline-failure files and 20 tests; commit and push are blocked, and runtime QA has not run. QA Needed.
+**Status:** Partial 2026-08-25. The remaining Phase 5 prompt item and Phase 6 item 1 landed in `.ai/specs/2026-08-24-manual-deploy-not-a-bug.md` as commit `ea40c7a1`, landed on the base branch. Runtime QA for that follow-up remains pending. **Note 2026-08-24:** the last item of Phase 5 (the `deploy` step prompt gaining a manual-target refusal) and item 1 of Phase 6 (the `AGENTS.md:7`/`:12` correction) did not land with the rest of this spec; both landed instead in `.ai/specs/2026-08-24-manual-deploy-not-a-bug.md`, which also fixed the handoff-card legibility defect their absence exposed.
 **Date:** 2026-08-24
 **Repo:** `cezar`
 **Brief:** `.ai/specs/briefs/2026-08-24-default-workflow-revision.md` (KB `specs-8512200feb66`)
@@ -91,7 +91,15 @@ change, not a defect repair, and it contradicts the 2026-08-22 instruction quote
 `types.ts:751-756` ("writing spec + spec review should be by opus always"). It has to be recorded
 as a correction of that instruction, not appended beside it.
 
-### P3. Nothing proves the tested revision is the shipped revision
+### P3. Nothing proves the tested revision is the shipped revision, for a workspace run's own cwd
+
+**CORRECTED 2026-08-25:** this gap is closed for workspace runs by
+`.ai/specs/2026-08-25-workspace-revision-attestation.md`, which adds an optional `projects` array
+to `TestAttestation` so a workspace run's `run-tests`/`commit-push` chain attests and verifies each
+granted project worktree's own `HEAD`, not only the run's scratch cwd. This section's original
+diagnosis is preserved below unchanged; it remains the record of the gap that fix closes, and of
+why it existed. No sha is named here — the shipped revision is recorded in that spec and in git
+log, not in this heading.
 
 `run-tests` cannot commit or push (`types.ts:1199-1200`, the allowlist borrowed from
 `AUTONOMOUS_IMPLEMENTATION_WORKFLOW`), and `commit-push`'s prompt does not ask it to re-run
