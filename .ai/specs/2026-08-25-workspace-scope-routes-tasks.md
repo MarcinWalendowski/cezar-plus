@@ -1,9 +1,11 @@
 # Workspace scope routes tasks into projects; it stops editing them
 
-> **Status:** partial — **Phases 1–3 implemented 2026-08-25, QA Needed** (V8, the runtime E2E on
-> production, has not run; V7's on-the-box double gate has not run either — see *Implementation
-> status* below for exactly what was and was not executed). **Phase 4 not started and cannot be:
-> it is gated on the worktree drain.** · **Date:** 2026-08-25 · **Owner instruction, verbatim:**
+> **Status:** partial — **Phases 1–3 implemented, shipped and LIVE 2026-08-25** (`dc64b741`,
+> release `20260825T104007Z-dc64b741`), **still QA Needed.** The code was verified running on
+> production — the loader serves `input-to-tasks`, no step holds a write tool, the route defaults,
+> the worktree call is gone — but **nobody has driven the screen**, and V7's on-the-box double gate
+> has not run. See *Implementation status* below for exactly what was and was not executed.
+> **Phase 4 not started and cannot be: it is gated on the worktree drain.** · **Date:** 2026-08-25 · **Owner instruction, verbatim:**
 > *"when creating a task we can by default set scope to workspace and the only available workflow
 > there should be like: input-to-tasks, where retrieve the context across all workspace (like we are
 > doing now in our default workflow). The workflow steps should be: 1. Gather the context. 2. Create
@@ -431,9 +433,16 @@ identical before and after. Until V8 has passed this is **QA Needed**, not Done.
 These are consequences of the defect, not of the fix, and should be handled whether or not the spec
 lands:
 
-- `/var/lib/cezar/loki-labs/cezar` carries 13 uncommitted/staged entries on `main`, including two
+- ~~`/var/lib/cezar/loki-labs/cezar` carries 13 uncommitted/staged entries on `main`, including two
   staged spec files, left by the in-place runs of 2026-08-24. Needs a human to sort and commit or
-  discard — an agent cannot know which run intended what.
+  discard — an agent cannot know which run intended what.~~ **Done 2026-08-25.** The count was 13
+  when written and had drained to 1 by the time it was acted on. The two staged specs were recovered
+  from dangling autosave `a08dcf85` and pushed as `8d5274c3`
+  (`2026-08-25-verify-bulk-start-release.md`, `briefs/2026-08-25-bulk-task-starts.md`); the one
+  remaining dirty file was a spec renumbering `cezar` itself had written. `.e2e-bulk-start.cjs` was
+  deliberately left out as a run's scratch fixture. The live checkout is now at **0 dirty entries**.
+  Note the shape for next time: the list was *already stale when read* — verify a cleanup list
+  against the tree before acting on any row of it.
 - 21 worktrees / 6.6 GB in `cezar` and 7 / 3.9 GB in `chat`, plus 89 `cez/*` branches, several
   outside the managed `cez/<id8>` shape (`cez/3352a1e4-a574-40fd-a84e-08eff320995a`,
   `cez/cd439910-autosave`, `cez/bcc059a6-pre-rebase-20260823`, `cez/per-task-prompt-drafts`). The
@@ -569,7 +578,44 @@ description of the route was corrected in place with the superseded text kept be
 
   None of the four failures this change originally introduced in `workflows/ workspace/ runs/`
   remains.
-- **V8 (runtime E2E on production)** — not run. **This is why the spec is QA Needed and not Done.**
+- **V8 (runtime E2E on production)** — **partially executed.** The code is live and was verified
+  live; what remains unverified is the *screen*. See below.
+
+### Verification — executed ON PRODUCTION (2026-08-25, release `20260825T104007Z-dc64b741`)
+
+Shipped as `dc64b741` on `origin/main`, deployed blue-green to `prod-host`, 95 ms cutover.
+
+The deploy printed `deploy: not inside cezar.service's cgroup — the restart cannot reach this
+process`, which is the "new CLI tree, old resident server" shape — a deploy that reads like a whole
+one while the running process still serves the old code. So the running process was asked directly
+rather than the symlink believed:
+
+- **The process serves the new sha.** `GET /api/v1/ready` → `releaseId 20260825T104007Z-dc64b741`,
+  `sha dc64b741…`, `dirty:false`, `activatedAt 10:40:13Z`; `cezar.service`
+  `ExecMainStartTimestamp` matches, so the restart did happen.
+- **The loader serves the workflow.** `loadWorkflows('/var/lib/cezar/loki-labs')` on the live dist
+  returns `input-to-tasks (built-in)` alongside the four pre-existing ones.
+- **No step can write, on the live definition.** Every step's `allowedTools` read off the deployed
+  module: `context`/`file` = `Read,Grep,Glob,Bash`, `dispatch` = `Read,Bash`; zero write tools.
+  **With a control:** the same check run against `spec-to-deploy` reports `Write,Edit`, so it is
+  capable of failing. `dispatch` carries `{{autoStart}}`.
+- **The route defaults.** The compiled line is present verbatim:
+  `body.workflow ?? (body.steps === undefined ? INPUT_TO_TASKS_NAME : undefined)`, and the
+  `autoStart` passthrough alongside it.
+- **The worktree call is gone.** The only `materializeWorkspaceWorktrees` occurrence in the live
+  `workflows/run.js` is the comment explaining its removal; the new note string is present.
+- **The CLI has the subcommand.** `cezar todo start <id> [--project] [--json]` on the box.
+- **The composer is the served bundle.** `auto-start-toggle` and `Start filed tasks` are in
+  `assets/index-Dxwbz0Xv.js`, which is the entry the server actually serves; the corrected note
+  ships and the old `"real checkouts are modified directly"` string is **absent** (0 matches).
+  `input-to-tasks` rides in the code-split `author-cell` chunk.
+
+**Still not executed, and what keeps this QA Needed:** nobody has *driven the screen*. That the
+picker offers only `input-to-tasks` at workspace scope, and that ticking **Start filed tasks**
+reaches the run, are asserted in `new-task-project.test.tsx` and proven present in the bundle, but
+not clicked in a browser against production — and an API-level check cannot verify a UI control
+(a curl cannot see a screen). No workspace run has been started on the live release either, so the
+zero-worktree property is proven at unit level and by the absent call, not by a production run.
 
 ### Phase 4 — blocked, by design
 
