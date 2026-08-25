@@ -5156,10 +5156,10 @@ export class RunManager {
     // diffs back on finish (spec 2026-08-19, extended 08-20/08-22). That is gone, and the reason is
     // not cost: isolation was OPTIONAL PER PROJECT, and its fallback was the project's LIVE
     // checkout with no lease of any kind — a workspace run deliberately takes none (see below).
-    // Measured on prod 2026-08-24, five runs were each handed `/var/lib/cezar/loki-labs/cezar`
-    // that way, grants 0–106 s apart, while `buildWorkspaceGrant`'s `isolated` flag (true whenever
-    // ANY project isolated) had their system prompts telling all five they were in a private
-    // worktree that cezar would apply back and delete.
+    // Measured in production 2026-08-24, five concurrent runs were each handed the SAME live
+    // checkout that way, grants 0–106 s apart, while `buildWorkspaceGrant`'s `isolated` flag (true
+    // whenever ANY project isolated) had their system prompts telling all five they were in a
+    // private worktree that cezar would apply back and delete.
     //
     // So a workspace run now writes NO project working tree. Its whole write surface is each
     // project's `.ai/cezar/todos.json`, via `cez todo add --project` — the real work happens in
