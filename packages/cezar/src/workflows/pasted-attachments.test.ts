@@ -151,7 +151,7 @@ describe('pasted screenshots materialize to disk and reach the agent as file pat
       steps: [{ id: 'hold', command: `${process.execPath} -e "setTimeout(() => {}, 500)"` }],
     };
     manager.startRun(holder, { author: localCliAuthor(), task: 'occupy the only slot', worktree: false });
-    const record = manager.startRun(workflow, { author: localCliAuthor(),
+    const record = manager.startRun(workflow, { author: localCliAuthor(), model: 'sonnet',
       task: 'save the pasted screenshot to disk',
       images: [image],
       worktree: false,
@@ -197,7 +197,7 @@ describe('pasted screenshots materialize to disk and reach the agent as file pat
       source: 'built-in',
       steps: [{ id: 'work', prompt: '{{task}}' }],
     };
-    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'chat with me' });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), model: 'sonnet', task: 'chat with me' });
     await waitForStatus(record.id, ['waiting']);
 
     const image: ContentBlock = {
@@ -239,7 +239,7 @@ describe('pasted screenshots materialize to disk and reach the agent as file pat
       source: 'built-in',
       steps: [{ id: 'work', prompt: '{{task}}' }],
     };
-    const record = manager.startRun(workflow, { author: localCliAuthor(), task: 'do a thing' });
+    const record = manager.startRun(workflow, { author: localCliAuthor(), model: 'sonnet', task: 'do a thing' });
     await waitForStatus(record.id, ['waiting']);
     manager.finish(record.id);
     await waitForStatus(record.id, ['done', 'review']);

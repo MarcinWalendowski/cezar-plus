@@ -8,16 +8,20 @@ import {
   CLASS_CHOICE_BY_RUNNER,
   CLAUDE_CLASS_CHOICE,
   CODEX_CLASS_CHOICE,
+  CODEX_ONLY_WORKFLOW_SUFFIX,
   DEFAULT_ALLOWED_TOOLS,
   FILE_WRITE_RECIPE,
   RECORD_READ_RECIPE,
+  SPEC_TO_DEPLOY_CODEX_NAME,
   parseReviewVerdict,
+  pinWorkflowRunner,
   resolveStepModel,
   SPEC_TO_DEPLOY_WORKFLOW,
   TASK_CLASSES,
   UNCLASSIFIABLE_TASK_CLASS,
   chainStepNote,
   skillStackOf,
+  stepKind,
   workflowDefSchema,
   workflowStepSchema,
   type WorkflowStepDef,
@@ -530,6 +534,23 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     // takes. `buildAllowedTools()` turns `Bash` + no allowlist into plain, unrestricted `Bash`.
     expect(deploy?.allowedTools).toContain('Bash');
     expect(deploy?.bashAllowlist).toBeUndefined();
+  });
+
+  /**
+   * spec `.ai/specs/2026-08-24-manual-deploy-not-a-bug.md` D1: the `deploy` step's unrestricted
+   * Bash (above) makes the manual-target gate advisory unless the prompt itself refuses. Without
+   * this paragraph an agent following "DEPLOY it" to the letter activates a target the owner marked
+   * `manual: true`, the probe goes green, and the postcondition reports success: the exact
+   * workaround the gate exists to forbid.
+   */
+  it('deploy prompt reads .ai/deploy-targets.json first and refuses a manual target', () => {
+    const deploy = stepById('deploy');
+    expect(deploy?.prompt).toContain('.ai/deploy-targets.json');
+    expect(deploy?.prompt).toContain('"manual": true');
+    expect(deploy?.prompt).toMatch(/must\s+(not|NOT)\s+deploy/);
+    expect(deploy?.prompt).toContain('work around it');
+    // The park has to be framed as correct, or the agent's own report reads it as a failure to fix.
+    expect(deploy?.prompt).toContain('park for a human');
   });
 });
 
@@ -1126,5 +1147,75 @@ describe('auto task class (2026-08-24-auto-classify-task-model)', () => {
       resolveStepModel(bare, 'codex', undefined, 1, CODEX_CLASS_CHOICE[UNCLASSIFIABLE_TASK_CLASS]),
       'the fallback must be escalatable, or a failure has nowhere to climb',
     ).toEqual({ model: 'gpt-5.6-sol', effort: 'high' });
+  });
+});
+
+/**
+ * `pinWorkflowRunner` / `spec-to-deploy-codex` (`.ai/specs/2026-08-24-codex-only-default-
+ * workflow.md`, D1–D3). V1 pins the resolved model/effort of every step of the derived workflow
+ * to the D3 table; V2 pins the derivation itself as an identity, not merely "looks similar", so a
+ * future change that turns `pinWorkflowRunner` into a copy rather than a pure `runner` rewrite
+ * fails loudly here.
+ */
+describe('pinWorkflowRunner / spec-to-deploy-codex (V1, V2)', () => {
+  const CODEX_ONLY_WORKFLOW = pinWorkflowRunner(SPEC_TO_DEPLOY_WORKFLOW, 'codex', {
+    name: SPEC_TO_DEPLOY_CODEX_NAME,
+    description: 'The default chain with every agent step pinned to codex.',
+  });
+
+  it('names the derived workflow spec-to-deploy-codex, via the shared suffix constant', () => {
+    expect(CODEX_ONLY_WORKFLOW_SUFFIX).toBe('-codex');
+    expect(SPEC_TO_DEPLOY_CODEX_NAME).toBe('spec-to-deploy-codex');
+    expect(CODEX_ONLY_WORKFLOW.name).toBe(SPEC_TO_DEPLOY_CODEX_NAME);
+  });
+
+  it('V1 — every step resolves the D3 table on codex, and spec never resolves to opus', () => {
+    const byId = Object.fromEntries(CODEX_ONLY_WORKFLOW.steps.map((s) => [s.id, s]));
+    const expected: Record<string, { model: string; effort: string | undefined }> = {
+      context: { model: 'gpt-5.6-terra', effort: 'medium' },
+      spec: { model: 'gpt-5.6-sol', effort: 'medium' },
+      'review-spec': { model: 'gpt-5.6-sol', effort: 'xhigh' },
+      implement: { model: 'gpt-5.6-luna', effort: 'xhigh' },
+      'run-tests': { model: 'gpt-5.6-luna', effort: 'medium' },
+      'commit-push': { model: 'gpt-5.6-luna', effort: 'medium' },
+      merge: { model: 'gpt-5.6-luna', effort: 'medium' },
+      document: { model: 'gpt-5.6-luna', effort: 'high' },
+      deploy: { model: 'gpt-5.6-luna', effort: 'medium' },
+    };
+    for (const [id, want] of Object.entries(expected)) {
+      const step = byId[id];
+      expect(step, id).toBeDefined();
+      expect(resolveStepModel(step!, 'codex'), id).toEqual(want);
+    }
+    expect(resolveStepModel(byId.spec!, 'codex').model, 'spec must never resolve to opus on codex').not.toBe('opus');
+  });
+
+  it('V2 — same step ids as the base workflow, in the same order', () => {
+    expect(CODEX_ONLY_WORKFLOW.steps.map((s) => s.id)).toEqual(SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => s.id));
+  });
+
+  it('V2 — every agent step is pinned to codex; no check step gains a runner it never had', () => {
+    for (const step of CODEX_ONLY_WORKFLOW.steps) {
+      if (stepKind(step) === 'agent') {
+        expect(step.runner, step.id).toBe('codex');
+      } else {
+        expect(step.runner, step.id).toBeUndefined();
+      }
+    }
+  });
+
+  it('V2 — the identity: every derived step, with runner deleted, deep-equals the base step', () => {
+    const baseById = Object.fromEntries(SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => [s.id, s]));
+    for (const derived of CODEX_ONLY_WORKFLOW.steps) {
+      const base = baseById[derived.id]!;
+      const { runner: _derivedRunner, ...derivedRest } = derived;
+      const { runner: _baseRunner, ...baseRest } = base;
+      expect(derivedRest, derived.id).toEqual(baseRest);
+    }
+  });
+
+  it('V2 — pinWorkflowRunner does not mutate its input: the base workflow is unchanged', () => {
+    expect(SPEC_TO_DEPLOY_WORKFLOW.steps[1]?.id).toBe('spec');
+    expect(SPEC_TO_DEPLOY_WORKFLOW.steps[1]?.runner).toBe('claude');
   });
 });

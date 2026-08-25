@@ -9,7 +9,9 @@ import {
   NO_FILED_FILTERS,
   applyFiledPatch,
   filedFacetCounts,
+  filedSelectionState,
   filedStatus,
+  filedTaskKey,
   filedTasksExcludingFacet,
   filterFiledTasks,
   isFiledPriority,
@@ -17,7 +19,10 @@ import {
   isFiledStatus,
   isVisibleFiledEntry,
   matchesFiledView,
+  selectedFiledEntries,
+  setFiledSelection,
   sortFiledTasks,
+  toggleFiledSelection,
   type FiledTaskFilters,
 } from './filed-tasks'
 
@@ -207,5 +212,53 @@ describe('applyFiledPatch', () => {
     const restored = applyFiledPatch(archived, { archived: false })
     expect('archivedAt' in restored).toBe(false)
     expect(Object.keys(restored).sort()).toEqual(Object.keys(todo).sort())
+  })
+})
+
+describe('filed task selection', () => {
+  const web = (id: string): WorkspaceTodoEntry => ({
+    project: 'web',
+    todo: { id, ts: '2026-07-14T09:00:00Z', summary: id },
+  })
+
+  it('keys a row by project and id', () => {
+    expect(filedTaskKey(entry({ id: 'todo-1' }))).toBe('api:todo-1')
+    expect(filedTaskKey(web('todo-1'))).toBe('web:todo-1')
+  })
+
+  it('toggles one row on and back off into new sets', () => {
+    const empty: ReadonlySet<string> = new Set()
+    const one = toggleFiledSelection(empty, 'api:todo-1')
+    expect([...one]).toEqual(['api:todo-1'])
+    expect(one).not.toBe(empty)
+    expect([...toggleFiledSelection(one, 'api:todo-1')]).toEqual([])
+  })
+
+  it('sets or unsets a batch without disturbing the rest', () => {
+    const start = new Set(['api:todo-9'])
+    const on = setFiledSelection(start, ['api:todo-1', 'web:todo-2'], true)
+    expect([...on].sort()).toEqual(['api:todo-1', 'api:todo-9', 'web:todo-2'])
+    const off = setFiledSelection(on, ['api:todo-1', 'web:todo-2'], false)
+    expect([...off]).toEqual(['api:todo-9'])
+  })
+
+  it('returns visible selected rows in display order', () => {
+    const visible = [web('todo-2'), entry({ id: 'todo-1' })]
+    const selected = new Set(['api:todo-1', 'web:todo-2', 'api:todo-hidden'])
+    expect(selectedFiledEntries(visible, selected).map(filedTaskKey)).toEqual([
+      'web:todo-2',
+      'api:todo-1',
+    ])
+    expect(selectedFiledEntries([entry({ id: 'todo-1' })], selected).map(filedTaskKey)).toEqual([
+      'api:todo-1',
+    ])
+  })
+
+  it('reports all three select-all states and never all of nothing', () => {
+    const keys = ['api:todo-1', 'web:todo-2']
+    expect(filedSelectionState(keys, new Set())).toBe('none')
+    expect(filedSelectionState(keys, new Set(['api:todo-1']))).toBe('some')
+    expect(filedSelectionState(keys, new Set(keys))).toBe('all')
+    expect(filedSelectionState([], new Set(['api:todo-1']))).toBe('none')
   })
 })

@@ -274,6 +274,20 @@
   owns it, and reconcile's duplicate is deleted.
 
 ## 🩹 Fixed
+- 🩹 **A manual-deploy handoff card is now legible, and the `deploy` step no longer fights it.**
+  (spec `.ai/specs/2026-08-24-manual-deploy-not-a-bug.md`.) Three fixes: the `deploy` step's prompt
+  now reads `.ai/deploy-targets.json` first and refuses to deploy, activate, restart or flip a
+  target marked `"manual": true`, closing the gap where the postcondition parked but the agent's
+  own instructions told it to ship anyway; `allServicesDeployed`'s manual-deploy `handoff.reason`
+  now names only the failing manual targets, their `manualReason` and their probe's own output,
+  dropping every probe's shell source and every passing target (`detail`, the full per-target log,
+  is unchanged): this closes the defect where a card could render 2,000 characters of truncated
+  bash instead of the one instruction a human needs; and a Resolve that comes back red now
+  re-persists that same concise reason instead of reverting to the untruncated probe-source report.
+  `AGENTS.md` is corrected in two places to match: cezar's own agent-run deploys are `manual: true`
+  since commit `c328ec06` and a headless `spec-to-deploy` run on cezar structurally parks at
+  `deploy` for a person to resolve, and that parked state is the expected terminal state, not a
+  defect. No API, schema or route changed.
 - 🩹 **Codex approval requests no longer hang unattended runs.** The app-server can send command,
   file-change, permission and legacy approval requests even when cezar asked for
   `approvalPolicy: never`. Cezar now answers them with the most permissive valid decision, reports

@@ -12,7 +12,7 @@ import { localCliAuthor } from '../runs/task-author.ts';
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MOCK_CODEX = join(HERE, '..', 'core', '__fixtures__', 'codex', 'mock-codex-app-server.mjs');
+const MOCK_CODEX = join(HERE, '..', '..', 'scripts', 'mock-codex-app-server.mjs');
 
 /**
  * V4 of `.ai/specs/2026-08-23-codex-resume-explicit-model.md`: reaches Solution case 4 (the

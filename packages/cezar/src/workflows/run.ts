@@ -1539,6 +1539,21 @@ export class RunManager {
     // Persist the full definition so a queued run survives a restart (#367) —
     // ad-hoc "(planned)" chains exist nowhere else to re-resolve from.
     this.store.updateRun(run.id, { workflowDef: workflow });
+    // Name the number now (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, Analytics): is
+    // anyone picking the codex chain, and how far does `input.runner` (the engine pill) survive
+    // before pool resolution can override it (`run.ts:5054-5068`)? Emitted at CREATION, not from
+    // `execute()`: `execute` re-enters on every reattachment and chain re-entry
+    // (`pump`/`reattachBrokeredRun`), which would turn "once per run" into a silent overcount on
+    // exactly the long, interrupted runs a rate most needs to count honestly. `startRun` holds no
+    // `emit` closure, so this writes the way `recordResourceKill` already does.
+    this.store.appendEvent(run.id, {
+      type: 'metric',
+      name: 'run.workflow.selected',
+      runId: run.id,
+      workflow: workflow.name,
+      requestedRunner: input.runner,
+      stepCount: workflow.steps.length,
+    });
     // Initial pasted images must be visible while the run is still queued (#612),
     // and must survive a restart before a slot opens. Persist them before the job
     // enters `pendingJobs`; `hydrateQueuedInput` reconstructs their content blocks
@@ -3169,6 +3184,21 @@ export class RunManager {
           `this step asks for ${step.model ? `${step.model} on ` : ''}${pinned}, and every ${pinned} account is out of quota — ` +
           `running on ${accountUsageKey(choice.provider, choice.accountId)} instead`,
       });
+      // Named now (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, Analytics), alongside
+      // the note above: nine steps can downgrade on `spec-to-deploy-codex` where the default chain
+      // has two, so the promise is degraded LOUDLY rather than silently. `reason` is a named field
+      // rather than an implied constant so a future second downgrade cause does not silently merge
+      // into the quota number — `downgradePinnedRunner` fires on quota exhaustion only, today.
+      this.store.appendEvent(runId, {
+        type: 'metric',
+        stepId: step.id,
+        name: 'run.step.runner_downgraded',
+        runId,
+        workflow: this.store.getRun(runId)?.workflow,
+        plannedRunner: pinned,
+        actualRunner: choice.provider,
+        reason: 'quota',
+      });
       return choice.provider as RunnerId;
     } catch {
       return undefined;
@@ -3666,6 +3696,21 @@ export class RunManager {
 
   isActive(runId: string): boolean {
     return this.active.has(runId) || this.starting.has(runId) || this.queue.includes(runId);
+  }
+
+  /**
+   * Whether a run can still make progress in this process. This is intentionally wider than
+   * isActive(), whose narrower answer controls server-side mutations.
+   */
+  runLiveness(runId: string): { live: boolean; reason: string } {
+    if (this.active.has(runId)) return { live: true, reason: 'active step chain' };
+    if (this.starting.has(runId)) return { live: true, reason: 'starting' };
+    if (this.queue.includes(runId)) return { live: true, reason: 'queued' };
+    if (this.waiting.has(runId)) return { live: true, reason: 'waiting for input' };
+    if (this.monitoring.has(runId)) return { live: true, reason: 'monitoring' };
+    if (this.autoResumeTimers.has(runId)) return { live: true, reason: 'auto-resume scheduled' };
+    if (this.pendingJobs.has(runId)) return { live: true, reason: 'pending job' };
+    return { live: false, reason: 'no active step, scheduled resume, or queued job' };
   }
 
   /**
@@ -5373,6 +5418,12 @@ export class RunManager {
       });
       emit({ type: 'step-start', stepId: step.id, name: step.name ?? step.id, kind, iteration });
 
+      const runFault = process.env.CEZ_RUN_FAULT;
+      const [faultName, faultStepId] = runFault?.split(':', 2) ?? [];
+      if (faultName === 'stall-step' && kind === 'agent' && (!faultStepId || faultStepId === step.id)) {
+        await new Promise<never>(() => {});
+      }
+
       if (kind === 'agent') {
         // The last agent step of the workflow is interactive: after its turn
         // the session stays open for follow-ups until finish/idle/cancel.
@@ -5831,7 +5882,10 @@ export class RunManager {
         }
         const next: PendingHandoff = {
           ...pending,
-          reason: checked.detail.slice(0, 2_000),
+          // A manual-deploy handoff carries a concise `handoff.reason`; a plain red recheck with
+          // NO handoff (a non-manual target failing on the same recheck, `:348-353`) does not, and
+          // `detail` is the only text there is to show in that case: the fallback is load-bearing.
+          reason: (checked.handoff?.reason ?? checked.detail).slice(0, 2_000),
           ...(checked.handoff?.kind ? { kind: checked.handoff.kind } : {}),
           ...(checked.handoff?.targets ? { targets: checked.handoff.targets.slice(0, 50) } : {}),
         };
@@ -6270,10 +6324,15 @@ export class RunManager {
 
     // A resumed step keeps the session id it already owns — that id IS the work done so far.
     const sessionId = resumeFrom?.sessionId ?? randomUUID();
-    // Never blocked (`.ai/specs/2026-08-23-never-block-a-task.md`). A step may pin its own runner,
-    // and `spec-to-deploy` pins `runner: claude` + `opus` on `spec`/`review-spec` from the owner's
-    // 2026-08-22 "writing spec + spec review should be by opus always". When EVERY account of that
-    // provider is out of quota, that pin has nowhere to go and the step used to die there.
+    // Never blocked (`.ai/specs/2026-08-23-never-block-a-task.md`). A step may pin its own runner.
+    // CORRECTED 2026-08-24 (`.ai/specs/2026-08-24-codex-only-default-workflow.md`): this used to
+    // say "`spec-to-deploy` pins `runner: claude` + `opus` on `spec`/`review-spec`" from the
+    // owner's 2026-08-22 "writing spec + spec review should be by opus always" — stale since
+    // `.ai/specs/2026-08-24-default-workflow-ten-stages.md` D1 moved `review-spec` to `runner:
+    // 'codex'`. Today only `spec` pins Claude; the opt-in `spec-to-deploy-codex` sibling
+    // (`pinWorkflowRunner` in `workflows/types.ts`) pins all nine steps to codex instead. When
+    // EVERY account of a pinned provider is out of quota, that pin has nowhere to go and the step
+    // used to die there.
     //
     // The owner's 2026-08-23 ruling is that availability outranks the pin: proceed on whatever is
     // available and say so. So the quality pin is now a preference with a fallback, not a

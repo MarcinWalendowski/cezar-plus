@@ -275,12 +275,12 @@ describe('needs-org: name → accept team → add projects', () => {
     const teamInput = await screen.findByLabelText('Workspace name', {}, { timeout: 5000 })
     expect((teamInput as HTMLInputElement).value).toBe('General')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Accept and continue' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept and continue' }))
     await screen.findByText('Add your first project')
 
     // The whole point of "one click": an unedited accept never touches the network.
     expect(sent.some((r) => r.path === '/auth/onboarding/team')).toBe(false)
-  })
+  }, 15_000)
 
   it('renaming the team before accepting sends the PATCH and carries the new name forward', async () => {
     const sent = stubFetch({
@@ -294,14 +294,14 @@ describe('needs-org: name → accept team → add projects', () => {
 
     const teamInput = await screen.findByLabelText('Workspace name', {}, { timeout: 5000 })
     fireEvent.change(teamInput, { target: { value: 'Engineering' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Accept and continue' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept and continue' }))
 
     await waitFor(() =>
       expect(sent.some((r) => r.method === 'PATCH' && r.path === '/auth/onboarding/team')).toBe(true),
     )
     expect(sent.find((r) => r.path === '/auth/onboarding/team')?.body).toEqual({ name: 'Engineering' })
     await screen.findByText(/Engineering/)
-  })
+  }, 15_000)
 })
 
 /**

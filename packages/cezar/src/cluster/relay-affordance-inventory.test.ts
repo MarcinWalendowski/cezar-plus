@@ -704,6 +704,25 @@ const FIELD_CLASSIFICATION: Record<string, Verdict> = {
       '`provider` above — same lower-confidence flag, same open question, see the report',
   },
   workflow: { verdict: 'safe', why: 'a workflow NAME string (e.g. "quick-task"), not a path' },
+  requestedRunner: {
+    verdict: 'safe',
+    why:
+      'the engine pill\'s choice (RunnerId — a provider name like "codex"), from `run.workflow.selected` ' +
+      '(`.ai/specs/2026-08-24-codex-only-default-workflow.md`). Unlike `backend` above, it is not ' +
+      'paired with a `sessionId` in the same event, so it names a provider without naming a resumable ' +
+      'handle to reach it with.',
+  },
+  stepCount: { verdict: 'safe', why: 'a number (workflow.steps.length), from `run.workflow.selected`' },
+  plannedRunner: {
+    verdict: 'safe',
+    why:
+      'a provider name (RunnerId) a step was pinned to, from `run.step.runner_downgraded` — same ' +
+      'reasoning as `requestedRunner`: no `sessionId` shares this event.',
+  },
+  actualRunner: {
+    verdict: 'safe',
+    why: 'a provider name (RunnerId) a step ran on instead, from the same `run.step.runner_downgraded` event as `plannedRunner`',
+  },
   attempt: { verdict: 'safe', why: 'a retry counter number' },
   command: { verdict: 'safe', why: 'a shell command string; free-text regex coverage applies' },
   exitCode: { verdict: 'safe', why: 'a number' },

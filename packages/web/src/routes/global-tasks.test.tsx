@@ -12,6 +12,7 @@ import type {
 import { ListViewProvider, useListView } from '@/components/list-view'
 import { __clearRememberedStatusesForTests, workspaceQueryKeys } from '@/api/queries'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
+import { FILED_ROW_PAGE_SIZE } from '@/lib/filed-tasks'
 
 import { GlobalTasksRoute } from './global-tasks'
 
@@ -120,6 +121,7 @@ function stubFetch({
   indexStatuses,
   todos = [],
   todoPatchStatus = 200,
+  failStartTodos = [] as string[],
   cluster = false,
   clusterOverview,
   clusterActive,
@@ -137,6 +139,7 @@ function stubFetch({
   indexStatuses?: Record<string, { prs: Record<number, string>; issues: Record<number, string> }>
   /** Filed-but-unstarted todos, as `GET /workspace/todos` answers them. */
   todos?: WorkspaceTodoEntry[]
+  failStartTodos?: string[]
   /** What `PATCH /todos/:id` answers with — 200 by default, or a status the mutation must roll
    *  back from (the same shape `archiveStatus` gives the runs side). */
   todoPatchStatus?: number
@@ -199,7 +202,14 @@ function stubFetch({
       }
       const startTodo = /^\/api\/v1\/p\/([^/]+)\/todos\/([^/]+)\/start$/.exec(path)
       if (startTodo && method === 'POST') {
-        return jsonResponse({ run: { id: `run-from-${startTodo[2]}` } }, 201)
+        const [, , todoId] = startTodo
+        if (failStartTodos.includes(todoId!)) return jsonResponse({ error: 'already running' }, 409)
+        todoBoard = todoBoard.map((entry) =>
+          entry.todo.id === todoId
+            ? { ...entry, todo: { ...entry.todo, startedTaskId: `run-from-${todoId}` } }
+            : entry,
+        )
+        return jsonResponse({ run: { id: `run-from-${todoId}` } }, 201)
       }
       // PATCH .../todos/:id — never `/start`, which is matched (and returned) above first.
       const patchTodo = /^\/api\/v1\/p\/([^/]+)\/todos\/([^/]+)$/.exec(path)
@@ -289,10 +299,16 @@ function renderPage(client = createQueryClient(), entry = '/tasks') {
 /** Makes the URL assertable — the filters ARE the URL, so this is the state under test. */
 function LocationProbe() {
   const location = useLocation()
-  return <span data-testid="search">{location.search}</span>
+  return (
+    <>
+      <span data-testid="search">{location.search}</span>
+      <span data-testid="pathname">{location.pathname}</span>
+    </>
+  )
 }
 
 const search = () => screen.getByTestId('search').textContent ?? ''
+const pathname = () => screen.getByTestId('pathname').textContent ?? ''
 
 /** Reads the SHARED Active/Archived context — the one the sidebar and the per-project table use. */
 function SharedViewProbe() {
@@ -1436,6 +1452,137 @@ describe('the Filed section', () => {
     )
     // Never against `api` (the boot project, and the first row) — the row's project is the truth.
     expect(sent.some((r) => r.path.startsWith('/api/v1/p/api/todos/'))).toBe(false)
+  })
+
+  const selectBoxes = () =>
+    [...document.querySelectorAll('[data-slot="filed-select"]')] as HTMLInputElement[]
+  const selectionCount = () =>
+    document.querySelector('[data-slot="filed-selection-count"]')?.textContent ?? null
+  const startPaths = () =>
+    sent.filter((r) => r.method === 'POST' && r.path.endsWith('/start')).map((r) => r.path)
+
+  it('runs selected tasks in their own projects without navigation', async () => {
+    stubFetch({ todos: TODOS })
+    renderPage()
+    await screen.findByText('Ship the storefront banner')
+    const startedAt = pathname()
+
+    selectBoxes().forEach((box) => fireEvent.click(box))
+    expect(selectionCount()).toBe('2 selected')
+    fireEvent.click(screen.getByRole('button', { name: 'Run 2 tasks' }))
+
+    await waitFor(() =>
+      expect(startPaths()).toEqual([
+        '/api/v1/p/web/todos/todo-2/start',
+        '/api/v1/p/api/todos/todo-1/start',
+      ]),
+    )
+    expect(pathname()).toBe(startedAt)
+    await screen.findByText('Started 2 tasks')
+    await waitFor(() => expect(document.querySelector('[data-slot="filed-tasks"]')).toBeNull())
+  })
+
+  it('selects every rendered row and clears the selection', async () => {
+    stubFetch({ todos: TODOS })
+    renderPage()
+    await screen.findByText('Ship the storefront banner')
+
+    const all = () => document.querySelector('[data-slot="filed-select-all"]') as HTMLInputElement
+    fireEvent.click(selectBoxes()[0]!)
+    expect(all().indeterminate).toBe(true)
+    fireEvent.click(all())
+    expect(selectionCount()).toBe('2 selected')
+    expect(all().checked).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    expect(document.querySelector('[data-slot="filed-selection-bar"]')).toBeNull()
+  })
+
+  it('does not start a selected row hidden by the current filter', async () => {
+    stubFetch({ todos: TODOS })
+    renderPage()
+    await screen.findByText('Ship the storefront banner')
+
+    selectBoxes().forEach((box) => fireEvent.click(box))
+    fireEvent.change(screen.getAllByLabelText('Search tasks across projects')[0]!, {
+      target: { value: 'storefront' },
+    })
+    await waitFor(() => expect(filedRowIds()).toEqual(['todo-2']))
+    expect(selectionCount()).toBe('1 selected')
+    fireEvent.click(screen.getByRole('button', { name: 'Run 1 task' }))
+    await waitFor(() => expect(startPaths()).toEqual(['/api/v1/p/web/todos/todo-2/start']))
+  })
+
+  it('does not start a selected row hidden by pagination', async () => {
+    // 2026-08-24-ship-bulk-start-filed-tasks.md P1.5: `batch` used to be computed from `sorted`
+    // (the whole set) instead of `rows` (`sorted.slice(0, shown)`, what actually renders), so a
+    // row paged into view, selected, then pushed back past `shown` by a sort change stayed in the
+    // batch and started anyway even though the user could no longer see it on the page. `shown`
+    // resets to `FILED_ROW_PAGE_SIZE` on every sort change but `selected` does not, which is what
+    // makes this reachable through ordinary use rather than a crafted state.
+    const total = FILED_ROW_PAGE_SIZE * 2 + 50 // 250
+    const many: WorkspaceTodoEntry[] = Array.from({ length: total }, (_, i) => ({
+      project: 'api',
+      todo: {
+        id: `filed-${i}`,
+        // Ascending ts: index `total - 1` is newest. Under the default `created-desc` sort, index
+        // `i` therefore lands at 1-indexed rank `total - i`; under `created-asc` its rank is `i + 1`.
+        ts: new Date(2026, 0, 1, 0, 0, i).toISOString(),
+        summary: `Disposable task #${i}`,
+      },
+    }))
+    // `hidden`: desc-rank 125, asc-rank 126 — beyond the reset 100-row window in BOTH directions,
+    // so switching sort cannot merely walk it back into view from the other end.
+    // `control`: desc-rank 200 (still within the paged 200-row window), asc-rank 51 — stays
+    // selected and visible after the switch, so the selection bar survives with a reduced count
+    // instead of vanishing (it only renders while `batch.length > 0`).
+    const hiddenIndex = total - 125
+    const hiddenId = `filed-${hiddenIndex}`
+    const controlIndex = total - 200
+    const controlId = `filed-${controlIndex}`
+
+    stubFetch({ todos: many })
+    renderPage()
+    await screen.findByText(`Disposable task #${total - 1}`)
+    expect(filedRows()).toHaveLength(FILED_ROW_PAGE_SIZE)
+
+    fireEvent.click(screen.getByRole('button', { name: /Show \d+ more/ }))
+    await waitFor(() => expect(filedRows().length).toBeGreaterThan(FILED_ROW_PAGE_SIZE))
+
+    const checkboxFor = (id: string) =>
+      document.querySelector(`[data-slot="filed-select"][data-todo-id="${id}"]`) as HTMLInputElement
+    expect(checkboxFor(hiddenId)).toBeTruthy()
+    expect(checkboxFor(controlId)).toBeTruthy()
+    fireEvent.click(checkboxFor(hiddenId))
+    fireEvent.click(checkboxFor(controlId))
+    expect(selectionCount()).toBe('2 selected')
+
+    // Reverse the sort: the `shown` reset effect fires (global-tasks.tsx:782-785). `hiddenId`'s
+    // rank moves to 126 (still outside the reset 100-row window); `controlId`'s moves to 51
+    // (inside it), so the row for `controlId` stays on screen while `hiddenId`'s does not.
+    fireEvent.click(screen.getByRole('button', { name: 'Oldest' }))
+    await waitFor(() => expect(filedRows()).toHaveLength(FILED_ROW_PAGE_SIZE))
+    expect(document.querySelector(`[data-todo-id="${hiddenId}"][data-slot="filed-task-row"]`)).toBeNull()
+    expect(document.querySelector(`[data-todo-id="${controlId}"][data-slot="filed-task-row"]`)).toBeTruthy()
+
+    // `selected` still has both keys — the reset effect never touches it — but the batch that
+    // actually starts must intersect with what is rendered, so the count drops to the one row the
+    // user can still see.
+    expect(selectionCount()).toBe('1 selected')
+    fireEvent.click(screen.getByRole('button', { name: 'Run 1 task' }))
+    await waitFor(() => expect(startPaths()).toContain(`/api/v1/p/api/todos/${controlId}/start`))
+    expect(startPaths()).not.toContain(`/api/v1/p/api/todos/${hiddenId}/start`)
+  })
+
+  it('continues after one start fails and reports the surviving count', async () => {
+    stubFetch({ todos: TODOS, failStartTodos: ['todo-2'] })
+    renderPage()
+    await screen.findByText('Ship the storefront banner')
+
+    fireEvent.click(document.querySelector('[data-slot="filed-select-all"]')!)
+    fireEvent.click(screen.getByRole('button', { name: 'Run 2 tasks' }))
+    await waitFor(() => expect(startPaths()).toHaveLength(2))
+    await screen.findByText(/Started 1 of 2/)
+    await waitFor(() => expect(filedRowIds()).toEqual(['todo-2']))
   })
 
   it('renders nothing at all when nothing is filed', async () => {

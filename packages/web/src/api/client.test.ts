@@ -7,6 +7,7 @@ import {
   cancelRun,
   connectProvider,
   continueRun,
+  createTodo,
   createRun,
   deleteRun,
   finishRun,
@@ -148,6 +149,13 @@ describe('request shapes', () => {
     },
     { name: 'refreshSkills', call: () => refreshSkills(), path: '/api/v1/skills/refresh', method: 'POST' },
     { name: 'getTodos', call: () => getTodos(), path: '/api/v1/todos', method: 'GET' },
+    {
+      name: 'createTodo',
+      call: () => createTodo({ summary: 'File this', origin: 'composer' }),
+      path: '/api/v1/todos',
+      method: 'POST',
+      body: { summary: 'File this', origin: 'composer' },
+    },
     { name: 'getRepo', call: () => getRepo(), path: '/api/v1/repo', method: 'GET' },
     { name: 'getGroup', call: () => getGroup('grp-1'), path: '/api/v1/groups/grp-1', method: 'GET' },
     {

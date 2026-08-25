@@ -30,6 +30,8 @@ import type {
   CheckoutProjectInput,
   CreateBlankProjectInput,
   ConfigResponse,
+  CreateTodoInput,
+  CreateTodoResponse,
   ReclaimWorktreesResponse,
   RemoveWorktreeResponse,
   WorktreesResponse,
@@ -788,6 +790,17 @@ export async function getImportableSkillsWhenReady(opts?: ReadOptions): Promise<
 export async function getTodos(opts?: ReadOptions): Promise<TodoItem[]> {
   return unwrap(
     await cez.api.v1.p[':projectId'].todos.$get({ param: { projectId: queryScope() } }, init(opts)),
+    '/todos',
+  )
+}
+
+/** File one project-scoped task without starting a run. */
+export async function createTodo(input: CreateTodoInput): Promise<CreateTodoResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].todos.$post({
+      param: { projectId: queryScope() },
+      json: input,
+    }),
     '/todos',
   )
 }

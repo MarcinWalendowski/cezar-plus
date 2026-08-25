@@ -11,10 +11,13 @@ import {
 } from './codex-app-server-transport.ts';
 
 const originalBin = process.env.CEZ_CODEX_BIN;
+const originalDryRun = process.env.CEZ_DRY_RUN;
 
 afterEach(() => {
   if (originalBin === undefined) delete process.env.CEZ_CODEX_BIN;
   else process.env.CEZ_CODEX_BIN = originalBin;
+  if (originalDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+  else process.env.CEZ_DRY_RUN = originalDryRun;
 });
 
 function fakeChild(): { child: ChildProcessWithoutNullStreams; writes: string[] } {
@@ -33,6 +36,32 @@ describe('Codex app-server transport', () => {
     process.env.CEZ_CODEX_BIN = '/host/codex';
     expect(resolveCodexExecutable('/configured/codex')).toBe('/configured/codex');
     expect(resolveCodexExecutable()).toBe('/host/codex');
+  });
+
+  // .ai/specs/2026-08-24-codex-dry-run-mock.md D1/P2: resolveCodexExecutable gets the same
+  // three-tier CEZ_DRY_RUN resolution ClaudeCliRunner and PiRunner already have.
+  it('falls back to the real `codex` binary with no env set', () => {
+    delete process.env.CEZ_CODEX_BIN;
+    delete process.env.CEZ_DRY_RUN;
+    expect(resolveCodexExecutable()).toBe('codex');
+  });
+
+  it('resolves the bundled mock under CEZ_DRY_RUN=1', () => {
+    delete process.env.CEZ_CODEX_BIN;
+    process.env.CEZ_DRY_RUN = '1';
+    expect(resolveCodexExecutable()).toMatch(/scripts[/\\]mock-codex-app-server\.mjs$/);
+  });
+
+  it('keeps CEZ_CODEX_BIN above the dry-run mock (tier order)', () => {
+    process.env.CEZ_DRY_RUN = '1';
+    process.env.CEZ_CODEX_BIN = '/x/y';
+    expect(resolveCodexExecutable()).toBe('/x/y');
+  });
+
+  it('lets an explicit override beat both CEZ_CODEX_BIN and the dry-run mock', () => {
+    process.env.CEZ_DRY_RUN = '1';
+    process.env.CEZ_CODEX_BIN = '/x/y';
+    expect(resolveCodexExecutable('/configured/codex')).toBe('/configured/codex');
   });
 
   it('uses the Codex child-env sanitizer and preserves per-run values', () => {
