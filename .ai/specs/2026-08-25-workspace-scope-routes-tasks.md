@@ -10,6 +10,10 @@
 > what was and was not executed. **Phase 4 not started and cannot be: it is gated on the worktree
 > drain.**
 >
+> **RUNTIME E2E PASSED 2026-08-25 12:20 UTC, unstaged:** a real composer submit ran
+> `input-to-tasks` as the workspace default across 13 projects, created **0 worktrees**, filed a
+> todo onto the cezar board and started nothing (toggle off). Run `ed71bbd9`. Detail in *V8* below.
+>
 > **KNOWN DEFECT in the shipped Phase 3, found 2026-08-25 after deploy:** the **Start filed tasks**
 > toggle files todos correctly and **starts nothing** for any project that is not already resident,
 > because `cez todo start` only sets a flag and the watcher that reads it is armed for resident
@@ -640,8 +644,24 @@ description of the route was corrected in place with the superseded text kept be
 
   None of the four failures this change originally introduced in `workflows/ workspace/ runs/`
   remains.
-- **V8 (runtime E2E on production)** — **partially executed.** The code is live and was verified
-  live; what remains unverified is the *screen*. See below.
+- **V8 (runtime E2E on production)** — **the OFF path is EXECUTED and PASSED on a real production
+  run, 2026-08-25 12:20 UTC.** Not staged by this session: a genuine composer submit
+  (`author.via = "workspace-composer"`) picked up `input-to-tasks` as the workspace default.
+
+  Run `ed71bbd9`, workspace project, created 12:20:34, `done` 12:22:25. **`workspaceWorktrees: 0`**
+  against **13 granted projects** — the property this whole spec exists for, measured on the record
+  of a run nobody instrumented. All three steps green: `context` 12:20:46, `file` 12:21:55,
+  `dispatch` 12:22:25. It filed todo `1da9c2bb` ("Split tasks into sortable Active and Backlog
+  tables") onto the **cezar** board at 12:21:49, matching the submitted request — so the route
+  works end to end: read every project, write one project's `todos.json`, touch no working tree.
+  `autoStart` was absent on the record (toggle off), the filed todo carries `autostart: false`, and
+  `dispatch` started nothing — the optional step being genuinely optional, in production.
+
+  **The ON path is still unverified, and is known broken** for non-resident projects — see the
+  correction under Phase 2. A green OFF path says nothing about it: they are different branches of
+  the `dispatch` prompt, and the defect lives downstream of both, in who reads the flag.
+
+  What remains unverified: the *screen* (below), and auto-start ON.
 
 ### Verification — executed ON PRODUCTION (2026-08-25, release `20260825T104007Z-dc64b741`)
 
