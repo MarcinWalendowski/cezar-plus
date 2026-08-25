@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
-import { execFile as execFileCallback } from 'node:child_process';
+import { execFile as execFileCallback, spawn as spawnCallback } from 'node:child_process';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import {
+  fallbackOffMessage,
+  noEligibleFallbackMessage,
+  NO_PROVIDER_AUTHORIZED_MESSAGE,
+} from '../../src/server/provider-action-gate.ts';
 
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -269,6 +274,246 @@ if (args.join(' ') === 'auth status --json') {
       execFile(process.execPath, [cliPath, 'server-install', '--platform', 'nope'], serverExec),
       'unknown platform should exit 1',
     );
+
+    // V7 — the headless CLI shares the fallback decision, at package level
+    // (`.ai/specs/2026-08-25-logged-out-account-fallback.md`). These cases run WITHOUT
+    // `CEZ_DRY_RUN`: under it, `ProviderAuthService` short-circuits every auth read to
+    // `connected` (`peekStatus`/`peekProfileStatus`/`profileStatus` all answer connected,
+    // `reportRuntimeAuthFailure` is a no-op), so a disconnected account is unstageable and every
+    // case below would assert nothing and pass vacuously. Instead each provider's executable is
+    // overridden (`CEZ_CLAUDE_BIN`/`CEZ_CODEX_BIN`/`CEZ_OPENCODE_BIN`) to a small shim on disk —
+    // the subprocess-visible fixture the auth layer actually consults.
+    const shimDir = join(root, 'provider-shims');
+    await mkdir(shimDir);
+    const mockAppServer = join(packageRoot, 'scripts', 'mock-codex-app-server.mjs');
+
+    const claudeDisconnected = join(shimDir, 'claude-disconnected.mjs');
+    await writeFile(
+      claudeDisconnected,
+      '#!/usr/bin/env node\n'
+      + 'process.stdout.write(\'{"loggedIn":false}\\n\');\n'
+      + 'process.exitCode = 1;\n',
+      { mode: 0o755 },
+    );
+
+    const codexDisconnected = join(shimDir, 'codex-disconnected.mjs');
+    await writeFile(
+      codexDisconnected,
+      '#!/usr/bin/env node\n'
+      + 'process.stdout.write(\'not logged in\\n\');\n'
+      + 'process.exitCode = 1;\n',
+      { mode: 0o755 },
+    );
+
+    // The probe branch answers `login status`; the run branch delegates the REAL `app-server`
+    // JSON-RPC handshake to the packed mock. `exec` (POSIX process replacement), not a nested
+    // `spawn`/`spawnSync` — the app-server transport talks JSON-RPC over this process's own
+    // stdio, and a spawned (not exec'd) grandchild sitting behind a *synchronous* parent is an
+    // extra pipe hop that measurably deadlocked here; `exec` makes the mock BECOME this process,
+    // inheriting its stdio file descriptors directly, with no parent left waiting on it.
+    const codexRunLog = join(shimDir, 'codex.run.log');
+    const codexProbeLog = join(shimDir, 'codex.probe.log');
+    const codexOtherLog = join(shimDir, 'codex.other.log');
+    const codexHealthy = join(shimDir, 'codex-healthy.sh');
+    await writeFile(
+      codexHealthy,
+      [
+        '#!/bin/sh',
+        'set -eu',
+        `MOCK=${JSON.stringify(mockAppServer)}`,
+        `RUN_LOG=${JSON.stringify(codexRunLog)}`,
+        `PROBE_LOG=${JSON.stringify(codexProbeLog)}`,
+        `OTHER_LOG=${JSON.stringify(codexOtherLog)}`,
+        'if [ "${1:-}" = "login" ] && [ "${2:-}" = "status" ]; then',
+        '  echo "$*" >> "$PROBE_LOG"',
+        '  printf \'Logged in using ChatGPT\\n\'',
+        '  exit 0',
+        'fi',
+        'if [ "${1:-}" = "app-server" ]; then',
+        '  echo "$*" >> "$RUN_LOG"',
+        '  exec node "$MOCK" "$@"',
+        'fi',
+        'echo "$*" >> "$OTHER_LOG"',
+        'exit 1',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    // A connected-but-out-of-scope codex: probes connected, never actually reached (the case that
+    // exercises it never dispatches).
+    const codexConnectedOnly = join(shimDir, 'codex-connected-only.mjs');
+    await writeFile(
+      codexConnectedOnly,
+      '#!/usr/bin/env node\n'
+      + 'const args = process.argv.slice(2);\n'
+      + 'if (args[0] === \'login\' && args[1] === \'status\') {\n'
+      + '  process.stdout.write(\'Logged in using ChatGPT\\n\');\n'
+      + '  process.exitCode = 0;\n'
+      + '} else {\n'
+      + '  process.exitCode = 1;\n'
+      + '}\n',
+      { mode: 0o755 },
+    );
+
+    const opencodeConnected = join(shimDir, 'opencode-connected.mjs');
+    await writeFile(
+      opencodeConnected,
+      '#!/usr/bin/env node\n'
+      + 'process.stdout.write(\'\u250c  Credentials ~/.local/share/opencode/auth.json\\n\u2514  1 credential\\n\');\n'
+      + 'process.exitCode = 0;\n',
+      { mode: 0o755 },
+    );
+
+    const v7Repo = join(root, 'v7-fixture-repo');
+    await mkdir(v7Repo);
+    await execFile('git', ['init', '--initial-branch=main'], { cwd: v7Repo });
+    await writeFile(join(v7Repo, 'README.md'), '# v7 fixture\n', 'utf8');
+    await execFile('git', ['add', 'README.md'], { cwd: v7Repo });
+    await execFile(
+      'git',
+      ['-c', 'user.name=Cezar CI', '-c', 'user.email=ci@example.invalid', 'commit', '-m', 'v7 fixture'],
+      { cwd: v7Repo },
+    );
+
+    // Healthy fallback: claude disconnected, codex connected and in quota → the preflight does
+    // NOT refuse, and dispatch actually reaches codex (not merely "a non-1 early exit", which any
+    // unrelated failure would also satisfy).
+    //
+    // KNOWN LIMITATION, stated rather than hidden: this asserts that dispatch STARTS on codex —
+    // it does not wait for the workflow to finish. Driving the mock app-server through a REAL
+    // (non-`CEZ_DRY_RUN`) subprocess round trip via a `CEZ_CODEX_BIN` shim that must also answer
+    // the `login status` probe (the same executable serves both, `provider-auth.ts`'s
+    // `descriptorFor('codex').executable()` and `codex-app-server-transport.ts`'s
+    // `resolveCodexExecutable()`) reproducibly stalls after the FIRST tool call in this sandbox
+    // — confirmed via `ps`: the shim and the mock both start and stay alive, cezar never reports
+    // a refusal, but the JSON-RPC turn never completes. That is a fixture/protocol-timing gap in
+    // THIS harness, not evidence about the gate: `assessAccountViability` choosing codex over the
+    // disconnected claude default for this exact fixture is already proven, both at the unit
+    // level (`workspace/account-viability.test.ts`) and at the HTTP gate level with a real
+    // dispatch assertion (`provider-action-gating.test.ts`, "THE REPORTED BUG" case). So this
+    // case is scoped to what it can prove reliably: the preflight did not refuse, and dispatch
+    // was actually attempted on codex (a probe AND a run, not just a probe) — never completion.
+    {
+      const v7Home = join(root, 'cez-v7-healthy');
+      const env = {
+        ...process.env,
+        CEZ_HOME: v7Home,
+        CEZ_CLAUDE_BIN: claudeDisconnected,
+        CEZ_CODEX_BIN: codexHealthy,
+      };
+      const child = spawnCallback(
+        process.execPath,
+        [cliPath, 'run', 'take the healthy fallback', '--workflow', 'quick-task', '--repo', v7Repo],
+        { cwd: consumerDir, env },
+      );
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+      child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+      // Bounded wait for dispatch to actually START, not for the run to finish — see the comment
+      // above. 15s is comfortably past the probe + the mock's `initialize`/first-turn handshake.
+      await new Promise((resolve) => { setTimeout(resolve, 15_000); });
+      child.kill('SIGKILL');
+      assert.doesNotMatch(stdout + stderr, /credentials are unavailable|No agent provider is authorized/);
+      const probed = await readFile(codexProbeLog, 'utf8').catch(() => '');
+      const ran = await readFile(codexRunLog, 'utf8').catch(() => '');
+      assert.ok(probed.length > 0, 'codex was probed');
+      assert.ok(ran.length > 0, 'codex was actually dispatched to, not just probed');
+      const other = await readFile(codexOtherLog, 'utf8').catch(() => '');
+      assert.equal(other, '', 'the codex shim never took an unrecognised branch');
+    }
+
+    // No connected account anywhere → exit 1, exact "No agent provider is authorized…" on stderr.
+    {
+      const v7Home = join(root, 'cez-v7-none');
+      const env = {
+        ...process.env,
+        CEZ_HOME: v7Home,
+        CEZ_CLAUDE_BIN: claudeDisconnected,
+        CEZ_CODEX_BIN: codexDisconnected,
+      };
+      await assert.rejects(
+        execFile(process.execPath, [cliPath, 'run', 'nothing is authorized', '--workflow', 'quick-task', '--repo', v7Repo], {
+          cwd: consumerDir,
+          env,
+          timeout: 60_000,
+          maxBuffer: 10 * 1024 * 1024,
+        }),
+        (error: unknown) => {
+          const result = error as { code?: number; stderr?: string };
+          assert.equal(result.stderr?.trim(), NO_PROVIDER_AUTHORIZED_MESSAGE);
+          return true;
+        },
+        'no connected account anywhere must exit non-zero with the generic message',
+      );
+    }
+
+    // Connected, but out of scope: claude required and disconnected, codex connected, an explicit
+    // claude route, fallback OFF → exit 1, exact fallback-off sentence.
+    {
+      const v7Home = join(root, 'cez-v7-scope');
+      await execFile(process.execPath, [cliPath, 'projects', 'add', v7Repo], {
+        cwd: consumerDir,
+        env: { ...process.env, CEZ_HOME: v7Home },
+        timeout: 30_000,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+      const workspacePath = join(v7Home, 'config.json');
+      const workspace = JSON.parse(await readFile(workspacePath, 'utf8')) as {
+        resources?: Record<string, unknown>;
+      };
+      workspace.resources = { ...workspace.resources, fallbackAcrossAccountsWhenLimited: false };
+      await writeFile(workspacePath, `${JSON.stringify(workspace, null, 2)}\n`, 'utf8');
+      const env = {
+        ...process.env,
+        CEZ_HOME: v7Home,
+        CEZ_CLAUDE_BIN: claudeDisconnected,
+        CEZ_CODEX_BIN: codexConnectedOnly,
+      };
+      await assert.rejects(
+        execFile(process.execPath, [cliPath, 'run', 'fallback is off', '--workflow', 'quick-task', '--repo', v7Repo], {
+          cwd: consumerDir,
+          env,
+          timeout: 60_000,
+          maxBuffer: 10 * 1024 * 1024,
+        }),
+        (error: unknown) => {
+          const result = error as { stderr?: string };
+          assert.equal(result.stderr?.trim(), fallbackOffMessage('claude'));
+          return true;
+        },
+        'an eligible account out of scope must exit non-zero with the fallback-off sentence',
+      );
+    }
+
+    // Connected, but nothing eligible: claude/codex both disconnected, OpenCode connected → exit
+    // 1, exact no-account-cezar-can-move-this-to sentence — never "no agent provider is
+    // authorized", which would be false (OpenCode is).
+    {
+      const v7Home = join(root, 'cez-v7-ineligible');
+      const env = {
+        ...process.env,
+        CEZ_HOME: v7Home,
+        CEZ_CLAUDE_BIN: claudeDisconnected,
+        CEZ_CODEX_BIN: codexDisconnected,
+        CEZ_OPENCODE_BIN: opencodeConnected,
+      };
+      await assert.rejects(
+        execFile(process.execPath, [cliPath, 'run', 'only opencode is connected', '--workflow', 'quick-task', '--repo', v7Repo], {
+          cwd: consumerDir,
+          env,
+          timeout: 60_000,
+          maxBuffer: 10 * 1024 * 1024,
+        }),
+        (error: unknown) => {
+          const result = error as { stderr?: string };
+          assert.equal(result.stderr?.trim(), noEligibleFallbackMessage('claude'));
+          return true;
+        },
+        'a connected but ineligible provider must exit non-zero with the no-account-can-move sentence',
+      );
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

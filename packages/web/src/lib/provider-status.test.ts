@@ -106,6 +106,119 @@ describe('provider-status SSE rows', () => {
   })
 })
 
+describe('poolConnected — advisory pool aggregate (spec 2026-08-25-logged-out-account-fallback)', () => {
+  it('round-trips through parseProviderStatusResponse (R7: the parser must not drop the field)', () => {
+    expect(
+      parseProviderStatusResponse({
+        providers: [
+          { provider: 'claude', status: 'disconnected', enabled: true, poolConnected: true },
+          { provider: 'codex', status: 'connected', enabled: true },
+          { provider: 'opencode', status: 'not-installed', enabled: true },
+        ],
+      }),
+    ).toEqual({
+      providers: [
+        { provider: 'claude', status: 'disconnected', enabled: true, poolConnected: true },
+        { provider: 'codex', status: 'connected', enabled: true },
+        { provider: 'opencode', status: 'not-installed', enabled: true },
+      ],
+    })
+  })
+
+  it('rejects a non-boolean poolConnected', () => {
+    expect(() =>
+      parseProviderStatusResponse({
+        providers: [
+          { provider: 'claude', status: 'connected', enabled: true, poolConnected: 'yes' },
+          { provider: 'codex', status: 'connected', enabled: true },
+          { provider: 'opencode', status: 'connected', enabled: true },
+        ],
+      }),
+    ).toThrow('Invalid provider status response')
+  })
+
+  it('applyProviderStatusRow merges poolConnected from an SSE row', () => {
+    const merged = applyProviderStatusRow(CONNECTED, {
+      provider: 'claude',
+      status: 'disconnected',
+      poolConnected: true,
+    })
+    expect(merged?.providers[0]).toEqual({
+      provider: 'claude',
+      status: 'disconnected',
+      enabled: true,
+      poolConnected: true,
+    })
+  })
+
+  it('an SSE row without poolConnected preserves the cached aggregate rather than clearing it', () => {
+    const seeded: ProviderStatusResponse = {
+      providers: [
+        { provider: 'claude', status: 'disconnected', enabled: true, poolConnected: true },
+        CONNECTED.providers[1]!,
+        CONNECTED.providers[2]!,
+      ],
+    }
+
+    // An unrelated enable/disable click — the topic those routes publish never carries a pool
+    // aggregate at all, so this must not flicker a healthy pool's dot off.
+    const merged = applyProviderStatusRow(seeded, {
+      provider: 'claude',
+      status: 'disconnected',
+      enabled: true,
+    })
+    expect(merged?.providers[0]?.poolConnected).toBe(true)
+  })
+
+  it('sameProviderStatusRow returns false when only poolConnected differs, so the merge does not short-circuit', () => {
+    const before: ProviderStatusResponse = {
+      providers: [
+        { provider: 'claude', status: 'disconnected', enabled: true },
+        CONNECTED.providers[1]!,
+        CONNECTED.providers[2]!,
+      ],
+    }
+    const after: ProviderStatusResponse = {
+      providers: [
+        { provider: 'claude', status: 'disconnected', enabled: true, poolConnected: true },
+        CONNECTED.providers[1]!,
+        CONNECTED.providers[2]!,
+      ],
+    }
+
+    // A response answering AFTER the cache already learned poolConnected must win, not be
+    // treated as an unchanged row and discarded.
+    expect(mergeProviderStatusResponse(before, after, before)).toEqual(before)
+    expect(mergeProviderStatusResponse(before, before, after)).toEqual(after)
+  })
+})
+
+describe('usableRunners — poolConnected widens without a connected default', () => {
+  it('offers a provider whose default is disconnected but whose pool is connected', () => {
+    const status: ProviderStatusResponse = {
+      providers: [
+        { provider: 'claude', status: 'disconnected', enabled: true, poolConnected: true },
+        { provider: 'codex', status: 'not-installed', enabled: true },
+        { provider: 'opencode', status: 'not-installed', enabled: true },
+      ],
+    }
+
+    expect(usableRunners(status)).toEqual(['claude'])
+  })
+
+  it('never offers a disabled provider, even with a connected pool', () => {
+    const status: ProviderStatusResponse = {
+      providers: [
+        { provider: 'claude', status: 'disconnected', enabled: false, poolConnected: true },
+        { provider: 'codex', status: 'not-installed', enabled: true },
+        { provider: 'opencode', status: 'not-installed', enabled: true },
+      ],
+    }
+
+    expect(usableRunners(status)).toEqual([])
+  })
+})
+
 describe('complete provider-status responses', () => {
   const STALE_CONNECTED: ProviderStatusResponse = {
     providers: [

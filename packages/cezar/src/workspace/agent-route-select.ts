@@ -1,6 +1,7 @@
 import { parseAgentRoute, type AgentRoute } from '@loki-labs/better-cezar-contract';
 import { PROFILE_CAPABLE_PROVIDERS } from '../core/agent-profiles.ts';
 import type { ProviderId } from '../core/provider-auth.ts';
+import type { AccountTier } from './account-viability.ts';
 import {
   accountUsageKey,
   freshQuota,
@@ -58,6 +59,12 @@ export interface PoolChoice {
   provider: ProviderId;
   /** `default` or a stored slug — what goes on `runs.agentProfile`. */
   accountId: string;
+  /** `accountUsageKey` of every candidate excluded from THIS resolution as `disconnected`
+   *  (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1). Absent/empty when nothing
+   *  was excluded — `resolvePoolForDispatch`/`resolvePoolForProvider` are in `workspace/`, which
+   *  has no store handle, so this is how the `run.account_fallback` metric's `skippedDisconnected`
+   *  field reaches `RunManager` without the module doing any I/O of its own. */
+  skippedDisconnected?: string[];
 }
 
 interface Ranked {
@@ -239,6 +246,12 @@ export async function resolvePoolForDispatch(options: {
   /** Workspace-wide, keyed by `accountUsageKey`. */
   inflight?: Record<string, number>;
   now?: number;
+  /** Classifies an account's credentials (`.ai/specs/2026-08-25-logged-out-account-fallback.md`,
+   *  Phase 1). Defaulted to "everything connected", so the quota-only behaviour this had before
+   *  credentials existed is bit-for-bit preserved when nothing is injected. A `disconnected`
+   *  account never enters `selectPoolAccount`'s candidate set at all — never selected, never even
+   *  the limited-but-least-bad fallback. */
+  tier?: (profile: ResolvedAgentProfile) => AccountTier;
 }): Promise<PoolChoice | undefined> {
   try {
     const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
@@ -251,8 +264,12 @@ export async function resolvePoolForDispatch(options: {
       options.agentProfile ?? selectionFor(accounts, options.repoRoot, options.fallbackProvider),
     );
     if (route.kind !== 'pool') return undefined;
+    const tierOf = options.tier ?? (() => 'runnable' as const);
+    const all = poolCandidates(route, listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS));
+    const skipped = all.filter((profile) => tierOf(profile) === 'disconnected');
+    const candidates = all.filter((profile) => tierOf(profile) !== 'disconnected');
     const chosen = selectPoolAccount({
-      candidates: poolCandidates(route, listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS)),
+      candidates,
       store: usage,
       ...(options.inflight ? { inflight: options.inflight } : {}),
       ...(options.now === undefined ? {} : { now: options.now }),
@@ -264,7 +281,14 @@ export async function resolvePoolForDispatch(options: {
     await mergeWriteAgentAccountUsage((store) =>
       recordDispatch(store, accountUsageKey(chosen.provider, chosen.accountId)),
     );
-    return chosen;
+    return skipped.length > 0
+      ? {
+        ...chosen,
+        skippedDisconnected: skipped.map((profile) =>
+          accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id),
+        ),
+      }
+      : chosen;
   } catch {
     return undefined;
   }
@@ -303,18 +327,24 @@ export async function resolvePoolForProvider(options: {
   /** Workspace-wide, keyed by `accountUsageKey`. */
   inflight?: Record<string, number>;
   now?: number;
+  /** See `resolvePoolForDispatch`'s twin option — same classifier, same default. */
+  tier?: (profile: ResolvedAgentProfile) => AccountTier;
 }): Promise<PoolChoice | undefined> {
   try {
     const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
     const route = parseAgentRoute(selectionFor(accounts, options.repoRoot, options.provider));
     if (route.kind !== 'pool') return undefined;
+    const tierOf = options.tier ?? (() => 'runnable' as const);
+    // `provider` from the caller, never `route.provider` — that is the narrowing, and reading it
+    // off the route would reintroduce the wildcard's provider hop.
+    const all = poolCandidates(
+      { kind: 'pool', provider: options.provider },
+      listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS),
+    );
+    const skipped = all.filter((profile) => tierOf(profile) === 'disconnected');
+    const candidates = all.filter((profile) => tierOf(profile) !== 'disconnected');
     const chosen = selectPoolAccount({
-      // `provider` from the caller, never `route.provider` — that is the narrowing, and reading it
-      // off the route would reintroduce the wildcard's provider hop.
-      candidates: poolCandidates(
-        { kind: 'pool', provider: options.provider },
-        listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS),
-      ),
+      candidates,
       store: usage,
       ...(options.inflight ? { inflight: options.inflight } : {}),
       ...(options.now === undefined ? {} : { now: options.now }),
@@ -325,7 +355,14 @@ export async function resolvePoolForProvider(options: {
     await mergeWriteAgentAccountUsage((store) =>
       recordDispatch(store, accountUsageKey(chosen.provider, chosen.accountId)),
     );
-    return chosen;
+    return skipped.length > 0
+      ? {
+        ...chosen,
+        skippedDisconnected: skipped.map((profile) =>
+          accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id),
+        ),
+      }
+      : chosen;
   } catch {
     return undefined;
   }

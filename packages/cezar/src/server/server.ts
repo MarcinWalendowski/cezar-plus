@@ -42,6 +42,7 @@ import {
 import { CLUSTER_LINK_PATH, isAgentPoolId, parseAgentRoute } from '@loki-labs/better-cezar-contract';
 import { inflightFromRuns } from '../workspace/agent-account-usage.ts';
 import { poolCandidates } from '../workspace/agent-route-select.ts';
+import { assessAccountViability, loadViabilityInput, type DispatchRequirement } from '../workspace/account-viability.ts';
 import { NoteStore } from '../notes/store.ts';
 import { NoteCoordinator } from '../notes/coordinator.ts';
 import { NoteProcessor } from '../notes/processor.ts';
@@ -112,7 +113,7 @@ import {
   workflowStepSchema,
   type WorkflowDef,
 } from '../workflows/types.ts';
-import { planChain, slugify } from '../planner.ts';
+import { planChain, slugify, type PlannerAccountChoice } from '../planner.ts';
 import { discoverSkills } from '../skills.ts';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.ts';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.ts';
@@ -280,10 +281,14 @@ import { agentCliRunner, detectOpenTargets, openFileInDefaultApp, openInApp } fr
 import { createDraftPr } from './pr.ts';
 import { ProviderRuntimeAuthObserver } from './provider-auth-runtime.ts';
 import {
-  providerForActiveRun,
   providerForExistingRun,
-  providersRequiredByWorkflow,
+  plannerRefusalMessage,
+  requirementForExistingRun,
+  requirementForPlanner,
+  requirementForRetarget,
+  requirementsForWorkflowRun,
   unavailableProviderMessage,
+  viabilityRefusalMessage,
 } from './provider-action-gate.ts';
 import { cockpitAssetRoutes, serveCockpitShell } from './shell-routes.ts';
 // The forwarded-principal HEADER NAMES, imported rather than re-spelled (D10 / D3's own history —
@@ -1455,6 +1460,47 @@ export function createApp(deps: ServerDeps) {
     return applyProviderEnablement(discovered, workspace.disabledProviders);
   };
   /**
+   * Fills `poolConnected` on every row of a `ProviderStatusResponse` that is actually SERVED to a
+   * client — `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 6/Phase 2. Additive
+   * and advisory only: nothing in this closure gates on the result, and `providerActionError`
+   * above never calls this — it answers from `providerStatus()`/`assessAccountViability` directly,
+   * neither of which needs this field.
+   *
+   * `refresh` PROBES each registered non-default account instead of peeking its cache — the
+   * `?refresh=1` top-up, so "Check again" repairs a cold aggregate without a restart. The
+   * unrefreshed read stays peek-only and pays nothing beyond the one JSON read this already needed.
+   *
+   * Cold means ABSENT, never `false`: a provider with no non-default accounts, or whose non-default
+   * accounts have never been probed, answers `undefined` ("no pool information"). A `false` the
+   * client trusted would grey out a working provider in the picker on the strength of a cache that
+   * was simply empty.
+   */
+  const withPoolConnected = async (
+    response: ProviderStatusResponse,
+    refresh: boolean,
+  ): Promise<ProviderStatusResponse> => {
+    const accounts = await loadAgentAccounts().catch(() => undefined);
+    if (!accounts) return response;
+    const profiles = listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS);
+    const providers = await Promise.all(
+      response.providers.map(async (row) => {
+        const candidates = profiles.filter((profile) => profile.provider === row.provider && !profile.isDefault);
+        if (candidates.length === 0) return row;
+        const statuses = await Promise.all(
+          candidates.map((profile) =>
+            refresh
+              ? providerAuth
+                .profileStatus(profile.provider, { id: profile.id, configDir: profile.path })
+                .catch(() => undefined)
+              : providerAuth.peekProfileStatus(profile.provider, profile.id)),
+        );
+        if (!refresh && statuses.every((status) => status === undefined)) return row; // cold: omit
+        return { ...row, poolConnected: statuses.some((status) => status?.status === 'connected') };
+      }),
+    );
+    return { providers };
+  };
+  /**
    * Whether `provider`'s account POOL, as `repoRoot` has it configured, has at least one
    * CONNECTED login of its own — independent of the discovered default `providerStatus` answers
    * for.
@@ -1495,7 +1541,16 @@ export function createApp(deps: ServerDeps) {
   };
 
   /**
-   * The gate: why a run cannot start against `required`, or null when it can.
+   * The gate for the TWO sites that keep blocking: Terminal and Open-in-CLI. Kept byte-identical
+   * to what `providerActionError` used to be in every observable way: same message, same
+   * `poolHasConnectedAccount` same-provider rescue, no `assessAccountViability` involved at all. A
+   * pinned handoff reattaches to a session inside ONE account's own config dir — there is no "auto"
+   * for it to fall through to (Solution 3). `/plan` used this too before Phase 5; it now has its
+   * own gate, {@link planAccountGate}, because unlike these two it DOES get a dispatch layer
+   * (`planChain`'s injected chooser — Solution 4b) and needed the requirement-aware read to feed
+   * it. Renaming this away from `providerActionError` is deliberate: a future call site that
+   * reaches for "the gate" by name should find the requirement-aware one below, not silently
+   * inherit the narrow one.
    *
    * VERIFY BEFORE YOU REFUSE. Auth state is served stale-while-revalidate (see
    * `ProviderAuthService.status`), so a cached "disconnected" may predate a login cezar could not
@@ -1517,7 +1572,7 @@ export function createApp(deps: ServerDeps) {
    * the only login a run can actually dispatch to. Absent (a caller with no project in scope, e.g.
    * a workspace-wide default-runner check) skips that step and answers exactly as before.
    */
-  const providerActionError = async (
+  const legacyProviderActionError = async (
     required: readonly ProviderId[],
     repoRoot?: string,
   ): Promise<string | null> => {
@@ -1539,6 +1594,129 @@ export function createApp(deps: ServerDeps) {
       stillBlocked.push(provider);
     }
     return unavailableProviderMessage(stillBlocked, fresh);
+  };
+
+  /**
+   * The gate for every REROUTABLE site (1, 3b, 4, 5, 6, 9) — `.ai/specs/2026-08-25-logged-out-
+   * account-fallback.md`, Solution 2. Same shape as {@link legacyProviderActionError} through its
+   * first four rungs (disabled → cheap cached-connected check → fresh re-probe →
+   * `poolHasConnectedAccount`'s same-provider rescue, all UNCHANGED), because those are cheap and
+   * already correct for a PINNED provider's own default row. What is new is the question asked once
+   * those rungs do not resolve it: not "is the first required provider's default connected", but
+   * "could dispatch land every one of these requirements somewhere real" —
+   * `assessAccountViability`, the same read `RunManager`'s own pickers consult, so an affirmative
+   * answer here is a claim dispatch can keep by construction.
+   *
+   * A requirement with no pin (`provider: undefined`, a provider-less `pool:*`) is invisible to the
+   * first four rungs — `unavailableProviderMessage`/`poolHasConnectedAccount` have no provider to
+   * check it against — so this only ever returns early when EVERY requirement is pinned and every
+   * pinned provider's own row is already fine. A provider-less requirement always falls through to
+   * `assessAccountViability`, which is exactly how `prod-host`'s own `pool:*` configuration
+   * gets answered correctly (V2, "THE REPORTED BUG, at the route").
+   *
+   * A requirement whose route names a SPECIFIC non-default account is, for the same reason,
+   * invisible to the first four rungs in the other direction: `unavailableProviderMessage` and
+   * `poolHasConnectedAccount` only ever read the discovered DEFAULT row, so a healthy default would
+   * wrongly clear a requirement that is actually going to dispatch on a different, disconnected,
+   * explicitly-named account (the composer-override case, V2). Such a requirement also always
+   * falls through to `assessAccountViability`, whose `candidatesFor` resolves the account the
+   * requirement's own route names rather than the provider's default.
+   */
+  const providerActionError = async (
+    requirements: readonly DispatchRequirement[],
+    repoRoot?: string,
+  ): Promise<string | null> => {
+    const pinned = PROVIDER_IDS.filter((provider) => requirements.some((r) => r.provider === provider));
+    const anyProviderless = requirements.some((r) => r.provider === undefined);
+    const namesSpecificAccount = requirements.some(
+      (r) => r.route.kind === 'account' && r.route.accountId !== DEFAULT_AGENT_ACCOUNT_ID,
+    );
+    const trustCheapRungs = !anyProviderless && !namesSpecificAccount;
+    const known = await providerStatus();
+    const message = unavailableProviderMessage(pinned, known);
+    if (message === null && trustCheapRungs) return null;
+    if (message !== null) {
+      // A DISABLED provider is a settings fact, not a probe result — unchanged, terminal, and out
+      // of scope for a viability rung that only ever narrows candidate sets in the negative
+      // direction (`disabledProviders` below is threaded into `assessAccountViability` for exactly
+      // that, never to make a disabled provider selectable).
+      const disabled = pinned.some((provider) =>
+        known.providers.find((row) => row.provider === provider)?.enabled === false);
+      if (disabled) return message;
+    }
+    const fresh = await providerStatus({ refresh: true });
+    if (repoRoot === undefined) return unavailableProviderMessage(pinned, fresh);
+    const stillBlocked: ProviderId[] = [];
+    for (const provider of pinned) {
+      const row = fresh.providers.find((r) => r.provider === provider);
+      if (row?.status === 'connected') continue;
+      if (await poolHasConnectedAccount(provider, repoRoot)) continue;
+      stillBlocked.push(provider);
+    }
+    if (stillBlocked.length === 0 && trustCheapRungs) return null;
+    const disabledProviders = fresh.providers.filter((row) => row.enabled === false).map((row) => row.provider);
+    const input = await loadViabilityInput(repoRoot, providerAuth, {
+      requirements,
+      disabledProviders,
+      providerRows: fresh.providers,
+    });
+    const viability = assessAccountViability(input);
+    return viability.placeable ? null : viabilityRefusalMessage(viability);
+  };
+
+  /**
+   * The gate for `/plan` (site 2, `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution
+   * 4b/Phase 5) — kept separate from {@link providerActionError} because `planChain` has no
+   * `RunManager` behind it. Relaxing this on `placeable` would hand `planChain` a chooser with
+   * nothing RUNNABLE to offer, spawn the logged-out default, and trade this 409 for the degraded
+   * one-step `fallback: true` plan (`planner.ts`'s own fallback). So the final rung asks
+   * `viability.requirements[0].runnable.length > 0` instead of `placeable`, the one gate in this
+   * file that does.
+   *
+   * Unlike {@link providerActionError} this always resolves a full `Viability` on the way to
+   * `null` rather than trusting a cheap cached-connected rung: the caller needs the requirement's
+   * `runnable` set either way, to tell `planChain`'s injected chooser which account to prefer. The
+   * disabled check stays a fast, un-probed exit (a settings fact, not a credentials one), and a
+   * refusal is verified against a fresh re-probe before it is returned, same as everywhere else in
+   * this spec — a stale cached negative must not lock planning out.
+   */
+  const planAccountGate = async (
+    repoRoot: string,
+    defaultRunner: ProviderId,
+  ): Promise<{ error: string; runnable?: undefined } | { error: null; runnable: readonly ResolvedAgentProfile[] }> => {
+    const known = await providerStatus();
+    const cheapMessage = unavailableProviderMessage([defaultRunner], known);
+    if (cheapMessage !== null) {
+      const disabled = known.providers.find((row) => row.provider === defaultRunner)?.enabled === false;
+      if (disabled) return { error: cheapMessage };
+    }
+    const [accounts, workspace] = await Promise.all([
+      loadAgentAccounts().catch(() => defaultAgentAccountStore()),
+      workspaceConfig.load(),
+    ]);
+    const requirement = requirementForPlanner(
+      defaultRunner,
+      accounts,
+      repoRoot,
+      workspace.resources.fallbackAcrossAccountsWhenLimited,
+    );
+    const evaluate = async (rows: ProviderStatusResponse) => {
+      const input = await loadViabilityInput(repoRoot, providerAuth, {
+        requirements: [requirement],
+        disabledProviders: rows.providers.filter((row) => row.enabled === false).map((row) => row.provider),
+        providerRows: rows.providers,
+      });
+      return assessAccountViability(input);
+    };
+    let viability = await evaluate(known);
+    let runnable = viability.requirements[0]?.runnable ?? [];
+    if (runnable.length === 0) {
+      // VERIFY BEFORE YOU REFUSE — the same re-probe `providerActionError` performs.
+      const fresh = await providerStatus({ refresh: true });
+      viability = await evaluate(fresh);
+      runnable = viability.requirements[0]?.runnable ?? [];
+    }
+    return runnable.length > 0 ? { error: null, runnable } : { error: plannerRefusalMessage(viability) };
   };
   const openTerminal = deps.openTerminal ?? openInTerminal;
   const openFile = deps.openFile ?? openFileInDefaultApp;
@@ -1643,6 +1821,11 @@ export function createApp(deps: ServerDeps) {
       return listProjects(selector);
     },
     semaphore: deps.semaphore,
+    // The SAME `ProviderAuthService` this closure's own `providerActionError` reads — a non-boot
+    // project's `RunManager` must learn credentials from the identical cache, not a second
+    // instance that would warm and latch independently
+    // (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1).
+    providerAuth,
     // Defense-in-depth for `.ai/specs/2026-08-15-duplicate-project-context-wipes-runs.md`:
     // `registerFolder`'s own boot short-circuit (above) is what keeps a duplicate row from ever
     // being WRITTEN, but a registry pre-dating that fix — or a row written by a concurrent
@@ -2431,12 +2614,17 @@ export function createApp(deps: ServerDeps) {
    * with several accounts would otherwise fan out a spawn storm at exactly the moment the browser is
    * fetching the bundle; nothing is waiting on this, so sequential costs nothing that matters.
    *
-   * Hosted mode warms only the defaults: the agent-profiles family is refused there, so there are
-   * no accounts to learn about.
+   * **CORRECTED, `.ai/specs/2026-08-25-logged-out-account-fallback.md`.** This used to stop after
+   * the defaults on `!capabilities().localHandoff`, on the theory that "the agent-profiles family
+   * is refused there, so there are no accounts to learn about." That is stale on a box running
+   * `CEZ_AUTO_ACCOUNTS=1`: `autoAccountsSweep` registers discovered logins straight into the store
+   * regardless of hosted mode, and it already runs before this warm. Gated on "there are registered
+   * non-default accounts" instead — which for a hosted box with the sweep off is the same empty
+   * loop as before, and for one with it on is now actually warm, which is what makes the
+   * `poolConnected` aggregate (Solution 6) correct there instead of permanently `undefined`.
    */
   const warmAgentKnowledge = async (): Promise<void> => {
     await providerAuth.status().catch(() => {});
-    if (!capabilities().localHandoff) return;
     const store = await loadAgentAccounts().catch(() => defaultAgentAccountStore());
     for (const account of listAgentProfiles(store, PROVIDER_IDS)) {
       if (account.isDefault) continue; // covered by `status()` above
@@ -2568,7 +2756,19 @@ export function createApp(deps: ServerDeps) {
       return { error: AGENT_MODELS_LOCKED_ERROR, status: 409 };
     }
     const fallback = (body.runner as RunnerId | undefined) ?? (await loadConfig(root)).defaultRunner;
-    const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), root);
+    const [accounts, workspace] = await Promise.all([
+      loadAgentAccounts().catch(() => defaultAgentAccountStore()),
+      workspaceConfig.load(),
+    ]);
+    const requirements = requirementsForWorkflowRun({
+      workflow,
+      accounts,
+      repoRoot: root,
+      fallback,
+      overrideAgentProfile: body.agentProfile,
+      fallbackAcrossAccountsWhenLimited: workspace.resources.fallbackAcrossAccountsWhenLimited,
+    });
+    const blocked = await providerActionError(requirements, root);
     if (blocked) return { error: blocked, status: 409 };
     // A composer override names an account the user just picked, so a stale id (deleted since the
     // page loaded) is answered honestly instead of quietly running on the default.
@@ -2630,7 +2830,8 @@ export function createApp(deps: ServerDeps) {
       queryZodValidator(z.object({ refresh: queryValue.refine((v) => v === undefined || v === '1') }), { message: 'refresh must be 1 when provided' }),
       async (c) => {
         const query = { data: c.req.valid('query') };
-        return c.json(await providerStatus({ refresh: query.data.refresh === '1' }));
+        const refresh = query.data.refresh === '1';
+        return c.json(await withPoolConnected(await providerStatus({ refresh }), refresh));
       },
     )
 
@@ -2652,9 +2853,9 @@ export function createApp(deps: ServerDeps) {
         } catch {
           return c.json({ error: 'Provider preference could not be saved.' }, 500);
         }
-        const result = applyProviderEnablement(
-          await providerAuth.status(),
-          workspace.disabledProviders,
+        const result = await withPoolConnected(
+          applyProviderEnablement(await providerAuth.status(), workspace.disabledProviders),
+          false,
         );
         const row = result.providers.find(({ provider: id }) => id === provider.data);
         if (row) workspaceEvents.emit('provider-status', row);
@@ -2672,7 +2873,7 @@ export function createApp(deps: ServerDeps) {
         if (!providerAuth.clearRuntimeAuthFailure(provider.data, body.data.authFailureId)) {
           return c.json({ error: 'Authentication incident changed. Refresh and try again.' }, 409);
         }
-        const result = await providerStatus({ refresh: true });
+        const result = await withPoolConnected(await providerStatus({ refresh: true }), true);
         const row = result.providers.find(({ provider: id }) => id === provider.data);
         if (row) workspaceEvents.emit('provider-status', row);
         return c.json(result);
@@ -4682,9 +4883,25 @@ export function createApp(deps: ServerDeps) {
     .post('/plan', jsonZodValidator(planSchema), async (c) => {
       const { root: repoRoot } = c.get('project');
       const parsed = { data: c.req.valid('json') };
-      const blocked = await providerActionError([(await loadConfig(repoRoot)).defaultRunner], repoRoot);
-      if (blocked) return c.json({ error: blocked }, 409);
-      return c.json(await planChain(repoRoot, parsed.data.task));
+      // `/plan` has no `RunManager` behind it (`planChain` builds its own runner + profile env),
+      // so the gate cannot merely relax on `placeable` the way every reroutable site's does — it
+      // has to hand `planChain` the account it is promising exists. `planAccountGate` (Solution 4b,
+      // Phase 5) answers both: whether to refuse, and — when it does not — which accounts are
+      // actually `runnable` right now.
+      const defaultRunner = (await loadConfig(repoRoot)).defaultRunner;
+      const gate = await planAccountGate(repoRoot, defaultRunner);
+      if (gate.error !== null) return c.json({ error: gate.error }, 409);
+      const runnable = gate.runnable;
+      const chooseAccount = async (
+        root: string,
+        preferred: ProviderId,
+      ): Promise<PlannerAccountChoice | undefined> => {
+        const chosen = runnable.find((profile) => profile.provider === preferred) ?? runnable[0];
+        if (!chosen) return undefined;
+        const { env } = await resolveProfileEnvForRoot(root, chosen.provider, chosen.isDefault ? undefined : chosen.id);
+        return { provider: chosen.provider, profileId: chosen.isDefault ? undefined : chosen.id, env };
+      };
+      return c.json(await planChain(repoRoot, parsed.data.task, chooseAccount));
     });
 
   // ---- GitHub automations --------------------------------------------------
@@ -5257,15 +5474,6 @@ export function createApp(deps: ServerDeps) {
       const run = store.getRun(id);
       if (!run) return c.json({ error: 'not found' }, 404);
       const parsed = { data: c.req.valid('json') };
-      // Stacking onto a queued prompt mutates an existing task and invokes no provider.
-      // Provider availability still gates live delivery after the record leaves `queued`, but
-      // must not strand prompt authoring just because an unrelated fallback provider is
-      // disconnected (provider-auth spec: disabling never blocks existing-task mutations).
-      // In the dequeue race, the ladder below safely turns this into a starting-state buffer.
-      if (run.status !== 'queued') {
-        const blocked = await providerActionError([providerForActiveRun(run)], repoRoot);
-        if (blocked) return c.json({ error: blocked }, 409);
-      }
       const content: ContentBlock[] = [
         ...parsed.data.images.map((img): ContentBlock => ({
           type: 'image',
@@ -5277,7 +5485,14 @@ export function createApp(deps: ServerDeps) {
       // than a status read here: the handler cannot observe the dequeue safely
       // (the record is written a tick later), the engine can.
       //   live session → delivered · still queued → folded into the prompt
-      //   starting up  → buffered  · anything else → 409, exactly as before
+      //   starting up  → buffered  · anything else → 409, below
+      //
+      // NO credential check precedes this (`.ai/specs/2026-08-25-logged-out-account-fallback.md`,
+      // Solution 4c): delivering into an ALREADY OPEN session, or folding into an already-queued
+      // prompt, invokes no provider and chooses no account, so the state of a login it is not going
+      // to use must not strand prompt authoring. An earlier draft of this handler gated here before
+      // `sendMessage`; that stopped a live conversation being interrupted by an unrelated login
+      // going stale for no reason the ladder needed.
       if (manager.sendMessage(id, content)) return c.json({ delivered: true });
 
       const currentRun = store.getRun(id);
@@ -5287,8 +5502,17 @@ export function createApp(deps: ServerDeps) {
       // deliver into, and it is not queued/starting, so reopen the backend via `--resume` and hand
       // this message in as the continuation prompt instead of answering `409 session closed`. A
       // live/queued/starting run never reaches this rung — those are handled above.
+      //
+      // THIS is the real gate on this route: `manager.continueRun` below is a genuine dispatch
+      // (`runContinuation`'s own reroute), so it is the one that gets the fallback.
       if (currentRun?.status === 'waiting' && !manager.isActive(id)) {
-        const blocked = await providerActionError([providerForExistingRun(currentRun, undefined)], repoRoot);
+        const workspace = await workspaceConfig.load();
+        const requirement = requirementForExistingRun(
+          currentRun,
+          undefined,
+          workspace.resources.fallbackAcrossAccountsWhenLimited,
+        );
+        const blocked = await providerActionError([requirement], repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
         const text = content
           .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
@@ -5413,7 +5637,13 @@ export function createApp(deps: ServerDeps) {
       if (agentModelsLocked(repoRoot) && parsed.data.model?.trim()) {
         return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
       }
-      const blocked = await providerActionError([providerForExistingRun(run, parsed.data.runner)], repoRoot);
+      const workspace = await workspaceConfig.load();
+      const requirement = requirementForExistingRun(
+        run,
+        parsed.data.runner,
+        workspace.resources.fallbackAcrossAccountsWhenLimited,
+      );
+      const blocked = await providerActionError([requirement], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
       const result = await manager.continueRun(id, {
         text: parsed.data.text,
@@ -5455,8 +5685,13 @@ export function createApp(deps: ServerDeps) {
       }
       // The provider being moved TO is the one that has to be usable — `providerForExistingRun`
       // falls back to the run's own when no override was sent, which is the right question for a
-      // retarget that only changes the account or the model.
-      const blocked = await providerActionError([providerForExistingRun(run, target.runner)], repoRoot);
+      // retarget that only changes the account or the model. The route is the RETARGET's own
+      // target, not the record's own session: `retargetQueuedRun` writes `target.agentProfile`
+      // onto the record before dispatch, so the record is stale for this one site
+      // (`requirementForRetarget`'s own doc comment).
+      const workspace = await workspaceConfig.load();
+      const requirement = requirementForRetarget(run, target, workspace.resources.fallbackAcrossAccountsWhenLimited);
+      const blocked = await providerActionError([requirement], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
 
       if (run.status === 'queued') {
@@ -5507,7 +5742,10 @@ export function createApp(deps: ServerDeps) {
       const sessionStep = [...run.steps].reverse().find((s) => s.sessionId);
       const sessionId = sessionStep?.sessionId;
       if (!sessionId) return c.json({ error: 'no agent session to resume' }, 409);
-      const blocked = await providerActionError([providerForExistingRun(run)], repoRoot);
+      // Site 7, DELIBERATELY not reroutable: this reattaches to a session inside ONE account's own
+      // config dir, and there is no "auto" for it to fall through to (Solution 3). Kept on
+      // `legacyProviderActionError` so it stays byte-identical.
+      const blocked = await legacyProviderActionError([providerForExistingRun(run)], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
       const cwd = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
       const command = resumeCommand(run.runner, sessionId);
@@ -5609,7 +5847,8 @@ export function createApp(deps: ServerDeps) {
       // and what the client's cliTargetResumes now labels. Resume-after-finish is untouched.
       const cliRunner = agentCliRunner(target);
       if (cliRunner) {
-        const blocked = await providerActionError([cliRunner], repoRoot);
+        // Site 8, DELIBERATELY not reroutable — same reasoning as site 7 above.
+        const blocked = await legacyProviderActionError([cliRunner], repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
         const engineOwnsSession = run.status === 'running' || run.status === 'queued' || run.status === 'waiting';
         const sessionStep = engineOwnsSession ? undefined : [...run.steps].reverse().find((s) => s.sessionId);
@@ -6182,7 +6421,19 @@ export function createApp(deps: ServerDeps) {
         const workflow = await resolveTodoWorkflow(repoRoot, todo);
 
         const fallback = parsed.data?.runner ?? (await loadConfig(repoRoot)).defaultRunner;
-        const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), repoRoot);
+        const [accounts, workspace] = await Promise.all([
+          loadAgentAccounts().catch(() => defaultAgentAccountStore()),
+          workspaceConfig.load(),
+        ]);
+        const requirements = requirementsForWorkflowRun({
+          workflow,
+          accounts,
+          repoRoot,
+          fallback,
+          overrideAgentProfile: undefined,
+          fallbackAcrossAccountsWhenLimited: workspace.resources.fallbackAcrossAccountsWhenLimited,
+        });
+        const blocked = await providerActionError(requirements, repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
 
         const run = manager.startRun(workflow, {
@@ -7451,6 +7702,11 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   const sharedContexts = deps.contexts ?? new ProjectContexts({
     listProjects,
     semaphore: deps.semaphore,
+    // Same `ProviderAuthService` `createApp` below will use (falling back to its own fresh
+    // instance only when `deps.providerAuth` was never set, exactly as `createApp`'s `providerAuth
+    // = deps.providerAuth ?? new ProviderAuthService()` does) —
+    // `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1.
+    providerAuth: deps.providerAuth,
     automationStore: (projectId, root) => automationCoordinator.store(projectId, root)!,
     // Spec 2026-08-22-cross-project-worktree-orphan-prune-safety, Phase 3 prerequisite: without
     // this, `deps.bootRoot` never reaches `ProjectContexts` in production (`createApp`'s own

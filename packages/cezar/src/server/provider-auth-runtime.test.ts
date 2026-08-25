@@ -298,6 +298,74 @@ describe('watchProviderRuntimeAuthFailures', () => {
     expect(onInvalidated).toHaveBeenCalledTimes(1);
   });
 
+  // V1, `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1: the ACCOUNT a runtime
+  // rejection is attributed to, mirroring the step-first-run-second precedence already applied to
+  // the PROVIDER above. A step-less event is the routine case (only `error` with a `stepId` is the
+  // well-trodden path; `session.error`/`note` never carry one), not a corner one.
+  describe('per-account attribution', () => {
+    it('a STEP-LESS failure rejects the RUN account (agentProfile), not the provider default', () => {
+      watch();
+      const run = store.createRun({ author: localCliAuthor(),
+        title: 'secondary',
+        workflow: 'quick-task',
+        task: 'work',
+        runner: 'claude',
+        agentProfile: 'secondary',
+        steps: [],
+      });
+
+      store.appendEvent(run.id, {
+        type: 'error',
+        message: 'Failed to authenticate. API Error: 401 OAuth access token has been revoked.',
+      });
+
+      expect(providerAuth.isRuntimeRejected('claude', 'secondary')).toBe(true);
+      expect(providerAuth.isRuntimeRejected('claude', undefined)).toBe(false);
+    });
+
+    it.each(['session.error', 'note'] as const)(
+      'a step-less %s failure also attributes to the RUN account, not the default',
+      (type) => {
+        watch();
+        const run = store.createRun({ author: localCliAuthor(),
+          title: type,
+          workflow: 'quick-task',
+          task: 'work',
+          runner: 'claude',
+          agentProfile: 'secondary',
+          steps: [],
+        });
+
+        store.appendEvent(run.id, { type, message: 'OAuth access token is invalid' });
+
+        expect(providerAuth.isRuntimeRejected('claude', 'secondary')).toBe(true);
+        expect(providerAuth.isRuntimeRejected('claude', undefined)).toBe(false);
+      },
+    );
+
+    it('the positive control: a stepId naming a step whose profileId is default rejects the default, not the run account', () => {
+      watch();
+      const run = store.createRun({ author: localCliAuthor(),
+        title: 'step-first',
+        workflow: 'quick-task',
+        task: 'work',
+        runner: 'claude',
+        agentProfile: 'secondary',
+        steps: [{ id: 'work', name: 'Work', kind: 'agent' }],
+      });
+      store.updateStep(run.id, 'work', { backend: 'claude', profileId: 'default' });
+
+      store.appendEvent(run.id, {
+        type: 'error',
+        stepId: 'work',
+        message: 'Failed to authenticate. API Error: 401 OAuth access token has been revoked.',
+      });
+
+      expect(providerAuth.isRuntimeRejected('claude', undefined)).toBe(true);
+      expect(providerAuth.isRuntimeRejected('claude', 'secondary')).toBe(false);
+    });
+  });
+
   it('attaches boot-store observation before recovery can emit an auth failure', async () => {
     const run = store.createRun({ author: localCliAuthor(),
       title: 'boot recovery',
