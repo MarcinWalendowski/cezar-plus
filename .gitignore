@@ -10,6 +10,19 @@ dist/
 # cezar runtime state in this repo (runs, worktrees, launch-key)
 .ai/cezar/
 
+# Scratch a shipping step creates at the repo root. NOT repo content, and ignoring it is what
+# stops it being committed — it is a nested git repo, so `git add -A` records it as a GITLINK
+# (mode 160000, a submodule pointer) rather than as files, which is both junk in the tree and a
+# broken submodule reference for anyone who clones.
+#
+# Measured 2026-08-25: 53 `cez/*` branches already carry it, introduced by commits titled `msg`
+# (944bd88b, d992c296). `main` is clean and must stay that way. It also blocks shipping outright:
+# `testedRevisionShipped` (workflows/postconditions.ts) compares the tree the tests attested with
+# the tree being shipped and allows only record paths to differ, so a run whose tests attested a
+# tree WITHOUT this entry and whose commit added it fails `commit-push` and never reaches `merge`.
+# That is exactly how workspace run 90836867 died with its feature complete and pushed.
+.ship-drafts
+
 # locally installed agent skills (per-machine installs, not repo content)
 .agents/
 skills-lock.json

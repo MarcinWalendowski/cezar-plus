@@ -43,6 +43,20 @@ import { createRunInputBaseSchema, runRecordSchema } from './runs.ts';
  */
 export const workspaceRunStartInputSchema = createRunInputBaseSchema
   .omit({ worktree: true, variants: true, todoId: true })
+  .extend({
+    /**
+     * Start the tasks this run files, instead of leaving them on the Filed board
+     * (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`). The composer's checkbox.
+     *
+     * **Optional, defaulting to OFF, and that direction is the decision.** A workspace run's whole
+     * job is to turn one input into work in several projects; if the default were on, a vague
+     * input would fan out into a dozen live runs before anyone read them. Off means the default
+     * outcome is rows a person approves, and switching it on is a per-run act, never a config
+     * default. It has to be declared here rather than ridden in as an unknown key because this
+     * schema is `.strict()` — see above.
+     */
+    autoStart: z.boolean().optional(),
+  })
   .strict()
   .refine((b) => !(b.workflow && b.steps), {
     message: 'provide "workflow" or "steps", not both',

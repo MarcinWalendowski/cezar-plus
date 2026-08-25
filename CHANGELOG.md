@@ -1,10 +1,58 @@
 # Unreleased
 
+## ⚠️ Breaking
+
+- 🧭 **A workspace-scoped run routes work instead of doing it** (spec
+  `.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`). Picking **Workspace** in the composer
+  used to start one run that edited **every registered project's real working tree**. It now reads
+  every project, files a task on each project's own board with `cez todo add --project`, and edits
+  no project file at all. Tick **Start filed tasks** (default off) and it starts them too — each
+  in its own project, its own worktree, through the ordinary per-task path.
+
+  **Why it had to change, measured rather than assumed.** Per-project worktree isolation was
+  *optional*, and its fallback was the project's **live checkout with no lease of any kind** — a
+  workspace run deliberately takes none, so up to `maxParallel` of them shared one tree. On
+  2026-08-24 five runs were each handed the same checkout, their grants 0–106 s apart, while the
+  grant's `isolated` flag (true whenever *any* project isolated) told all five they were in a
+  private worktree that cezar would apply back and delete. Four independent mechanisms, one
+  outcome: agents overwriting each other in a tree none of them owned.
+
+  **Migration:** a workspace task now files project tasks; run those. A script posting to
+  `POST /api/v1/workspace/runs` and expecting file changes should post to that project's own
+  `POST /api/v1/p/<projectId>/runs` instead.
+
+  **Nothing was removed.** The route, every field on it, and `workspaceWorktrees` on the run
+  record all still parse; the settle-time apply/discard and the orphan prune stay, so a run
+  started by an older cezar still lands its work and still cleans up. Only the code that *creates*
+  cross-project worktrees is gone. Per the 0.x rule in `BACKWARD_COMPATIBILITY.md` this ships in a
+  **minor** bump (0.11.0), called out as breaking.
+
+## 🛠 Fixed
+
+- **Workspace revision checks now follow the project worktrees.** `tested-revision-shipped`
+  captures and verifies every persisted workspace project against its own tested tree. Scratch
+  control files such as `.cezar-control-path` and gate logs no longer reject a valid project
+  commit, while a real post-test source change still fails closed and names its project and path.
+  Existing single-project and persisted single-tree attestations remain valid. See
+  `.ai/specs/2026-08-25-workspace-revision-attestation.md`.
+
 ## 🔄 Synced from upstream
 
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
+
+- 🧵 **`input-to-tasks`, the workflow a workspace run uses** — three steps: gather context
+  across the whole workspace, file the tasks it implies, and (optionally) start them. No step has
+  `Edit` or `Write`, so "it does not touch your files" is structural rather than a request in a
+  prompt.
+- ▶️ **`cezar todo start <id> [--project <id|path>] [--json]`** — marks an already-filed todo
+  `autostart` so the cockpit picks it up. Accepts an id prefix, refuses an ambiguous one, and
+  refuses a todo that is archived or already started.
+- ☑️ **`autoStart` on `POST /api/v1/workspace/runs`** (optional, default `false`) and its
+  **Start filed tasks** chip in the composer. Off means the key is absent, so the default
+  submission is byte-identical to what an older cockpit sends.
+
 - 🎚 **cezar classifies a task into a row of that table when nobody pinned one** (spec
   `.ai/specs/2026-08-24-auto-classify-task-model.md`).
 

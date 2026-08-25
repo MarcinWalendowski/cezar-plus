@@ -1,5 +1,10 @@
 # Filing (and optionally auto-starting) a workspace task from a running task
 
+**CORRECTED 2026-08-25:** The original Phase 1 and Phase 2 CLI, prompt, and resident-context
+watcher are live in the `dc64b741` release. The remaining cold-project gap was fixed in
+`e8a2b1d6` on `origin/main`, and still awaits manual deployment and production QA. The status
+below is historical.
+
 **Status:** implemented — Phase 1 + 2 (Phase 3 deferred). QA needed: backend deploy (cezar.service
 restart) pending, so the agent-prompt doc and the auto-start watcher are not yet live on prod;
 the `cezar todo add` CLI works after a dist sync without a restart. Analytics left as

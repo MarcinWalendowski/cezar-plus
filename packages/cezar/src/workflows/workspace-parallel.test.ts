@@ -228,14 +228,16 @@ describe('workspace runs do not take the repository-root lease (W3)', () => {
 
 
 /**
- * Cleanup on a non-success ending (spec 2026-08-20-workspace-run-worktree-isolation, X3).
+ * REWRITTEN 2026-08-25 (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 1). This
+ * asserted the X3 cleanup — that a `failed`/`cancelled`/stopped workspace run removed its twelve
+ * checkouts and kept their `cez/<id8>` branches. A workspace run cuts no worktree at all now, so
+ * the guarantee to hold it to is the stronger one: it left NOTHING behind, in either direction.
  *
- * `applyWorkspaceRun` had exactly one call site — inside `settleSuccess` — so a workspace run that
- * ended `failed`, `cancelled` or stopped never applied back AND never removed anything. Twelve full
- * checkouts, per run, forever. Apply-on-success-only is still the rule (W7); leak-on-everything-
- * else was not.
+ * The discard mechanism itself is unchanged and keeps its own coverage in
+ * `workspace/workspace-worktrees.test.ts` — run.ts still calls it for records written by an older
+ * cezar (`BACKWARD_COMPATIBILITY.md`), it just never creates a new one to call it on.
  */
-describe('a workspace run that does not succeed discards its worktrees and keeps its branches', () => {
+describe('a workspace run that does not succeed leaves the projects exactly as it found them', () => {
   const FAILS: WorkflowDef = {
     name: 'fails',
     source: 'built-in',
@@ -243,7 +245,7 @@ describe('a workspace run that does not succeed discards its worktrees and keeps
   };
 
   it(
-    'removes the directory, keeps cez/<id8>, and leaves no leftover entry on the record',
+    'cut no worktree and no cez/<id8> branch, and carries no entry on the record',
     async () => {
       const bootRoot = tempDir('cez-ws-discard-boot-');
       const project = gitRepo('cez-ws-discard-project-');
@@ -259,30 +261,23 @@ describe('a workspace run that does not succeed discards its worktrees and keeps
         'the failing workspace run to settle',
       );
       expect(store.getRun(run.id)?.status).toBe('failed');
-      // The status lands in the terminal block and the discard runs immediately after it, so
-      // "settled" is not yet "cleaned up". Wait for the record to lose its entries — and swallow
-      // the timeout, so a regression fails on the assertions below with a readable diff rather
-      // than on a bare `timed out`.
-      await waitFor(
-        () => (store.getRun(run.id)?.workspaceWorktrees?.length ?? 0) === 0,
-        'the discard to clear the record',
-        10_000,
-      ).catch(() => undefined);
 
-      // The directory is gone — the gigabytes this fixes...
+      // Nothing was ever cut — not the directory...
       expect(existsSync(join(project, '.ai/cezar/worktrees', run.id))).toBe(false);
-      // ...and the branch is still there, which is what makes discarding safe.
+      // ...and not the branch either, which is the half that changed: a discarded worktree used to
+      // leave `cez/<id8>` behind deliberately, and there is now no work anywhere to preserve.
       const branches = execFileSync('git', ['branch', '--list', branchFor(run.id)], {
         cwd: project,
         encoding: 'utf8',
       });
-      expect(branches).toContain(branchFor(run.id));
-      // No leftover entry pointing at a path that no longer exists — the shape three finished runs
+      expect(branches.trim()).toBe('');
+      // No entry pointing at a path that never existed — the shape three finished runs
       // (`ec6e8e06`, `be31d9e9`, `ef9901e3`) were measured carrying on 2026-08-20.
       expect(store.getRun(run.id)?.workspaceWorktrees ?? []).toEqual([]);
-      // And nothing was applied into the real checkout: the run did not succeed.
-      // `.ai/` is cezar's own orchestration state, not worktree output; exclude that path while
-      // still catching every tracked edit and every other untracked file the failed run created.
+      // And the live checkout is untouched. This assertion is the one that outlived the rewrite
+      // unchanged, and it is now the primary claim rather than a corollary of "success only".
+      // `.ai/` is cezar's own orchestration state, not run output; exclude that path while
+      // still catching every tracked edit and every other untracked file the run created.
       expect(
         execFileSync('git', ['status', '--porcelain', '--', '.', ':(exclude).ai'], {
           cwd: project,

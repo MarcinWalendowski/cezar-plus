@@ -4,8 +4,10 @@ import {
   markStarted,
   onTodosChanged,
   readTodos,
+  readTodosSnapshot,
   todoTaskText,
   type TodoItem,
+  type TodoReadSnapshot,
   type TodoStartOptions,
 } from './todos.ts';
 import { resolveTodoWorkflow, type RunManager } from './workflows/run.ts';
@@ -148,6 +150,22 @@ export interface TodoAutostartProject {
    * the floor that exists either way.
    */
   onRefused?: (refusal: AutostartRefusal) => void;
+}
+
+export function hasPendingAutostartTodos(snapshot: Pick<TodoReadSnapshot, 'items'>): boolean {
+  return snapshot.items.some(
+    (todo) => todo.autostart === true && todo.startedTaskId === undefined && !isTombstoned(todo),
+  );
+}
+
+export interface TodoAutostartSnapshot extends TodoReadSnapshot {
+  pending: boolean;
+}
+
+/** Snapshot the autostart inbox without entering the normal id-healing write path. */
+export async function readTodoAutostartSnapshot(dataDir: string): Promise<TodoAutostartSnapshot> {
+  const snapshot = await readTodosSnapshot(dataDir);
+  return { ...snapshot, pending: hasPendingAutostartTodos(snapshot) };
 }
 
 /**

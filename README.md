@@ -350,6 +350,23 @@ on a collision), and `/p/default/…` always means the project cezar was started
 in. The sidebar shows one collapsible group per project — each with its own nav
 and task list — and the new-task composer names the project it will run in.
 
+**Workspace scope routes work, it does not do it.** The composer's project pill
+also offers **Workspace**, which is what the sidebar's *New task* opens by
+default. A workspace-scoped task reads every registered project — the whole
+grant, no worktrees — works out what the input implies, and **files a task on
+each project's own board**. It edits no project file, so it needs no lock and
+cannot collide with the runs already going. Tick **Start filed tasks** and it
+starts them too, each in its own project and its own worktree, the same as
+starting them by hand. Leave it off (the default) and they wait for you.
+
+> **Breaking, in the next minor (0.11.0).** A workspace-scoped run used to edit
+> every registered project's working tree directly and merge the diffs back.
+> Now it files tasks; run those. If you have a script posting to
+> `/api/v1/workspace/runs` and expecting file changes, point it at a project's
+> own `POST /api/v1/p/<projectId>/runs` instead. Nothing was removed: the route,
+> its fields and the run record all still parse, and a run started by an older
+> cezar still lands and cleans up its worktrees.
+
 **Adding a project** — the **+** button beside *New task*:
 
 - 📂 **Open local folder…** browses from the configured browse root

@@ -120,7 +120,12 @@ describe('RunManager — a workspace run hands its grant to the spawn', () => {
     // ENTIRE grant the agent ever learns about, and the cwd contains none of the work.
     expect(spec.systemPrompt).toContain('/w/monorepo/cezar');
     expect(spec.systemPrompt).toContain('/w/black');
-    expect(spec.systemPrompt).toMatch(/do\s+NOT commit/i);
+    // CHANGED 2026-08-25 (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`): a workspace run
+    // does not edit the projects at all now, so the guarantee the prompt must carry is "do not
+    // write", not the weaker "do not commit" this asserted while the run still edited live trees.
+    expect(spec.systemPrompt).toMatch(/do\s+NOT edit/i);
+    expect(spec.systemPrompt).toContain('cez todo add');
+    expect(spec.systemPrompt).not.toMatch(/ISOLATED git worktree/i);
   });
 
   it('changes nothing for an ordinary run', async () => {

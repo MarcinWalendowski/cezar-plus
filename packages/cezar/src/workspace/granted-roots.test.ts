@@ -208,10 +208,97 @@ describe('workspaceGrantSystemPrompt', () => {
     expect(prompt).not.toContain('- gone: /w/gone');
   });
 
-  it('tells the agent not to commit, because there is no worktree between it and the user', () => {
-    // Not decoration: every edit lands in the real working tree beside whatever the user had in
-    // progress, so a helpful `git commit -am` commits someone else's work.
-    expect(workspaceGrantSystemPrompt(grant)).toMatch(/do\s+NOT commit/i);
+  it('tells the agent not to write to the projects at all, not merely not to commit', () => {
+    // CHANGED 2026-08-25 (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`). This used to
+    // assert only `/do\s+NOT commit/i`, which was the right assertion for the old design: the run
+    // edited the real trees and the one thing it must not do was commit someone else's work
+    // alongside its own. A workspace run no longer edits them at all, so "don't commit" is now too
+    // weak to be the guarantee — an agent that edits twelve live checkouts and dutifully does not
+    // commit still leaves twelve dirty trees for the next task to trip over, which is exactly the
+    // residue found in prod on 2026-08-24.
+    const prompt = workspaceGrantSystemPrompt(grant) ?? '';
+    expect(prompt).toMatch(/do\s+NOT edit/i);
+    expect(prompt).toMatch(/commit/i);
+    expect(prompt).toContain('cez todo add');
+  });
+
+  it('never tells a NON-isolated run that its paths are worktrees that get applied back', () => {
+    // The defect this spec exists to close (V3). `isolated` used to be `worktrees.length > 0`, so
+    // one isolated project made the prompt claim isolation for ALL of them — including the ones
+    // that had fallen back to the live checkout. Five prod runs were told that about the same live
+    // `cezar` tree on 2026-08-24. A claim about a set must be true of every member.
+    const prompt = workspaceGrantSystemPrompt(grant) ?? '';
+    expect(prompt).not.toMatch(/ISOLATED git worktree/i);
+    expect(prompt).not.toMatch(/applies your changes back/i);
+  });
+
+  it('treats a PARTIALLY isolated grant as not isolated', () => {
+    // The mutation that matters: with `isolated = worktrees.length > 0` this test fails, because
+    // one worktree out of two would make the whole prompt claim isolation.
+    const partial = buildWorkspaceGrant(
+      [
+        { id: 'cezar', name: 'cezar', root: '/home/u/monorepo/cezar', status: 'ok' },
+        { id: 'mw-site', name: 'mw-site', root: '/home/u/monorepo/mw-site', status: 'ok' },
+      ],
+      [
+        {
+          root: '/home/u/monorepo/cezar',
+          worktreePath: '/home/u/monorepo/cezar/.ai/cezar/worktrees/r1',
+          branch: 'cez/r1',
+          baseBranch: 'main',
+        },
+      ],
+    );
+    expect(partial.isolated).toBe(false);
+    const prompt = workspaceGrantSystemPrompt(partial) ?? '';
+    expect(prompt).not.toMatch(/ISOLATED git worktree/i);
+    // …and the project that DID get one is still granted at its worktree path, because the legacy
+    // apply-back still reads these paths. Dropping isolation from the CLAIM must not drop the
+    // worktree from the GRANT, or an in-flight legacy run loses the tree its work is in.
+    expect(partial.paths.get('/home/u/monorepo/cezar')).toBe(
+      '/home/u/monorepo/cezar/.ai/cezar/worktrees/r1',
+    );
+  });
+
+  it('still reports a FULLY isolated legacy grant as isolated', () => {
+    // The other direction, so the change above is a narrowing and not a blanket `false`: a run
+    // recorded before this spec, whose every project still has its worktree, keeps the old prompt
+    // — its apply-back is still real and the agent still needs to be told about it.
+    const full = buildWorkspaceGrant(
+      [{ id: 'cezar', name: 'cezar', root: '/home/u/monorepo/cezar', status: 'ok' }],
+      [
+        {
+          root: '/home/u/monorepo/cezar',
+          worktreePath: '/home/u/monorepo/cezar/.ai/cezar/worktrees/r1',
+          branch: 'cez/r1',
+          baseBranch: 'main',
+        },
+      ],
+    );
+    expect(full.isolated).toBe(true);
+    expect(workspaceGrantSystemPrompt(full) ?? '').toMatch(/ISOLATED git worktree/i);
+  });
+
+  it('grants a nested non-git project its OWN root, never a path synthesized from a neighbour', () => {
+    // V3's second half (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`). The `brand` shape:
+    // a project with no `.git` of its own, sitting inside a checkout that ignores it. Under the
+    // worktree design its granted path was built by rebasing its root onto the PARENT repo's
+    // worktree — a directory that does not exist, because the parent's `.gitignore` means the
+    // worktree checkout never creates it. The agent was then handed a path it could not open, and
+    // the failure surfaced as "the file isn't there", not as a grant defect.
+    //
+    // With no worktrees there is nothing to rebase onto, so this is now structurally impossible —
+    // which is exactly why it is worth pinning: the assertion is "the path came from the registry",
+    // and it goes red the moment anything reintroduces a derived one.
+    const grant = buildWorkspaceGrant([
+      project('monorepo', '/home/u/monorepo'),
+      project('brand', '/home/u/monorepo/brand'),
+    ]);
+    expect(grant.paths.get('/home/u/monorepo/brand')).toBe('/home/u/monorepo/brand');
+    expect(workspaceGrantSystemPrompt(grant) ?? '').toContain('/home/u/monorepo/brand');
+    // Every granted path is a registry root, verbatim — no derived third path anywhere.
+    const registryRoots = new Set(['/home/u/monorepo', '/home/u/monorepo/brand']);
+    for (const path of grant.paths.values()) expect(registryRoots.has(path)).toBe(true);
   });
 
   it('is undefined when nothing is reachable, rather than claiming an empty workspace', () => {

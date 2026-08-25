@@ -228,8 +228,9 @@ import {
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { MAX_APPROVERS } from '../runs/approvals.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
-import { agentHomePaths, expandTilde } from '../paths.ts';
+import { agentHomePaths, expandTilde, workspaceConfigPath } from '../paths.ts';
 import { backupEnabled, clusterEnabled, isLoopbackHostHeader, normalizeHostname, resolveAuthProvider, resolveCapabilities } from './capabilities.ts';
+import { createLazyProjectIntentDiscovery, type LazyProjectIntentDiscovery } from './lazy-project-intents.ts';
 // D3's single construction of "who is this request". Imported STATICALLY, unlike most other
 // `../auth/*` modules (which `src/index.ts` reaches only through a `CEZ_AUTH`-gated dynamic
 // `import()`), and that asymmetry is deliberate: `auth/principal.ts` has no runtime imports of
@@ -302,6 +303,11 @@ import {
   type ForwardedPrincipalHeaders,
 } from '../supervisor/forwarded-principal.ts';
 
+export interface ServerProjectAccess {
+  resolveBootProject(projects?: readonly WorkspaceProject[]): Promise<string>;
+  listVisibleProjects(): Promise<readonly ProjectListEntry[]>;
+}
+
 export interface ServerDeps {
   repoRoot: string;
   store: RunStore;
@@ -334,6 +340,10 @@ export interface ServerDeps {
    *  from `initWorkspace` in src/index.ts. Optional: legacy callers/tests get
    *  a lazy registry lookup by `repoRoot`, falling back to the repo's slug. */
   bootProjectId?: string;
+  /** Shared boot identity and capability-filtered registry loader for lazy contexts and discovery. */
+  projectAccess?: ServerProjectAccess;
+  /** Test seam for the passive discovery interval. Production uses five seconds. */
+  lazyProjectIntentIntervalMs?: number;
   /** Per-project context map (multi-project spec, step 2.2). Non-boot
    *  `/api/p/:projectId/*` requests resolve their `{store, manager, …}` here,
    *  built lazily on first touch. Optional so legacy callers change nothing —
@@ -1425,6 +1435,34 @@ async function probeWritableDir(dir: string, create: boolean): Promise<string | 
   }
 }
 
+function createProjectAccess(
+  repoRoot: string,
+  bootProjectId: string | undefined,
+  bindHost: string | undefined,
+): ServerProjectAccess {
+  let bootProjectCache = bootProjectId;
+  const resolveBootProject = async (projects?: readonly WorkspaceProject[]): Promise<string> => {
+    if (bootProjectCache) return bootProjectCache;
+    let registry = projects ?? [];
+    try {
+      registry = projects ?? (await loadWorkspaceConfig()).projects;
+      const real = await realpath(repoRoot).catch(() => repoRoot);
+      const match = registry.find((project) => project.root === real || project.root === repoRoot);
+      if (match) bootProjectCache = match.id;
+    } catch {
+      // Unreadable workspace state falls back to a deterministic slug.
+    }
+    return bootProjectCache ?? allocateProjectSlug(repoRoot, registry.map((project) => project.id));
+  };
+  const listVisibleProjects = async (): Promise<readonly ProjectListEntry[]> => {
+    const selector = resolveCapabilities(process.env, bindHost).singleProject
+      ? { projectId: await resolveBootProject() }
+      : undefined;
+    return listProjects(selector);
+  };
+  return { resolveBootProject, listVisibleProjects };
+}
+
 // The return type is INFERRED on purpose: it is the chained app type built at the bottom of
 // this function, and `AppType` (src/server/app-type.ts) is `ReturnType<typeof createApp>`.
 // Annotating it `Hono` here would erase every route from the type and leave the typed client
@@ -1731,20 +1769,8 @@ export function createApp(deps: ServerDeps) {
   // back to its would-be slug, so `bootProject` always names the repo this
   // server was started in. Strictly non-fatal, zero-config: every failure path
   // degrades to the slug fallback, never an error.
-  let bootProjectCache = bootProjectId;
-  const resolveBootProject = async (projects?: readonly WorkspaceProject[]): Promise<string> => {
-    if (bootProjectCache) return bootProjectCache;
-    let registry = projects ?? [];
-    try {
-      registry = projects ?? (await loadWorkspaceConfig()).projects;
-      const real = await realpath(bootRoot).catch(() => bootRoot);
-      const match = registry.find((p) => p.root === real || p.root === bootRoot);
-      if (match) bootProjectCache = match.id;
-    } catch {
-      // unreadable workspace — fall through to the slug fallback below
-    }
-    return bootProjectCache ?? allocateProjectSlug(bootRoot, registry.map((project) => project.id));
-  };
+  const projectAccess = deps.projectAccess ?? createProjectAccess(bootRoot, bootProjectId, bindHost);
+  const resolveBootProject = projectAccess.resolveBootProject;
   // Health's workspace garnish: id+name ONLY — never `root` (#431, see the
   // health route). Reads only the registry file; no per-root status probes,
   // so health stays cheap enough for the bookmarklet's 800 ms port sweep.
@@ -1814,12 +1840,7 @@ export function createApp(deps: ServerDeps) {
   // Non-boot projects build lazily on first scoped request; their managers
   // count against the same workspace semaphore as the boot manager (step 2.5).
   const contexts = deps.contexts ?? new ProjectContexts({
-    listProjects: async () => {
-      const selector = capabilities().singleProject
-        ? { projectId: await resolveBootProject() }
-        : undefined;
-      return listProjects(selector);
-    },
+    listProjects: projectAccess.listVisibleProjects,
     semaphore: deps.semaphore,
     // The SAME `ProviderAuthService` this closure's own `providerActionError` reads — a non-boot
     // project's `RunManager` must learn credentials from the identical cache, not a second
@@ -7698,9 +7719,10 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   deps.drain?.registerStream(() => socketHub.drainClients());
   const automationCoordinator = new AutomationCoordinator({ listProjects });
   const bootProjectId = deps.bootProjectId ?? 'default';
+  const projectAccess = deps.projectAccess ?? createProjectAccess(deps.repoRoot, deps.bootProjectId, deps.bindHost);
   const bootAutomationStore = automationCoordinator.store(bootProjectId, deps.repoRoot)!;
   const sharedContexts = deps.contexts ?? new ProjectContexts({
-    listProjects,
+    listProjects: projectAccess.listVisibleProjects,
     semaphore: deps.semaphore,
     // Same `ProviderAuthService` `createApp` below will use (falling back to its own fresh
     // instance only when `deps.providerAuth` was never set, exactly as `createApp`'s `providerAuth
@@ -7727,11 +7749,25 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   const app = createApp({
     ...deps,
     contexts: sharedContexts,
+    projectAccess,
     automationStore: bootAutomationStore,
     workspaceEvents,
     socketHub,
     automationsChanged: () => rescheduleAutomations(),
   });
+  // Cold-project intent discovery starts only after createApp has registered both live watcher
+  // callbacks. A discovered context therefore reaches autostart and reopen reconciliation in the
+  // same turn that it becomes resident.
+  const lazyProjectIntentDiscovery: LazyProjectIntentDiscovery = createLazyProjectIntentDiscovery({
+    contexts: sharedContexts,
+    loadProjects: projectAccess.listVisibleProjects,
+    workspaceConfigPath: workspaceConfigPath(process.env),
+    bootRoot: deps.repoRoot,
+    ...(deps.lazyProjectIntentIntervalMs !== undefined
+      ? { intervalMs: deps.lazyProjectIntentIntervalMs }
+      : {}),
+  });
+  void lazyProjectIntentDiscovery.refresh();
   // SECURITY: default to loopback. This server executes agents locally and its endpoints are
   // same-origin-trusted (only /api/health is CORS-open); binding to a non-loopback host would
   // expose an agent-executing box to the network. `bindHost` exists only for a deliberate
@@ -7841,7 +7877,12 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
       })).then(() => automationScheduler.start()).catch(() => undefined);
     }).catch(() => undefined);
   });
-  server.once('close', () => { unsubscribe(); automationScheduler.stop(); backupScheduler.stop(); });
+  server.once('close', () => {
+    lazyProjectIntentDiscovery.stop();
+    unsubscribe();
+    automationScheduler.stop();
+    backupScheduler.stop();
+  });
   socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost, deps.sessionResolver));
   // The cluster's one wiring line (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, PLAN 1.5).
   // Lives here, not in `createApp`, because `ClusterLinkServer.attach()` needs the real, listening

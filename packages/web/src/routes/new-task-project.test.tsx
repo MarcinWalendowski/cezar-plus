@@ -122,8 +122,14 @@ const OTHER_SKILLS: Skill[] = [
   { name: 'ship-storefront', description: 'Deploy the storefront', body: '', path: '/p/ship.md', source: 'ai' },
 ]
 
+/** Two workflows since 2026-08-25 (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`): the
+ *  workspace scope filters this catalog down to `input-to-tasks`, and a one-entry fixture cannot
+ *  tell a filter that keeps the right row from one that keeps every row it is given. */
 const BOOT_WORKFLOWS: WorkflowsResponse = {
-  workflows: [{ name: 'quick-task', description: 'Single step', source: 'built-in', steps: [] }],
+  workflows: [
+    { name: 'quick-task', description: 'Single step', source: 'built-in', steps: [] },
+    { name: 'input-to-tasks', description: 'Read the workspace, file tasks', source: 'built-in', steps: [] },
+  ],
   issues: [],
 }
 const OTHER_WORKFLOWS: WorkflowsResponse = {
@@ -318,7 +324,7 @@ describe('switching project', () => {
     // The boot project reads the unscoped legacy surface (step 3.1) …
     fireEvent.click(sourcePill())
     await screen.findByPlaceholderText('search skills & workflows…')
-    expect(sourceRefs()).toEqual(['om-fix', 'quick-task'])
+    expect(sourceRefs()).toEqual(['om-fix', 'quick-task', 'input-to-tasks'])
     fireEvent.keyDown(document.body, { key: 'Escape' })
 
     await switchProject(OTHER)
@@ -449,6 +455,10 @@ describe('Workspace', () => {
     for (const key of ['worktree', 'variants', 'todoId']) {
       expect(posted?.body as Record<string, unknown>).not.toHaveProperty(key)
     }
+    // `autoStart` joins them while its chip is untouched: absent, not `false`. The route schema is
+    // `.strict()`, so this is what keeps the default submission identical to the one a cockpit
+    // built before the flag existed would send (2026-08-25, Phase 3).
+    expect(posted?.body as Record<string, unknown>).not.toHaveProperty('autoStart')
   })
 
   it('navigates to the project the RESPONSE names, not the scope it was submitted from', async () => {
@@ -464,21 +474,84 @@ describe('Workspace', () => {
     await waitFor(() => expect(pathname()).toBe(`/p/${BOOT}/tasks/ws-run-1`))
   })
 
-  it('warns that real checkouts are modified, and never promises isolation', async () => {
+  it('says the run files tasks and edits nothing, and never promises isolation', async () => {
+    // CORRECTED 2026-08-25 (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`): this asserted
+    // the line warned "real checkouts are modified … no worktree". That was an accurate warning
+    // about a real defect, and the defect is fixed — a workspace run writes no project file now —
+    // so the same assertion would today hold the header to a sentence that is simply false.
+    //
     // CORRECTED 2026-08-16: this used to read "the composer keeps its Worktree chip on screen in
     // this mode, so the header line is the only thing that says the chip does not apply." The chip
-    // is now HIDDEN (see the case below), so this line is no longer a lone caveat over a
-    // contradicting control — it is the only place either fact is stated, which is why it asserts
-    // BOTH of them. Under the fan-out this same line said "nothing starts" — the most dangerous
-    // sentence to leave above a submit that edits twelve repos.
+    // is now HIDDEN (see the case below). Under the fan-out this same line said "nothing starts" —
+    // the most dangerous sentence to leave above a submit that edited twelve repos. It is true
+    // again, and it is true for a different reason: nothing starts because nothing is started, not
+    // because the submit only files rows.
     serve()
     renderAt(`/p/${BOOT}/new?scope=auto`)
     await composerReady('None')
     const note = document.querySelector('[data-slot="run-mode-note"]')!.textContent ?? ''
     expect(note).toContain('every project')
-    expect(note).toContain('no worktree')
+    expect(note).toContain('edits no project file')
     expect(note).not.toContain('isolated')
-    expect(note).not.toContain('nothing starts')
+    expect(note).not.toContain('modified directly')
+  })
+
+  it('offers only input-to-tasks out of the workflow catalog', async () => {
+    // Every other workflow is a chain that implements/commits/deploys, which the workspace grant
+    // now structurally forbids. Asserted against the SAME menu at named-project scope first, so it
+    // cannot pass by `quick-task` having gone missing from the fixture or the pill having broken.
+    serve()
+    renderAt(`/p/${BOOT}/new`)
+    await composerReady('None')
+    fireEvent.click(sourcePill())
+    await screen.findByPlaceholderText('search skills & workflows…')
+    expect(sourceRefs()).toContain('quick-task')
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+
+    await switchProject('all')
+    expect(projectPill().textContent).toContain('Workspace')
+
+    fireEvent.click(sourcePill())
+    await screen.findByPlaceholderText('search skills & workflows…')
+    const refs = sourceRefs()
+    expect(refs).toContain('input-to-tasks')
+    expect(refs).not.toContain('quick-task')
+  })
+
+  it('carries autoStart only when the chip is ticked, and offers the chip nowhere else', async () => {
+    // Default OFF, and off means ABSENT: `workspaceRunStartInputSchema` is `.strict()`, so the
+    // untouched submission has to stay byte-identical to the one sent before the flag existed.
+    serve()
+    renderAt(`/p/${BOOT}/new`)
+    await composerReady('None')
+    // Named project first — there is nothing to auto-start when the submit IS the run.
+    expect(document.querySelector('[data-slot="auto-start-toggle"]')).toBeNull()
+
+    await switchProject('all')
+    const chip = await waitFor(() => {
+      const found = document.querySelector('[data-slot="auto-start-toggle"]')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    expect(chip.getAttribute('aria-checked')).toBe('false')
+    // The header follows the chip: it must not keep promising "starts nothing" once it does.
+    expect(document.querySelector('[data-slot="run-mode-note"]')!.textContent).toContain(
+      'starts nothing',
+    )
+
+    fireEvent.click(chip)
+    await waitFor(() => expect(chip.getAttribute('aria-checked')).toBe('true'))
+    expect(document.querySelector('[data-slot="run-mode-note"]')!.textContent).not.toContain(
+      'starts nothing',
+    )
+
+    fireEvent.change(textarea(), { target: { value: 'sweep the boards' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Start task' }))
+    await waitFor(() =>
+      expect(requests.some((r) => r.method === 'POST' && r.url === '/api/v1/workspace/runs')).toBe(true),
+    )
+    const posted = requests.find((r) => r.method === 'POST' && r.url === '/api/v1/workspace/runs')
+    expect((posted?.body as { autoStart?: boolean }).autoStart).toBe(true)
   })
 
   it('offers no Worktree or variants control, because it would honour neither', async () => {

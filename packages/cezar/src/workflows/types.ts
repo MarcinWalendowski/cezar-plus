@@ -409,6 +409,119 @@ export function stepsIssue(steps: WorkflowStepDef[]): string | null {
 /** Tools an agent step gets when the workflow doesn't say otherwise. */
 export const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'];
 
+/** The workspace-scope workflow's name — referenced by the composer and the workspace run route,
+ *  which default to it, so it lives here rather than being spelled as a literal in three files. */
+export const INPUT_TO_TASKS_NAME = 'input-to-tasks';
+
+/**
+ * The ONLY workflow a workspace-scoped task runs
+ * (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`).
+ *
+ * **A workspace run routes work; it does not do work.** It reads every registered project and
+ * writes exactly one kind of file — each project's `.ai/cezar/todos.json`, through `cez todo add`.
+ * The actual implementation happens later, in ordinary project-scoped runs, each of which gets its
+ * own `cez/<id8>` worktree and FAILS CLOSED if it cannot have one.
+ *
+ * That is the whole point. The previous design gave a workspace run a worktree per project and
+ * applied the diffs back, but isolation was optional per project and its fallback was the project's
+ * LIVE checkout with no lease — five prod runs were handed the same live `cezar` tree on
+ * 2026-08-24, each told by its own system prompt that it was working in a private worktree.
+ * A run that never edits a project cannot collide with one that does.
+ *
+ * **Why `file` and `dispatch` are two steps rather than one `--start`.** Filing and starting are
+ * separately observable facts, and the failure modes differ: if `dispatch` fails, the work is still
+ * on the Filed board and a person can start it, whereas a failed combined step could lose both.
+ * It also makes the optional half a genuine no-op — `dispatch` reports that it did nothing when the
+ * run was created without auto-start, rather than silently being a different filing command.
+ *
+ * **`allowedTools` excludes `Edit` and `Write` on every step, deliberately.** The grant hands this
+ * run the real checkouts of a dozen projects. The prompt tells it not to edit them; the tool list
+ * is what makes that true rather than aspirational.
+ */
+export const INPUT_TO_TASKS_WORKFLOW: WorkflowDef = {
+  name: INPUT_TO_TASKS_NAME,
+  description:
+    'Read the whole workspace, then file the work as tasks in the projects it belongs to. Edits nothing itself.',
+  source: 'built-in',
+  steps: [
+    {
+      id: 'context',
+      name: 'Gather the context',
+      allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+      bashAllowlist: ['cez kb', 'cezar kb', 'git log', 'git show', 'git status', 'ls', 'cat'],
+      prompt: [
+        'Understand this request across the whole workspace. You are NOT implementing it, and you',
+        'are NOT editing any file. This step produces understanding, nothing else.',
+        '',
+        'Request:',
+        '{{task}}',
+        '',
+        'Work in this order, and say plainly which steps you actually did:',
+        '1. The knowledge base first — `cez kb search "<terms>"`, and `domains/<product>.md` for any',
+        '   product the request touches. Most requests extend a decision that already exists.',
+        '2. Then the specs of the projects that look relevant (their `.ai/specs/`), for the',
+        '   implementation detail behind a decision, or precedent for a change of this shape.',
+        '3. Then git history, only where the first two leave a gap.',
+        '',
+        'Do not sweep all twelve projects unconditionally — read the ones the request plausibly',
+        'concerns, and name the ones you ruled out and why.',
+        '',
+        'Finish with: which project(s) this work belongs in, what already exists that it extends,',
+        'and anything that contradicts the request. If the work is already done, say so — that is a',
+        'valid and useful outcome, and the next step will file nothing.',
+      ].join('\n'),
+    },
+    {
+      id: 'file',
+      name: 'File the tasks',
+      allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+      bashAllowlist: ['cez todo', 'cezar todo', 'cez kb', 'cezar kb'],
+      prompt: [
+        'File the work you just scoped as a task in each project it belongs to. Do not edit, create',
+        'or delete any other file, in any project — this step writes todos and nothing else.',
+        '',
+        'For each project that needs work:',
+        '',
+        '    cez todo add "<summary>" --project <id> \\',
+        '      --context "why this is needed and what already exists that it extends" \\',
+        '      --acceptance "one concrete, checkable outcome" \\',
+        '      --priority <low|medium|high> [--spec <path to the relevant spec>]',
+        '',
+        'Rules:',
+        '- One todo per project, unless the work genuinely splits into independent pieces there.',
+        '- Name a REASON for each project you file into. If you cannot say why a project needs its',
+        '  own task, do not file one.',
+        '- Do NOT pass --start. Starting is the next step, and it is optional.',
+        '- If the previous step concluded the work already exists, file nothing and say so.',
+        '',
+        'Report the todo id and project for each one you filed.',
+      ].join('\n'),
+    },
+    {
+      id: 'dispatch',
+      name: 'Start the filed tasks (optional)',
+      allowedTools: ['Read', 'Bash'],
+      bashAllowlist: ['cez todo', 'cezar todo'],
+      prompt: [
+        'This step is OPTIONAL and is a no-op unless this task was created with auto-start enabled.',
+        '',
+        'Auto-start for this run: {{autoStart}}',
+        '',
+        'If that says `false` or is empty: do nothing at all. Report that the filed tasks are',
+        'waiting on the Filed board for a person to start them, and list them. Do not start them.',
+        '',
+        'If it says `true`: for each todo the previous step filed, run',
+        '',
+        '    cez todo start <id> --project <id-of-its-project>',
+        '',
+        'which marks it for autostart. The running cockpit picks it up and starts it under that',
+        "project's own concurrency cap — you are not starting the run yourself, and you must not",
+        'try to. Report which todos you marked and which you did not.',
+      ].join('\n'),
+    },
+  ],
+};
+
 /** The zero-config workflow: one agent step that just does the task. */
 export const QUICK_TASK_WORKFLOW: WorkflowDef = {
   name: 'quick-task',

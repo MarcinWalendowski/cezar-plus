@@ -185,4 +185,70 @@ describe('POST /api/v1/workspace/runs', () => {
     expect((await post(app, { task: 'x' })).status).toBe(201);
     expect(started).toHaveLength(1);
   });
+  /**
+   * `.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 2/3 — the two things this route
+   * gained. Both are invisible to every case above: `resolveWorkflow` is stubbed, so the workflow
+   * NAME the route asks for is never inspected, and `autoStart` simply rides in the input object.
+   */
+  describe('input-to-tasks default and autoStart', () => {
+    /** Records what the route asked `resolveWorkflow` for — the only place the default is visible. */
+    const asking = () => {
+      const asked: Array<Record<string, unknown>> = [];
+      const h = harness({
+        resolveWorkflow: async (_root: string, opts: Record<string, unknown>) => {
+          asked.push(opts);
+          return { workflow: WORKFLOW };
+        },
+      } as Partial<WorkspaceRunRouteDeps>);
+      return { ...h, asked };
+    };
+
+    it('names input-to-tasks when the caller named no workflow', async () => {
+      const { app, asked } = asking();
+      expect((await post(app, { task: 'sweep the boards' })).status).toBe(201);
+      expect(asked).toHaveLength(1);
+      expect(asked[0]!.workflow).toBe('input-to-tasks');
+    });
+
+    it('is a DEFAULT, not a restriction: a named workflow still wins', async () => {
+      // cezar is published, and rejecting a workflow name that worked yesterday is breaking
+      // (`BACKWARD_COMPATIBILITY.md`). The composer offers one workflow here; the route does not.
+      const { app, asked } = asking();
+      expect((await post(app, { task: 'x', workflow: 'spec-to-deploy' })).status).toBe(201);
+      expect(asked[0]!.workflow).toBe('spec-to-deploy');
+    });
+
+    it('injects no workflow name when the caller sent an inline chain', async () => {
+      // `steps` IS the workflow. Defaulting a name alongside it would hand `resolveWorkflow` two
+      // answers to the same question, and the automations/scripted callers that post inline chains
+      // are exactly the ones with no composer to have picked for them.
+      const { app, asked } = asking();
+      const steps = [{ id: 'only', prompt: '{{task}}' }];
+      expect((await post(app, { task: 'x', steps })).status).toBe(201);
+      expect(asked[0]).not.toHaveProperty('workflow');
+      expect(asked[0]!.steps).toEqual(steps);
+    });
+
+    it('passes autoStart through in both directions, and omits it when unasked', async () => {
+      // Absent, `true` and `false` are three distinct answers: the record has to say what was
+      // ASKED FOR, or the optional dispatch step doing nothing reads as a step that failed.
+      for (const [body, expected] of [
+        [{ task: 'x' }, undefined],
+        [{ task: 'x', autoStart: true }, true],
+        [{ task: 'x', autoStart: false }, false],
+      ] as const) {
+        const { app, started } = harness();
+        expect((await post(app, body)).status).toBe(201);
+        expect(started[0]!.input.autoStart).toBe(expected);
+      }
+    });
+
+    it('rejects a non-boolean autoStart rather than coercing it', async () => {
+      // The schema is `.strict()` and this is a new key on it — a string "true" from a hand-rolled
+      // client must 400, not arrive as a truthy value nobody meant.
+      const { app, started } = harness();
+      expect((await post(app, { task: 'x', autoStart: 'true' })).status).toBe(400);
+      expect(started).toHaveLength(0);
+    });
+  });
 });

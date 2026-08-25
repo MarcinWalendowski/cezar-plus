@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import type { TestAttestation } from '@loki-labs/better-cezar-contract';
 
 /**
  * STEP POST-CONDITIONS (`.ai/specs/2026-08-20-steps-green-only-when-verified.md`).
@@ -77,13 +78,7 @@ export interface PostconditionContext {
   dryRun?: boolean;
   /** Step identity and test attestation used by the shipping gates. */
   stepId?: string;
-  attestation?: {
-    stepId: string;
-    treeSha: string;
-    headSha?: string;
-    shippedSha?: string;
-    at: string;
-  };
+  attestation?: TestAttestation;
   /** Whether the merge stage is allowed to land a protected base automatically. */
   autoMerge?: boolean;
   /** Resolved base branch for merge postconditions. */
@@ -389,6 +384,39 @@ export async function testedRevisionShipped(ctx: PostconditionContext): Promise<
   const attestation = ctx.attestation;
   if (!attestation) return { ok: true, detail: 'no test attestation was recorded, so no earlier revision can be contradicted' };
   if (!attestation.treeSha) return { ok: false, detail: 'the test attestation has no tree SHA' };
+
+  if (ctx.stepId !== 'merge' && attestation.projects?.length) {
+    const failures: string[] = [];
+    for (const project of attestation.projects) {
+      const tree = await git(project.worktreePath, ['cat-file', '-e', `${project.treeSha}^{tree}`]);
+      if (!tree.ok) {
+        failures.push(`${project.root}: test attestation tree ${project.treeSha} cannot be resolved`);
+        continue;
+      }
+      const headTree = await git(project.worktreePath, ['rev-parse', 'HEAD^{tree}']);
+      if (!headTree.ok) {
+        failures.push(`${project.root}: cannot resolve HEAD tree: ${headTree.stderr.trim()}`);
+        continue;
+      }
+      const changed = await git(project.worktreePath, [
+        'diff-tree', '--no-commit-id', '--name-only', '-r', project.treeSha, headTree.stdout.trim(),
+      ]);
+      if (!changed.ok) {
+        failures.push(`${project.root}: could not compare the tested tree with HEAD: ${changed.stderr.trim()}`);
+        continue;
+      }
+      const paths = changed.stdout.split('\n').map((path) => path.trim()).filter(Boolean);
+      const outside = paths.filter((path) => !pathIsShippingRecord(path));
+      if (outside.length > 0) failures.push(`${project.root}: ${outside.join(', ')}`);
+    }
+    if (failures.length > 0) {
+      return { ok: false, detail: `HEAD changed outside the tested workspace revision in ${failures.join('; ')}` };
+    }
+    return {
+      ok: true,
+      detail: `all ${attestation.projects.length} project HEADs preserve their tested trees; only record paths changed after the test attestation`,
+    };
+  }
 
   if (ctx.stepId === 'merge') {
     const shippedSha = attestation.shippedSha;

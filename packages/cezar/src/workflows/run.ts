@@ -125,9 +125,8 @@ import {
 import {
   applyWorkspaceWorktrees,
   discardWorkspaceWorktrees,
-  materializeWorkspaceWorktrees,
 } from '../workspace/workspace-worktrees.ts';
-import type { PendingApproval, PendingHandoff, TestAttestation, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
+import type { PendingApproval, PendingHandoff, TestAttestation, TestAttestationProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
@@ -150,6 +149,11 @@ import {
 import { classifyTask } from '../task-classifier.ts';
 
 const CHECK_OUTPUT_CAP = 20_000;
+
+/** What a test/shipped attestation capture reports back to the step loop, so a git failure in any
+ * granted worktree makes the step red instead of silently erasing the prior evidence and leaving
+ * the caller to mark 'done' unconditionally. */
+type AttestationCapture = { ok: true } | { ok: false; reason: string };
 
 /**
  * The workflow "▶ Run" turns a filed todo into (`server.ts`'s `POST /todos/:id/start`): a
@@ -567,6 +571,12 @@ export interface ExecuteRunInput {
    *  creation and re-applied from the RECORD on every later step, so the grant cannot drift when
    *  the registry changes mid-run. */
   workspaceProjects?: GrantedProject[];
+  /** WORKSPACE RUN, `input-to-tasks` (spec 2026-08-25-workspace-scope-routes-tasks): start the
+   *  tasks this run files rather than leaving them on the Filed board. Set only by
+   *  `POST /api/v1/workspace/runs`; persisted to the record, which is what the `dispatch` step
+   *  reads through `{{autoStart}}` — a resume rebuilds this input, and the decision must not
+   *  change under a restart. Absent means false. */
+  autoStart?: boolean;
   /** Autonomous mode (#autonomous): the run never parks at `waiting` for the
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
@@ -1574,6 +1584,10 @@ export class RunManager {
       // in `contract/src/runs.ts`. Variants never carry one: they exist to isolate, and a
       // workspace run has nothing to isolate into.
       workspaceProjects: group ? undefined : input.workspaceProjects,
+      // Frozen at creation for the same reason the grant above is: `input-to-tasks`'s `dispatch`
+      // step reads it back through `{{autoStart}}` on every step, including after a restart that
+      // rebuilds `input`. Variants never carry one, matching `workspaceProjects`.
+      autoStart: group ? undefined : input.autoStart,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) })),
@@ -4683,34 +4697,23 @@ export class RunManager {
     const state: ActiveRun = { cancelled: false, interrupt: () => undefined, cwd };
     this.active.set(runId, state);
     this.starting.delete(runId);
-    // A resumed WORKSPACE run stays isolated and lease-free (spec 2026-08-19). Re-materialize its
-    // worktrees if a prior settle applied and removed them (continuing a finished workspace run),
-    // so the resumed session works in worktrees rather than falling back to the real checkouts.
+    // A resumed WORKSPACE run creates nothing (spec 2026-08-25-workspace-scope-routes-tasks,
+    // Phase 1). This branch used to RE-MATERIALIZE worktrees when a prior settle had removed them,
+    // which made it a second writer of the very mechanism that spec removes — and the more
+    // dangerous of the two, because a resume re-runs `materializeWorkspaceWorktrees` against
+    // projects whose repos may have changed underneath, so the in-place fallback (and with it the
+    // shared live checkout) was MORE likely here than on the initial pass.
+    //
+    // What survives is the reader: a run carrying worktrees from before the change keeps them, and
+    // keeps its leases armed. That arming is unconditional for the reason
+    // `2026-08-22-live-worktree-reaped-mid-run` ("What is still open" #2) gives — `dropActive`
+    // deletes every lease the run held when it last settled, and a resume that reused an existing
+    // live tree used to arm nothing at all, leaving a live worktree unleased: the incident's exact
+    // shape. A run with no worktrees now simply has nothing to lease.
     const workspaceRun = (record?.workspaceProjects?.length ?? 0) > 0;
     if (workspaceRun) {
       const live = (record?.workspaceWorktrees ?? []).filter((w) => existsSync(w.worktreePath));
-      if (live.length === 0) {
-        const worktrees = await materializeWorkspaceWorktrees(
-          runId,
-          record?.workspaceProjects ?? [],
-          (m) => this.store.appendEvent(runId, { type: 'note', message: m }),
-          // Same write-ordering fix as the initial materialize above — this resume path is the one
-          // that actually mattered for the 232ad6d4 incident's SECOND reclaim, which came after an
-          // interrupt-and-resume, not through the initial materialize.
-          (snapshot) => {
-            this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
-          },
-          this.repoRoot,
-        );
-        this.store.updateRun(runId, { workspaceWorktrees: worktrees });
-        await touchWorktreeLeases(worktrees.map((worktree) => worktree.root), runId, this.repoRoot);
-        this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
-      } else {
-        // Spec 2026-08-22-live-worktree-reaped-mid-run, "What is still open" #2: `dropActive`
-        // deletes every lease this run held when it last settled, and reusing an EXISTING live
-        // tree here used to arm nothing at all — the most common resume path left a live workspace
-        // worktree with no lease, the incident's exact shape. Write and arm unconditionally,
-        // whether the trees were rebuilt above or reused here.
+      if (live.length > 0) {
         const roots = live.map((worktree) => worktree.root);
         await touchWorktreeLeases(roots, runId, this.repoRoot);
         this.armWorktreeLeases(state, runId, roots);
@@ -5462,35 +5465,54 @@ export class RunManager {
     // At the boot scratch root, a run that arrived without a grant adopts one and becomes a
     // workspace run here (spec 2026-08-21, change C) — see `adoptWorkspaceGrant`.
     await this.adoptWorkspaceGrant(runId, emit);
-    // A parallel WORKSPACE RUN (spec 2026-08-19): isolate each granted git project in its own
-    // `cez/<id8>` worktree, run up to maxParallel — no boot repo-root lease (below) and not counted
-    // by the non-git cap in `pump()`. cwd stays the boot scratch repo; the grant (--add-dir + the
-    // prompt) is redirected to the worktrees by `workspaceGrantOf` reading `workspaceWorktrees`.
+    // A WORKSPACE RUN ROUTES WORK, IT DOES NOT DO IT
+    // (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 1).
+    //
+    // It used to isolate every granted git project in its own `cez/<id8>` worktree and apply the
+    // diffs back on finish (spec 2026-08-19, extended 08-20/08-22). That is gone, and the reason is
+    // not cost: isolation was OPTIONAL PER PROJECT, and its fallback was the project's LIVE
+    // checkout with no lease of any kind — a workspace run deliberately takes none (see below).
+    // Measured in production 2026-08-24, five concurrent runs were each handed the SAME live
+    // checkout that way, grants 0–106 s apart, while `buildWorkspaceGrant`'s `isolated` flag (true
+    // whenever ANY project isolated) had their system prompts telling all five they were in a
+    // private worktree that cezar would apply back and delete.
+    //
+    // So a workspace run now writes NO project working tree. Its whole write surface is each
+    // project's `.ai/cezar/todos.json`, via `cez todo add --project` — the real work happens in
+    // ordinary project-scoped runs, whose per-task worktree fails CLOSED (the `catch` further
+    // down marks the run failed) instead of silently downgrading to a shared tree.
+    //
+    // **The reader stays.** cezar is published (`BACKWARD_COMPATIBILITY.md`), so a run recorded by
+    // an older version still carries `workspaceWorktrees` pointing at directories on the user's
+    // disk. Those keep their leases armed here and are still applied/discarded at settle
+    // (`applyWorkspaceRun`/`discardWorkspaceRun`); only the code that CREATES new ones is gone.
+    // Phase 4 deletes the rest once no reachable run record carries the field.
     const isWorkspaceRun = (this.store.getRun(runId)?.workspaceProjects?.length ?? 0) > 0;
     if (isWorkspaceRun) {
-      const projects = this.store.getRun(runId)?.workspaceProjects ?? [];
-      const worktrees = await materializeWorkspaceWorktrees(
-        runId,
-        projects,
-        (m) => emit({ type: 'note', message: m }),
-        // Persist a snapshot after EVERY worktree, not just at the end (spec
-        // 2026-08-22-cross-project-worktree-orphan-prune-safety) — otherwise the first project's
-        // worktree sits on disk, unrecorded anywhere a target project's own boot-time prune can
-        // see, for as long as the rest of this loop takes.
-        (snapshot) => {
-          this.store.updateRun(runId, { workspaceWorktrees: [...snapshot] });
-        },
-        this.repoRoot,
+      const legacy = (this.store.getRun(runId)?.workspaceWorktrees ?? []).filter((worktree) =>
+        existsSync(worktree.worktreePath),
       );
-      this.store.updateRun(runId, { workspaceWorktrees: worktrees });
-      this.armWorktreeLeases(state, runId, worktrees.map((worktree) => worktree.root));
-      emit({
-        type: 'note',
-        message:
-          worktrees.length > 0
-            ? `workspace run — ${worktrees.length} project worktree(s) isolated; changes apply back on finish`
-            : 'workspace run — no git projects to isolate; running in place',
-      });
+      if (legacy.length > 0) {
+        const roots = legacy.map((worktree) => worktree.root);
+        // TOUCH BEFORE ARMING, matching the resume path. `armWorktreeLeases` only starts a
+        // heartbeat — it writes nothing for the first `LEASE_HEARTBEAT_MS` (90 s). The materialize
+        // this branch replaced could arm alone because it had just CREATED the worktrees and their
+        // leases; these were created by an earlier process, so their lease still names the previous
+        // run id or has expired, and another project's boot-time prune reaping a live worktree in
+        // that window is exactly `.ai/specs/2026-08-22-live-worktree-reaped-mid-run.md`.
+        await touchWorktreeLeases(roots, runId, this.repoRoot);
+        this.armWorktreeLeases(state, runId, roots);
+        emit({
+          type: 'note',
+          message: `workspace run — carrying ${legacy.length} worktree(s) from before this run started; they still apply back on finish`,
+        });
+      } else {
+        emit({
+          type: 'note',
+          message:
+            'workspace run — reading every project, editing none; file work with `cez todo add --project <id>`',
+        });
+      }
     } else if (repo && input.worktree === false && !this.bootScratchRoot) {
       // Composer opt-out: run in the repo working tree, no branch/worktree. The
       // repository-root lease serializes these runs by default; the explicit
@@ -6005,8 +6027,10 @@ export class RunManager {
           }
         }
 
-        if (step.id === 'run-tests') await this.recordTestAttestation(runId, state, step.id, emit);
-        if (step.id === 'commit-push') await this.recordShippedAttestation(runId, state, step.id, emit);
+        {
+          const capture = await this.captureAttestationOrFail(runId, state, step, emit);
+          if (!capture.ok) { runError = capture.runError; break; }
+        }
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -6047,8 +6071,10 @@ export class RunManager {
           runError = `step "${step.id}" did not meet its post-condition: ${verdict.detail}`;
           break;
         }
-        if (step.id === 'run-tests') await this.recordTestAttestation(runId, state, step.id, emit);
-        if (step.id === 'commit-push') await this.recordShippedAttestation(runId, state, step.id, emit);
+        {
+          const capture = await this.captureAttestationOrFail(runId, state, step, emit);
+          if (!capture.ok) { runError = capture.runError; break; }
+        }
         this.finishStep(runId, step.id, 'done', undefined, emit);
         i++;
         continue;
@@ -6232,13 +6258,18 @@ export class RunManager {
     return outcome;
   }
 
-  /** Capture the final green test tree without touching the repository's real Git index. */
+  /** Capture the final green test tree without touching the repository's real Git index. A git
+   * failure anywhere — scratch or any granted project worktree — reports `ok: false` rather than
+   * silently returning, so the caller can make `run-tests` red instead of leaving the prior
+   * attestation erased and the step green with nothing behind it. */
   private async recordTestAttestation(
     runId: string,
     state: ActiveRun,
     stepId: string,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
-  ): Promise<void> {
+  ): Promise<AttestationCapture> {
+    // A failed fresh capture must not leave an older green tree authorizing this test attempt.
+    this.store.updateRun(runId, { testAttestation: undefined });
     const temp = await mkdtemp(join(tmpdir(), 'cez-test-attestation-'));
     const index = join(temp, 'index');
     try {
@@ -6246,40 +6277,118 @@ export class RunManager {
       const added = await runGit(state.cwd, ['add', '-A'], env);
       const tree = added.ok ? await runGit(state.cwd, ['write-tree'], env) : added;
       if (!tree.ok || !tree.stdout.trim()) {
-        emit({ type: 'note', stepId, message: `could not record test attestation: ${tree.stderr.trim() || 'git write-tree failed'}` });
-        return;
+        const reason = `could not record test attestation: ${tree.stderr.trim() || 'git write-tree failed'}`;
+        emit({ type: 'note', stepId, message: reason });
+        return { ok: false, reason };
       }
       const head = await runGit(state.cwd, ['rev-parse', 'HEAD']);
+      const run = this.store.getRun(runId);
+      const workspaceWorktrees = [...(run?.workspaceWorktrees ?? [])]
+        .filter((worktree) => !worktree.reclaimedAt)
+        .sort((a, b) => a.root.localeCompare(b.root));
+      const projects: NonNullable<TestAttestation['projects']> = [];
+      for (const worktree of workspaceWorktrees) {
+        const projectTemp = await mkdtemp(join(tmpdir(), 'cez-test-attestation-project-'));
+        try {
+          const projectEnv = { ...process.env, GIT_INDEX_FILE: join(projectTemp, 'index') };
+          const projectAdded = await runGit(worktree.worktreePath, ['add', '-A'], projectEnv);
+          const projectTree = projectAdded.ok
+            ? await runGit(worktree.worktreePath, ['write-tree'], projectEnv)
+            : projectAdded;
+          const projectHead = await runGit(worktree.worktreePath, ['rev-parse', 'HEAD']);
+          if (!projectTree.ok || !projectTree.stdout.trim()) {
+            const reason = `could not record test attestation for ${worktree.root}: ${projectTree.stderr.trim() || 'git write-tree failed'}`;
+            emit({ type: 'note', stepId, message: reason });
+            return { ok: false, reason };
+          }
+          projects.push({
+            root: worktree.root,
+            worktreePath: worktree.worktreePath,
+            treeSha: projectTree.stdout.trim(),
+            ...(projectHead.ok ? { headSha: projectHead.stdout.trim() } : {}),
+          });
+        } finally {
+          rmSync(projectTemp, { recursive: true, force: true });
+        }
+      }
       const attestation: TestAttestation = {
         stepId,
         treeSha: tree.stdout.trim(),
         ...(head.ok ? { headSha: head.stdout.trim() } : {}),
+        ...(projects.length > 0 ? { projects } : {}),
         at: new Date().toISOString(),
       };
       this.store.updateRun(runId, { testAttestation: attestation });
-      emit({ type: 'note', stepId, message: `tests attested tree ${attestation.treeSha}` });
+      emit({
+        type: 'note',
+        stepId,
+        message: projects.length > 0
+          ? `tests attested ${projects.length} project trees`
+          : `tests attested tree ${attestation.treeSha}`,
+      });
+      return { ok: true };
     } finally {
       rmSync(temp, { recursive: true, force: true });
     }
   }
 
+  /** Stamp the shipped SHA onto the attestation `recordTestAttestation` captured. A project whose
+   * `HEAD` cannot be resolved is reported as a failure naming that project's root, rather than
+   * silently kept without a `shippedSha` while the step still reports success. */
   private async recordShippedAttestation(
     runId: string,
     state: ActiveRun,
     stepId: string,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
-  ): Promise<void> {
+  ): Promise<AttestationCapture> {
     const attestation = this.store.getRun(runId)?.testAttestation;
-    if (!attestation) return;
+    if (!attestation) return { ok: true };
     const head = await runGit(state.cwd, ['rev-parse', 'HEAD']);
     if (!head.ok || !head.stdout.trim()) {
-      emit({ type: 'note', stepId, message: `could not record shipped SHA: ${head.stderr.trim() || 'HEAD is unavailable'}` });
-      return;
+      const reason = `could not record shipped SHA: ${head.stderr.trim() || 'HEAD is unavailable'}`;
+      emit({ type: 'note', stepId, message: reason });
+      return { ok: false, reason };
+    }
+    let projectFailure: string | undefined;
+    const projects = attestation.projects
+      ? await Promise.all(attestation.projects.map(async (project): Promise<TestAttestationProject> => {
+          const projectHead = await runGit(project.worktreePath, ['rev-parse', 'HEAD']);
+          if (!projectHead.ok || !projectHead.stdout.trim()) {
+            projectFailure ??= `${project.root}: could not record shipped SHA: ${projectHead.stderr.trim() || 'HEAD is unavailable'}`;
+            return project;
+          }
+          return { ...project, shippedSha: projectHead.stdout.trim() };
+        }))
+      : undefined;
+    if (projectFailure) {
+      emit({ type: 'note', stepId, message: projectFailure });
+      return { ok: false, reason: projectFailure };
     }
     this.store.updateRun(runId, {
-      testAttestation: { ...attestation, shippedSha: head.stdout.trim() },
+      testAttestation: { ...attestation, shippedSha: head.stdout.trim(), ...(projects ? { projects } : {}) },
     });
     emit({ type: 'note', stepId, message: `shipped revision attested at ${head.stdout.trim()}` });
+    return { ok: true };
+  }
+
+  /** The one place `run-tests`/`commit-push` route through to capture an attestation, so the two
+   * step-loop branches that call it cannot drift (spec 2026-08-25-workspace-revision-attestation,
+   * Phase 3a item 4) and a capture failure stops the run the way a failed post-condition does —
+   * not with an unconditional `finishStep(..., 'done', ...)`. */
+  private async captureAttestationOrFail(
+    runId: string,
+    state: ActiveRun,
+    step: WorkflowStepDef,
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): Promise<{ ok: true } | { ok: false; runError: string }> {
+    let capture: AttestationCapture | undefined;
+    if (step.id === 'run-tests') capture = await this.recordTestAttestation(runId, state, step.id, emit);
+    if (step.id === 'commit-push') capture = await this.recordShippedAttestation(runId, state, step.id, emit);
+    if (capture && !capture.ok) {
+      this.finishStep(runId, step.id, 'failed', capture.reason, emit);
+      return { ok: false, runError: `step "${step.id}" could not record its attestation: ${capture.reason}` };
+    }
+    return { ok: true };
   }
 
   // ---- the human approval gate (spec 2026-08-20-split-steps-spec-review-and-approval-gate, P3) --
@@ -6621,7 +6730,11 @@ export class RunManager {
       }
     }
 
-    let userPrompt = resumeFrom?.prompt ?? applyTemplate(step.prompt ?? '{{task}}', input.task);
+    // Read from the RECORD, not from `input`: a resume rebuilds `input`, and `autoStart` is a
+    // decision taken once at creation that must survive every later restart unchanged.
+    const autoStart = this.store.getRun(runId)?.autoStart === true;
+    let userPrompt =
+      resumeFrom?.prompt ?? applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart);
     if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
     if (checkFailure) {
       userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
@@ -7025,7 +7138,7 @@ export class RunManager {
         // `userPrompt` must be rebuilt from the step's own template — not just the session id —
         // or the fresh session runs contextless. Re-run exactly the three lines that built it the
         // first time, with `resumeFrom` treated as absent.
-        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task);
+        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart);
         if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
         if (checkFailure) {
           userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
@@ -8095,8 +8208,21 @@ function findLastAgentStepIndex(workflow: WorkflowDef): number {
   return -1;
 }
 
-function applyTemplate(template: string, task: string): string {
-  return template.replaceAll('{{task}}', task);
+/**
+ * Prompt tokens. `{{task}}` is the original and the only one a user-written workflow file is
+ * documented to use (`types.ts` header).
+ *
+ * `{{autoStart}}` was added 2026-08-25 for `input-to-tasks`'s optional `dispatch` step
+ * (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`): that step has to know whether the run
+ * was created with auto-start, and it is a per-RUN fact, not something the step can read from the
+ * repo. It renders as the literal `true`/`false` so the prompt can compare against it in words.
+ *
+ * Unknown tokens are LEFT ALONE, as they always were — `replaceAll` only touches what it matches.
+ * That is deliberate: a workflow file containing `{{foo}}` gets it through to the agent verbatim
+ * rather than an empty string, so a typo in a prompt is visible rather than silently blanked.
+ */
+function applyTemplate(template: string, task: string, autoStart = false): string {
+  return template.replaceAll('{{task}}', task).replaceAll('{{autoStart}}', String(autoStart));
 }
 
 /**

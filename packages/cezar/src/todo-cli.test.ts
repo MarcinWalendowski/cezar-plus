@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -205,6 +205,79 @@ describe('cezar todo add/list', () => {
       expect(await run('list', '--json')).toBe(0);
       const parsed = JSON.parse(io.out[io.out.length - 1]!);
       expect(parsed.todos).toHaveLength(1);
+    });
+  });
+
+  /**
+   * `cezar todo start <id>` (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, Phase 2) —
+   * the flip that `input-to-tasks`'s optional `dispatch` step performs on a todo its own `file`
+   * step already filed WITHOUT `--start`.
+   */
+  describe('start', () => {
+    /** File one todo and return its id, without going near `--start`. */
+    const fileOne = async (summary = 'Ship it'): Promise<string> => {
+      await run('add', summary, '--json');
+      const parsed = JSON.parse(io.out[io.out.length - 1]!);
+      io.out.length = 0;
+      return parsed.todo.id as string;
+    };
+
+    it('sets autostart on an already-filed todo', async () => {
+      const id = await fileOne();
+      // The precondition is the point: `add` without `--start` must NOT have set it, or this
+      // test would pass against a `start` that does nothing at all.
+      expect((readTodosFile(repoRoot)[0] as { autostart?: boolean }).autostart).toBeUndefined();
+
+      expect(await run('start', id)).toBe(0);
+      expect((readTodosFile(repoRoot)[0] as { autostart?: boolean }).autostart).toBe(true);
+    });
+
+    it('accepts an id prefix, because that is what a transcript quotes', async () => {
+      const id = await fileOne();
+      expect(await run('start', id.slice(0, 8))).toBe(0);
+      expect((readTodosFile(repoRoot)[0] as { autostart?: boolean }).autostart).toBe(true);
+    });
+
+    it('refuses an ambiguous prefix rather than picking one', async () => {
+      await fileOne('first');
+      await fileOne('second');
+      // Rewrite both ids to a KNOWN shared prefix. Generated uuids only collide on a short prefix
+      // by luck, and a test that asserts nothing when the luck runs out is a test that reports
+      // green for a `start` with no ambiguity check at all.
+      const path = join(repoRoot, '.ai/cezar/todos.json');
+      const items = readTodosFile(repoRoot) as Array<Record<string, unknown>>;
+      expect(items).toHaveLength(2);
+      items[0]!.id = 'aaaaaaaa-1111-4111-8111-111111111111';
+      items[1]!.id = 'aaaaaaaa-2222-4222-8222-222222222222';
+      writeFileSync(path, JSON.stringify(items, null, 2));
+
+      expect(await run('start', 'aaaaaaaa')).toBe(1);
+      expect(io.err.join('\n')).toContain('ambiguous');
+      // And nothing was flipped on the way to refusing.
+      const after = readTodosFile(repoRoot) as Array<{ autostart?: boolean }>;
+      expect(after.every((t) => t.autostart === undefined)).toBe(true);
+    });
+
+    it('exits 1 for an unknown id', async () => {
+      await fileOne();
+      expect(await run('start', 'ffffffff-0000-0000-0000-000000000000')).toBe(1);
+      expect(io.err.join('\n')).toContain('no todo with id');
+    });
+
+    it('refuses a todo the cockpit already picked up', async () => {
+      const id = await fileOne();
+      const path = join(repoRoot, '.ai/cezar/todos.json');
+      const items = readTodosFile(repoRoot) as Array<Record<string, unknown>>;
+      items[0]!.startedTaskId = 'run-1';
+      writeFileSync(path, JSON.stringify(items, null, 2));
+
+      expect(await run('start', id)).toBe(1);
+      expect(io.err.join('\n')).toContain('already started');
+    });
+
+    it('needs an id', async () => {
+      expect(await run('start')).toBe(1);
+      expect(io.err.join('\n')).toContain('cezar todo start');
     });
   });
 });

@@ -2,6 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
+  INPUT_TO_TASKS_WORKFLOW,
   NOTE_TO_SPEC_WORKFLOW,
   QUICK_TASK_WORKFLOW,
   SPEC_TO_DEPLOY_CODEX_NAME,
@@ -66,7 +67,12 @@ export async function loadWorkflows(
   }
 
   const fileNames = new Set(fromFiles.map((w) => w.name));
-  const builtins = [QUICK_TASK_WORKFLOW, NOTE_TO_SPEC_WORKFLOW, SPEC_TO_DEPLOY_WORKFLOW].filter(
+  const builtins = [
+    QUICK_TASK_WORKFLOW,
+    NOTE_TO_SPEC_WORKFLOW,
+    SPEC_TO_DEPLOY_WORKFLOW,
+    INPUT_TO_TASKS_WORKFLOW,
+  ].filter(
     // A repo may override any built-in by shipping a file of the same name — same rule for all,
     // so `note-to-spec`/`spec-to-deploy` are customisable per project without any new mechanism.
     (w) => !fileNames.has(w.name),

@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from './runs/store.ts';
+import type { ProjectContext, ProjectContexts } from './server/project-context.ts';
+import { startServer, type ServerProjectAccess } from './server/server.ts';
 import type { RunManager, StartRunInput } from './workflows/run.ts';
 import type { WorkflowDef } from './workflows/types.ts';
 import { readTodos, todosPath, type TodoItem } from './todos.ts';
@@ -222,6 +224,146 @@ describe('watchTodoAutostart', () => {
     cleanups.push(second);
     // The first subscription's own unsubscribe must be a safe no-op after being superseded.
     expect(() => first()).not.toThrow();
+  });
+});
+
+describe('cold-project autostart discovery', () => {
+  it('boots the real server path and wakes a non-resident project only after a pending todo', async () => {
+    const bootRoot = mkdtempSync(join(tmpdir(), 'cez-autostart-cold-boot-'));
+    const targetRoot = mkdtempSync(join(tmpdir(), 'cez-autostart-cold-target-'));
+    const home = mkdtempSync(join(tmpdir(), 'cez-autostart-cold-home-'));
+    const bootDataDir = join(bootRoot, '.ai/cezar');
+    const targetDataDir = join(targetRoot, '.ai/cezar');
+    mkdirSync(bootDataDir, { recursive: true });
+    const bootStore = RunStore.open(bootDataDir);
+    const started: StartRunInput[] = [];
+    const listeners = new Set<(ctx: ProjectContext) => void>();
+    let targetStore: RunStore | undefined;
+    let targetContext: ProjectContext | undefined;
+    let stopTargetWatch: (() => void) | undefined;
+    let builds = 0;
+    let loadCalls = 0;
+    let resident = false;
+    const manager = {
+      startRun: (_workflow: WorkflowDef, input: StartRunInput) => {
+        started.push(input);
+        return targetStore!.createRun({
+          author: input.author,
+          title: 'cold autostart',
+          workflow: '(inbox)',
+          task: input.task,
+          steps: [],
+        });
+      },
+    } as unknown as RunManager;
+    const contexts = {
+      ids: () => resident ? ['cold-autostart'] : [],
+      peek: (id: string) => id === 'cold-autostart' && resident ? targetContext : undefined,
+      onStoreCreated: () => () => undefined,
+      onContextBuilt: (listener: (ctx: ProjectContext) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      context: async (id: string) => {
+        if (id !== 'cold-autostart') throw new Error(`unexpected project ${id}`);
+        builds += 1;
+        mkdirSync(targetDataDir, { recursive: true });
+        targetStore = RunStore.open(targetDataDir);
+        const built = {
+          id,
+          root: targetRoot,
+          dataDir: targetDataDir,
+          store: targetStore,
+          manager,
+        } as unknown as ProjectContext;
+        targetContext = built;
+        resident = true;
+        for (const listener of listeners) listener(built);
+        stopTargetWatch = watchTodoAutostart({
+          repoRoot: targetRoot,
+          dataDir: targetDataDir,
+          manager,
+          cluster: () => CLUSTERING_OFF,
+          dispatch: () => DISPATCH_LOCAL,
+        });
+        return built;
+      },
+    } as unknown as ProjectContexts;
+    const projectAccess: ServerProjectAccess = {
+      resolveBootProject: async () => 'boot',
+      listVisibleProjects: async () => {
+        loadCalls += 1;
+        return [{
+          id: 'cold-autostart',
+          root: targetRoot,
+          name: 'cold-autostart',
+          addedAt: '',
+          lastOpenedAt: '',
+          source: 'local',
+          status: 'not-git',
+        }];
+      },
+    };
+    const savedHome = process.env.CEZ_HOME;
+    const savedCluster = process.env.CEZ_CLUSTER;
+    const savedAutomations = process.env.CEZ_AUTOMATIONS;
+    const savedBackup = process.env.CEZ_BACKUP;
+    process.env.CEZ_HOME = home;
+    delete process.env.CEZ_CLUSTER;
+    delete process.env.CEZ_AUTOMATIONS;
+    delete process.env.CEZ_BACKUP;
+    const server = startServer({
+      repoRoot: bootRoot,
+      store: bootStore,
+      manager: {} as RunManager,
+      version: '0.0.0-test',
+      bootProjectId: 'boot',
+      contexts,
+      projectAccess,
+      lazyProjectIntentIntervalMs: 10,
+    }, 0);
+    const stopBootWatch = watchTodoAutostart({
+      repoRoot: bootRoot,
+      dataDir: bootDataDir,
+      manager,
+      cluster: () => CLUSTERING_OFF,
+      dispatch: () => DISPATCH_LOCAL,
+    });
+    try {
+      await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+      await waitFor(() => expect(loadCalls).toBeGreaterThan(0));
+      expect(contexts.ids()).toEqual([]);
+      expect(existsSync(targetDataDir)).toBe(false);
+
+      mkdirSync(targetDataDir, { recursive: true });
+      writeFileSync(
+        todosPath(targetDataDir),
+        JSON.stringify([{ id: 'cold-todo', summary: 'Cold task', autostart: true }]),
+      );
+      await waitFor(() => expect(builds).toBe(1), 6000);
+      await waitFor(() => expect(started).toHaveLength(1), 6000);
+      const [todo] = await readTodos(targetDataDir);
+      expect(todo?.startedTaskId).toBeTruthy();
+      expect(todo?.autostart).toBeUndefined();
+      expect(builds).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      stopTargetWatch?.();
+      stopBootWatch();
+      bootStore.flush();
+      targetStore?.flush();
+      rmSync(bootRoot, { recursive: true, force: true });
+      rmSync(targetRoot, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+      if (savedHome === undefined) delete process.env.CEZ_HOME;
+      else process.env.CEZ_HOME = savedHome;
+      if (savedCluster === undefined) delete process.env.CEZ_CLUSTER;
+      else process.env.CEZ_CLUSTER = savedCluster;
+      if (savedAutomations === undefined) delete process.env.CEZ_AUTOMATIONS;
+      else process.env.CEZ_AUTOMATIONS = savedAutomations;
+      if (savedBackup === undefined) delete process.env.CEZ_BACKUP;
+      else process.env.CEZ_BACKUP = savedBackup;
+    }
   });
 });
 
