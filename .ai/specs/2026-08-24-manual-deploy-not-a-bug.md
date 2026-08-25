@@ -1,7 +1,7 @@
 # Manual Deploy Handoff
 
-**Status:** written 2026-08-24 for run `2914e8d5-492e-4754-942e-1680725aff0d`, step 2 of 9. Not implemented.
-**Repo:** `cezar` (worktree `/var/lib/cezar/loki-labs/cezar/.ai/cezar/worktrees/2914e8d5-…`, HEAD `e38cb619`).
+**Status:** Implemented 2026-08-25 in commit `ea40c7a1`, landed on the base branch. Automated verification is recorded as green for typecheck, build, package (25/25), and the full npm test suite (11,784 passed, 4 skipped). The unit gate retains 8 pre-existing `deploy-e2e-probe.test.ts` failures, and the fixture runtime E2E in Verification steps 6-13 was not run. QA Needed, awaiting that runtime proof and the expected human deployment.
+**Repo:** `cezar` (implementation commit `ea40c7a1`; the spec was written against pre-implementation HEAD `e38cb619`).
 **Brief:** `.ai/specs/briefs/2026-08-24-manual-deploy-handoff-not-a-bug.md` in the workspace scratch repo (KB `specs-315efafabb3e`), written by step 1 of this run. Every claim it makes was re-derived here from the files themselves; one of its line citations is corrected below.
 
 **Completes, does not supersede:** `.ai/specs/2026-08-24-default-workflow-ten-stages.md` (Status: *Partial 2026-08-24*). Two items its own **Phases** section declared did not land, the last item of Phase 5 (the `deploy` prompt) and item 1 of Phase 6 (the `AGENTS.md` correction). This spec lands exactly those, plus the legibility defect their absence exposed. It does **not** touch `manual: true`, which is the owner decision at issue.

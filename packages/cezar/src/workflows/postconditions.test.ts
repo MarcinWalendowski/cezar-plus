@@ -417,6 +417,101 @@ describe('tested-revision-shipped', () => {
       }),
     ).resolves.toMatchObject({ ok: false });
   });
+
+  it('checks workspace project trees instead of scratch runner artifacts, across two projects', async () => {
+    const projectA = mkdtempSync(join(tmpdir(), 'cez-postcond-project-a-'));
+    const projectB = mkdtempSync(join(tmpdir(), 'cez-postcond-project-b-'));
+    try {
+      await git(projectA, ['init', '-b', 'main']);
+      writeFileSync(join(projectA, 'a.ts'), 'export const value = 1;\n');
+      await git(projectA, ['add', '.']);
+      await git(projectA, ['commit', '-m', 'project seed']);
+      const seedA = await gitText(projectA, ['rev-parse', 'HEAD']);
+      const treeA = await gitText(projectA, ['rev-parse', 'HEAD^{tree}']);
+
+      await git(projectB, ['init', '-b', 'main']);
+      writeFileSync(join(projectB, 'b.ts'), 'export const value = 1;\n');
+      await git(projectB, ['add', '.']);
+      await git(projectB, ['commit', '-m', 'project seed']);
+      const seedB = await gitText(projectB, ['rev-parse', 'HEAD']);
+      const treeB = await gitText(projectB, ['rev-parse', 'HEAD^{tree}']);
+
+      // The four scratch-only incident artifacts live in the run cwd, never in either project —
+      // this is what P3's original defect attested by mistake (Problem, run `2914e8d5`).
+      for (const artifact of [
+        '.cezar-control-path',
+        '.cezar-gate-path',
+        'cezar-control-171c8647.log',
+        'cezar-gates-171c8647.log',
+      ]) writeFileSync(join(repo, artifact), 'scratch only\n');
+
+      const attestation = {
+        stepId: 'run-tests',
+        treeSha: '0'.repeat(40),
+        at: new Date().toISOString(),
+        projects: [
+          { root: '/projects/a', worktreePath: projectA, treeSha: treeA },
+          { root: '/projects/b', worktreePath: projectB, treeSha: treeB },
+        ],
+      };
+      await expect(testedRevisionShipped({ cwd: repo, stepId: 'commit-push', attestation })).resolves.toMatchObject({
+        ok: true,
+        detail: expect.stringContaining('all 2 project HEADs'),
+      });
+
+      // Record-only edits in BOTH projects at once stay green (item 3, unchanged behaviour).
+      mkdirSync(join(projectA, '.ai', 'specs'), { recursive: true });
+      writeFileSync(join(projectA, '.ai', 'specs', 'record.md'), 'record\n');
+      await git(projectA, ['add', '.']);
+      await git(projectA, ['commit', '-m', 'record-only A']);
+      mkdirSync(join(projectB, '.ai', 'specs'), { recursive: true });
+      writeFileSync(join(projectB, '.ai', 'specs', 'record.md'), 'record\n');
+      await git(projectB, ['add', '.']);
+      await git(projectB, ['commit', '-m', 'record-only B']);
+      await expect(testedRevisionShipped({ cwd: repo, stepId: 'commit-push', attestation })).resolves.toMatchObject({
+        ok: true,
+      });
+      await git(projectA, ['reset', '--hard', seedA]);
+      await git(projectB, ['reset', '--hard', seedB]);
+
+      // A source change in project A ONLY fails, naming A's root and path and NOT B's (item 2).
+      writeFileSync(join(projectA, 'a.ts'), 'export const value = 2;\n');
+      await git(projectA, ['add', '.']);
+      await git(projectA, ['commit', '-m', 'post-test source A']);
+      const changedA = await testedRevisionShipped({ cwd: repo, stepId: 'commit-push', attestation });
+      expect(changedA.ok).toBe(false);
+      expect(changedA.detail).toContain('/projects/a: a.ts');
+      expect(changedA.detail).not.toContain('/projects/b:');
+      await git(projectA, ['reset', '--hard', seedA]);
+
+      // Mirrored: a change in project B ONLY fails, naming B's root and path and NOT A's.
+      writeFileSync(join(projectB, 'b.ts'), 'export const value = 2;\n');
+      await git(projectB, ['add', '.']);
+      await git(projectB, ['commit', '-m', 'post-test source B']);
+      const changedB = await testedRevisionShipped({ cwd: repo, stepId: 'commit-push', attestation });
+      expect(changedB.ok).toBe(false);
+      expect(changedB.detail).toContain('/projects/b: b.ts');
+      expect(changedB.detail).not.toContain('/projects/a:');
+    } finally {
+      rmSync(projectA, { recursive: true, force: true });
+      rmSync(projectB, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when an attested workspace worktree is gone', async () => {
+    const result = await testedRevisionShipped({
+      cwd: repo,
+      stepId: 'commit-push',
+      attestation: {
+        stepId: 'run-tests',
+        treeSha: '0'.repeat(40),
+        at: new Date().toISOString(),
+        projects: [{ root: '/projects/gone', worktreePath: join(repo, 'gone'), treeSha: '1'.repeat(40) }],
+      },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain('/projects/gone');
+  });
 });
 
 describe('merge postconditions', () => {

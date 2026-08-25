@@ -245,11 +245,22 @@ export const pendingHandoffSchema = z.object({
 export type PendingHandoff = z.infer<typeof pendingHandoffSchema>;
 
 /** The tree produced by the final green test gate and the commit that shipped it. */
+export const testAttestationProjectSchema = z.object({
+  root: z.string().min(1),
+  worktreePath: z.string().min(1),
+  treeSha: z.string().length(40),
+  headSha: z.string().length(40).optional(),
+  shippedSha: z.string().length(40).optional(),
+});
+export type TestAttestationProject = z.infer<typeof testAttestationProjectSchema>;
+
 export const testAttestationSchema = z.object({
   stepId: z.string(),
   treeSha: z.string().length(40),
   headSha: z.string().length(40).optional(),
   shippedSha: z.string().length(40).optional(),
+  /** Per-project truth for a workspace run. Top-level fields keep older run records valid. */
+  projects: z.array(testAttestationProjectSchema).min(1).optional(),
   at: z.string(),
 });
 export type TestAttestation = z.infer<typeof testAttestationSchema>;

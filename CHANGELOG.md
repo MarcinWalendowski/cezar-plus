@@ -1,5 +1,14 @@
 # Unreleased
 
+## 🛠 Fixed
+
+- **Workspace revision checks now follow the project worktrees.** `tested-revision-shipped`
+  captures and verifies every persisted workspace project against its own tested tree. Scratch
+  control files such as `.cezar-control-path` and gate logs no longer reject a valid project
+  commit, while a real post-test source change still fails closed and names its project and path.
+  Existing single-project and persisted single-tree attestations remain valid. See
+  `.ai/specs/2026-08-25-workspace-revision-attestation.md`.
+
 ## 🔄 Synced from upstream
 
 - 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
