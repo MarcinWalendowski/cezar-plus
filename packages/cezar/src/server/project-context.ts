@@ -16,6 +16,9 @@ import { SourceStore } from '../sources/store.ts';
 import { normalizeRoot } from '../workspace/projects.ts';
 import { WorkspaceRunIndex, type WorkspaceRunProjectSource } from '../workspace/run-index.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
+import { accountAuthFromService } from '../workspace/account-viability.ts';
+import type { AccountAuth } from '../workspace/account-viability.ts';
+import type { ProviderAuthService, ProviderId } from '../core/provider-auth.ts';
 import { RunManager } from '../workflows/run.ts';
 import { isLoopbackHost } from './capabilities.ts';
 import { ensureLaunchKey } from './launch-key.ts';
@@ -194,6 +197,13 @@ export interface ProjectContextDeps {
    *  When omitted, the map still shares one private instance across the
    *  managers it builds (workspace defaults, never refreshed). */
   semaphore?: WorkspaceSemaphore;
+  /** The ONE `ProviderAuthService` for the process, owned by `createApp` — this package has no
+   *  reference of its own (`grep -n 'providerAuth' project-context.ts` found nothing before
+   *  `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1). Threaded into every
+   *  `RunManager` this class builds as `accountAuth`, so a non-boot project's dispatch pickers
+   *  learn credentials the same way the boot project's do. Omitted (every existing test fixture)
+   *  keeps `RunManager`'s own default: every account reads `'unknown'`, therefore eligible. */
+  providerAuth?: ProviderAuthService;
   /** Overrides `process.env`. Every central-hub `CEZ_*` gate below (D4) reads through this, and
    *  it is threaded into `KnowledgeStore`'s own env-based root resolution and into
    *  `notificationsDataDir()`, so a test exercises a flag without mutating the real process env. */
@@ -281,6 +291,10 @@ export class ProjectContexts {
    *  process lifetime, so every `build()` after the first reuses this instead of re-stat'ing it.
    *  `undefined` (never populated) when `deps.bootRoot` was omitted. */
   private bootRootReal: Promise<string> | undefined;
+  /** Bound once from `deps.providerAuth`, so every `build()` hands its `RunManager` the same
+   *  credentials read `index.ts`'s two boot paths do. `undefined` (`deps.providerAuth` omitted)
+   *  keeps `RunManager`'s own `'unknown'` default. */
+  private readonly accountAuth: ((provider: ProviderId, profileId: string | undefined) => AccountAuth) | undefined;
 
   constructor(private readonly deps: ProjectContextDeps) {
     this.semaphore = deps.semaphore ?? new WorkspaceSemaphore();
@@ -290,6 +304,7 @@ export class ProjectContexts {
     });
     this.notificationRuntime = deps.notificationRuntime
       ?? (this.env.CEZ_NOTIFY === '1' ? buildNotificationRuntime(this.env) : undefined);
+    this.accountAuth = deps.providerAuth ? accountAuthFromService(deps.providerAuth) : undefined;
   }
 
   /** The workspace-level notification runtime (D22a), `undefined` under `CEZ_NOTIFY` unset,
@@ -436,7 +451,10 @@ export class ProjectContexts {
       ?? AutomationStore.open(dataDir);
     reconcileAutomationReceipts(automationStore, store);
     this.notifyStoreCreated(store);
-    const manager = new RunManager(store, project.root, { semaphore: this.semaphore });
+    const manager = new RunManager(store, project.root, {
+      semaphore: this.semaphore,
+      ...(this.accountAuth ? { accountAuth: this.accountAuth } : {}),
+    });
 
     const { knowledgeStore, sourceStore } = activateOptionalStores({
       env: this.env,

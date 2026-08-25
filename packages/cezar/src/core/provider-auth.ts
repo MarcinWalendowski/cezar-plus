@@ -316,6 +316,14 @@ function quoteExecutable(executable: string, platform: NodeJS.Platform): string 
 
 /** The per-account cache key. ONE definition: a probe that wrote under a different spelling than
  *  a peek reads would silently make every peek a miss, and every page load pay for a CLI spawn. */
+/**
+ * The discovered default's own key in {@link ProviderAuthService.runtimeRejections} —
+ * `@loki-labs/better-cezar-contract`'s `DEFAULT_AGENT_ACCOUNT_ID` mirrored here as a plain literal
+ * rather than imported, because nothing under `src/core/` depends on the contract package and this
+ * one sentinel is not worth starting that edge.
+ */
+const DEFAULT_PROFILE_KEY = 'default';
+
 function profileCacheKey(provider: ProviderId, profileId: string): string {
   return `${provider}\u0000${profileId}`;
 }
@@ -349,6 +357,18 @@ export class ProviderAuthService {
   private readonly platform: NodeJS.Platform;
   private readonly createAuthFailureId: () => string;
   private readonly runtimeFailures = new Map<ProviderId, RuntimeAuthFailure>();
+  /**
+   * PER-ACCOUNT runtime rejections, keyed by `profileCacheKey(provider, profileId ??
+   * DEFAULT_PROFILE_KEY)` — `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 1.
+   *
+   * `runtimeFailures` above is a BANNER fact: provider-wide, acknowledgement-only, exactly what
+   * `GET /providers/status` latches onto the default row. This map is a ROUTING fact: it excludes
+   * only the one account that was actually rejected, and it clears on evidence (a subsequent
+   * connected probe of that exact account), never on acknowledgement alone. The two must not be
+   * merged — see `reportRuntimeAuthFailure`, `clearRuntimeAuthFailure` and `authOf` in
+   * `workspace/account-viability.ts` for the read side.
+   */
+  private readonly runtimeRejections = new Map<string, RuntimeAuthFailure>();
   private nextRuntimeFailureGeneration = 0;
   private nextProbeGeneration = 0;
   private completed?: {
@@ -416,7 +436,16 @@ export class ProviderAuthService {
     return this.startFreshProbe().visible;
   }
 
-  reportRuntimeAuthFailure(provider: ProviderId): RuntimeAuthFailureReport | null {
+  /**
+   * A provider (and, optionally, one ACCOUNT of it) just rejected credentials mid-run. Always
+   * writes the provider-wide banner latch — unchanged, acknowledgement-only, exactly as before —
+   * and, when `profileId` is given, ALSO writes the per-account routing rejection.
+   *
+   * `profileId` absent means the discovered default (`DEFAULT_PROFILE_KEY`), not "every account of
+   * this provider": every existing caller passes no second argument, and their behaviour is
+   * byte-identical to today.
+   */
+  reportRuntimeAuthFailure(provider: ProviderId, profileId?: string): RuntimeAuthFailureReport | null {
     if (process.env.CEZ_DRY_RUN === '1' || providerAuthChecksDisabled()) return null;
     const current = this.runtimeFailures.get(provider);
     const failure: RuntimeAuthFailure = {
@@ -424,6 +453,7 @@ export class ProviderAuthService {
       authFailureId: current?.authFailureId ?? this.createAuthFailureId(),
     };
     this.runtimeFailures.set(provider, failure);
+    this.runtimeRejections.set(profileCacheKey(provider, profileId ?? DEFAULT_PROFILE_KEY), failure);
     return {
       status: {
         provider,
@@ -435,12 +465,26 @@ export class ProviderAuthService {
     };
   }
 
+  /** Whether THIS account (not just its provider) carries a live runtime rejection — the routing
+   *  read `workspace/account-viability.ts`'s `authOf` overlays onto the raw peek. `profileId`
+   *  absent means the discovered default. */
+  isRuntimeRejected(provider: ProviderId, profileId?: string): boolean {
+    return this.runtimeRejections.has(profileCacheKey(provider, profileId ?? DEFAULT_PROFILE_KEY));
+  }
+
   /** Clear only the incident the caller actually observed. A stale retry must
-   * never erase a rejection that arrived after the user began recovery. */
+   * never erase a rejection that arrived after the user began recovery.
+   *
+   * Clears BOTH maps for that incident id — one acknowledgement repairs everything it created,
+   * including every per-account rejection it wrote (there is at most one, but a defensive sweep
+   * costs nothing on a map this small). */
   clearRuntimeAuthFailure(provider: ProviderId, authFailureId: string): boolean {
     const current = this.runtimeFailures.get(provider);
     if (!current || current.authFailureId !== authFailureId) return false;
     this.runtimeFailures.delete(provider);
+    for (const [key, rejection] of this.runtimeRejections) {
+      if (rejection.authFailureId === authFailureId) this.runtimeRejections.delete(key);
+    }
     return true;
   }
 
@@ -492,6 +536,16 @@ export class ProviderAuthService {
         if (!this.completed || generation >= this.completed.generation) {
           this.completed = { response, timestamp: this.now(), generation };
         }
+        // A CONNECTED default is evidence the login works again — clear ONLY that provider's
+        // default rejection, never `runtimeFailures` (the banner stays acknowledgement-only; see
+        // `provider-auth.test.ts`'s "does not clear a runtime latch when an ordinary fresh probe
+        // finds credentials"). A non-connected result changes nothing here: `reportRuntimeAuthFailure`
+        // is the only writer of a fresh rejection, and this loop must not manufacture one.
+        for (const row of providers) {
+          if (row.status === 'connected') {
+            this.runtimeRejections.delete(profileCacheKey(row.provider, DEFAULT_PROFILE_KEY));
+          }
+        }
         return response;
       });
     // One derived visible promise per raw probe preserves the historical
@@ -537,6 +591,9 @@ export class ProviderAuthService {
       .then((status) => {
         const stamped: ProviderStatus = { ...status, profileId: profile.id };
         this.completedProfiles.set(key, { status: stamped, timestamp: this.now() });
+        // Same evidence rule as the default's own fresh probe above — a CONNECTED result clears
+        // ONLY this account's routing rejection, never the provider-wide banner.
+        if (stamped.status === 'connected') this.runtimeRejections.delete(key);
         return stamped;
       })
       .finally(() => {
@@ -557,9 +614,13 @@ export class ProviderAuthService {
   forgetProfileStatus(provider?: ProviderId, profileId?: string): void {
     if (provider === undefined || profileId === undefined) {
       this.completedProfiles.clear();
+      this.runtimeRejections.clear();
       return;
     }
     this.completedProfiles.delete(profileCacheKey(provider, profileId));
+    // The account's dir just changed under us — whatever rejected the OLD dir says nothing about
+    // the new one.
+    this.runtimeRejections.delete(profileCacheKey(provider, profileId));
   }
 
   /**
@@ -594,6 +655,24 @@ export class ProviderAuthService {
     }
     if (!this.completed) return undefined;
     return this.withRuntimeFailures(this.completed.response);
+  }
+
+  /**
+   * The cached DEFAULT row for one provider, WITHOUT the provider-wide runtime-failure latch —
+   * `this.completed` only, same cache {@link peekStatus} reads, minus the `withRuntimeFailures`
+   * pass. `undefined` when `status()` has never resolved.
+   *
+   * A second, narrower accessor beside {@link peekStatus} rather than a flag on it: the banner
+   * (`GET /providers/status`, `peekStatus`) and the router (`workspace/account-viability.ts`'s
+   * `authOf`) want genuinely different answers to "is claude:default connected?" — the banner asks
+   * "did this provider refuse someone, and has anyone acknowledged it?", the router asks "can I
+   * spawn on THIS login right now?". Routing a sibling account's rejection onto a healthy default
+   * would be exactly the inversion this accessor exists to prevent. Nothing that renders the banner
+   * may use this.
+   */
+  peekDefaultRowRaw(provider: ProviderId): ProviderStatus | undefined {
+    if (process.env.CEZ_DRY_RUN === '1') return { provider, status: 'connected' };
+    return this.completed?.response.providers.find((row) => row.provider === provider);
   }
 
   private async probe(descriptor: ProviderDescriptor, configDir?: string | null): Promise<ProviderStatus> {
