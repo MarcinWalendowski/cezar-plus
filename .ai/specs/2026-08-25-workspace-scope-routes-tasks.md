@@ -8,7 +8,13 @@
 > every narrow Mac sweep missed). What keeps it QA Needed: **nobody has driven the screen**, and no
 > workspace run has been started on the live release. See *Implementation status* below for exactly
 > what was and was not executed. **Phase 4 not started and cannot be: it is gated on the worktree
-> drain.** · **Date:** 2026-08-25 · **Owner instruction, verbatim:**
+> drain.**
+>
+> **KNOWN DEFECT in the shipped Phase 3, found 2026-08-25 after deploy:** the **Start filed tasks**
+> toggle files todos correctly and **starts nothing** for any project that is not already resident,
+> because `cez todo start` only sets a flag and the watcher that reads it is armed for resident
+> contexts only. Being fixed by run `1f5aa96e` / `.ai/specs/2026-08-25-lazy-project-watchers.md`
+> (todos `f09bf585` + `503195a8`). Detail in *Phase 2* below. · **Date:** 2026-08-25 · **Owner instruction, verbatim:**
 > *"when creating a task we can by default set scope to workspace and the only available workflow
 > there should be like: input-to-tasks, where retrieve the context across all workspace (like we are
 > doing now in our default workflow). The workflow steps should be: 1. Gather the context. 2. Create
@@ -486,6 +492,33 @@ own Verification section says so.
   **No step is given `Edit` or `Write`**, so "it does not touch your files" is a property of the
   tool grant, not a request in a prompt. `file` files without `--start`; `dispatch` reads
   `{{autoStart}}` and calls `cez todo start <id> --project <id>`.
+
+  > **CORRECTED 2026-08-25, same day — the dispatch step does not actually start anything for most
+  > projects, and this spec shipped believing it did.** `cez todo start` sets `autostart: true` and
+  > nothing else; `todo-cli.ts`'s own docblock says so explicitly, and the run only happens because
+  > the *running cockpit's* `todos.json` watcher notices the flag. `server.ts` arms that watcher
+  > (`watchTodoAutostart`, ~line 1737) for the boot context, for contexts already built, and via
+  > `onContextBuilt` — and project contexts are **lazy**, built on first API touch. So a registered
+  > project nobody has opened since the last restart has no watcher on its `todos.json`.
+  >
+  > `dispatch` files into every project the workspace run touched, which is precisely the set most
+  > likely to be cold. The tick is written, nothing reads it, and the failure is silent in both
+  > directions: the todo carries the flag and no run appears. Todo `503195a8` had already
+  > established the same residency gap for the *reopen* inbox by inotify against the production
+  > server PID (workspace and cezar watched, `chat` not) — the two watchers are twins with one root
+  > cause, which is why neither was noticed from the other.
+  >
+  > **This is not hypothetical and not fixed by anything in this spec.** Filed as todo `f09bf585`
+  > (high) and being fixed together with `503195a8` by run `1f5aa96e` — spec
+  > `.ai/specs/2026-08-25-lazy-project-watchers.md`, a cold-intent discovery service that watches the
+  > two intent paths for non-resident projects and builds a context only where a pending flag
+  > actually exists (no eager boot-time builds, no directory created as a side effect).
+  >
+  > **Until that lands, treat the Start filed tasks toggle as filing correctly and starting
+  > nothing** for any project that is not already resident. Nothing in the verification below
+  > catches this: every test builds the context it asserts against, so the defect is invisible to
+  > exactly the tests written for the feature — the condition under test is the one production
+  > supplies and the fixture never does.
 - `workflows/run.ts` — `applyTemplate` renders `{{autoStart}}`, read from the **record** rather than
   the input so a resume answers identically.
 - `todo-cli.ts` — `cezar todo start <id> [--project] [--json]`. Accepts an id prefix, errors on an
