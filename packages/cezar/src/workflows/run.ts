@@ -5882,7 +5882,10 @@ export class RunManager {
         }
         const next: PendingHandoff = {
           ...pending,
-          reason: checked.detail.slice(0, 2_000),
+          // A manual-deploy handoff carries a concise `handoff.reason`; a plain red recheck with
+          // NO handoff (a non-manual target failing on the same recheck, `:348-353`) does not, and
+          // `detail` is the only text there is to show in that case: the fallback is load-bearing.
+          reason: (checked.handoff?.reason ?? checked.detail).slice(0, 2_000),
           ...(checked.handoff?.kind ? { kind: checked.handoff.kind } : {}),
           ...(checked.handoff?.targets ? { targets: checked.handoff.targets.slice(0, 50) } : {}),
         };

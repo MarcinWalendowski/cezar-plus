@@ -535,6 +535,23 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(deploy?.allowedTools).toContain('Bash');
     expect(deploy?.bashAllowlist).toBeUndefined();
   });
+
+  /**
+   * spec `.ai/specs/2026-08-24-manual-deploy-not-a-bug.md` D1: the `deploy` step's unrestricted
+   * Bash (above) makes the manual-target gate advisory unless the prompt itself refuses. Without
+   * this paragraph an agent following "DEPLOY it" to the letter activates a target the owner marked
+   * `manual: true`, the probe goes green, and the postcondition reports success: the exact
+   * workaround the gate exists to forbid.
+   */
+  it('deploy prompt reads .ai/deploy-targets.json first and refuses a manual target', () => {
+    const deploy = stepById('deploy');
+    expect(deploy?.prompt).toContain('.ai/deploy-targets.json');
+    expect(deploy?.prompt).toContain('"manual": true');
+    expect(deploy?.prompt).toMatch(/must\s+(not|NOT)\s+deploy/);
+    expect(deploy?.prompt).toContain('work around it');
+    // The park has to be framed as correct, or the agent's own report reads it as a failure to fix.
+    expect(deploy?.prompt).toContain('park for a human');
+  });
 });
 
 /**
