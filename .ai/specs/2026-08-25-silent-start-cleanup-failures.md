@@ -1,8 +1,22 @@
 # Silent Start Cleanup Failures
 
-> **Status:** **operational cleanup record + filed diagnosis**, revised 2026-08-25 after review.
-> Nothing here has been executed. This is step 2/9 of run
-> `a3dd8f5f-5d66-402e-b876-c1a6746d9da7` (`spec-to-deploy`).
+> **Status:** **EXECUTED 2026-08-25, step 8/9 of the same run.** ~~Nothing here has been
+> executed.~~ P1 and P2 are both done: three follow-up tasks are filed
+> (`ec74e82a-90f1-47b9-bb41-b0d1d0b49543`, `caab0649-3991-4beb-b022-46f00ce49b96`,
+> `e3562b60-2b2f-43b3-897c-7876925ac56b`, project `cezar`), and the sibling run
+> `ae7bd42f-a399-4ceb-92cf-d657e620d80f` is cancelled, deleted, and confirmed absent (§
+> Verification 1-3 all passed; see this run's handoff, `10:05Z` entry). The spec and brief were
+> committed (`04e46586`), a pre-existing `.ship-drafts` gitlink corruption on this branch was fixed
+> in passing (`5d50bfc2`), and the branch was merged into and pushed to `origin/main` directly
+> (`9fdf364b`) — confirmed still an ancestor of `origin/main` as of this writing. **P3 remains
+> genuinely outstanding**: this run, `a3dd8f5f-5d66-402e-b876-c1a6746d9da7`, cannot cancel itself
+> (see § P3 below) and is still `status: "running"` in `runs.json` as this step executes. The
+> parent task `480e0282` or the owner still needs to reap it once this chain reaches its final
+> step. Original status line, describing the pre-execution worktree, preserved below unchanged.
+>
+> **Original status (2026-08-25, pre-execution):** ~~**operational cleanup record + filed
+> diagnosis**, revised 2026-08-25 after review. Nothing here has been executed. This is step 2/9 of
+> run `a3dd8f5f-5d66-402e-b876-c1a6746d9da7` (`spec-to-deploy`).~~
 >
 > **REVISED 2026-08-25.** This document was first written as a three-defect implementation spec
 > (P1-P5) for a task whose title is disposable E2E fixture data. Review found that this exceeded
@@ -801,7 +815,7 @@ implemented here.**
 > in § Measured facts → "The cluster question is SETTLED". There is nothing left to measure, so the
 > measurement phase is deleted rather than kept as an open question.
 
-### P1 — File the three defects as their own tasks *(THIS TASK; no code; runs FIRST)*
+### P1 — File the three defects as their own tasks *(THIS TASK; no code; runs FIRST)* — **DONE 2026-08-25**
 
 The diagnosis is the value here, and it must land **before** anything is cancelled or deleted: P2
 destroys a run and P3 destroys this one, and a task filed after that point would be filed by nobody.
@@ -849,7 +863,7 @@ cezar todo add "Settle what a tombstoned todo means at every route boundary" \
 **Done when:** `cezar todo list --project cezar` shows the three rows, and their ids are appended
 to this run's handoff file so P3's external actor can find them without reading this document.
 
-### P2 — Cancel and delete the SIBLING run only *(THIS TASK; operational, no code)*
+### P2 — Cancel and delete the SIBLING run only *(THIS TASK; operational, no code)* — **DONE 2026-08-25**
 
 **Scope: `ae7bd42f-a399-4ceb-92cf-d657e620d80f` and nothing else.** This run
 (`a3dd8f5f-5d66-402e-b876-c1a6746d9da7`) is P3's, not P2's — see the phase preamble.
@@ -966,7 +980,7 @@ surprise here would mean the diagnosis is wrong, which is worth catching.
 `GET /api/v1/p/cezar/runs`, answers `404` on the scoped mount, its worktree directory is gone, and
 both todos are terminal. Then destroy the session (§ Verification 0a).
 
-### P3 — Reap THIS run *(EXTERNAL actor: parent task `480e0282`, or the owner)*
+### P3 — Reap THIS run *(EXTERNAL actor: parent task `480e0282`, or the owner)* — **STILL PENDING as of step 8/9 (2026-08-25); this run is still `status: "running"`**
 
 **This run cannot do this, and the reason is mechanical, not cautious.** `RunManager.cancel()` on an
 active run sets `state.cancelled = true` and calls `state.interrupt()`
