@@ -1,8 +1,11 @@
 # Ship Bulk Task Starts
 
-> **Status:** **spec written** 2026-08-24. Nothing in this document has been executed yet. This
-> is step 2/9 of run `480e0282-a967-4936-a12e-3c4e56450586` (`spec-to-deploy`); the reconcile,
-> commit, gate, deploy, E2E and record steps all follow.
+> **Status:** **Partial, QA needed** as of 2026-08-25. Reconcile, feature commit, origin push,
+> and clean-tree gate verification are recorded below. The agent-run deploy did not happen because
+> both declared targets are manual, the production browser E2E failed, and the corpus entry remains
+> a pending proposal until an applier is available. This is step 2/9 of run
+> `480e0282-a967-4936-a12e-3c4e56450586` (`spec-to-deploy`), whose remaining release work is
+> explicitly incomplete.
 > · **Date:** 2026-08-24
 >
 > **Task:** `480e0282-a967-4936-a12e-3c4e56450586`, "Ship bulk start filed tasks."
