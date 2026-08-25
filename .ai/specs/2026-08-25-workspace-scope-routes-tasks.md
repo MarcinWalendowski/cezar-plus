@@ -1,11 +1,14 @@
 # Workspace scope routes tasks into projects; it stops editing them
 
 > **Status:** partial — **Phases 1–3 implemented, shipped and LIVE 2026-08-25** (`dc64b741`,
-> release `20260825T104007Z-dc64b741`), **still QA Needed.** The code was verified running on
-> production — the loader serves `input-to-tasks`, no step holds a write tool, the route defaults,
-> the worktree call is gone — but **nobody has driven the screen**, and V7's on-the-box double gate
-> has not run. See *Implementation status* below for exactly what was and was not executed.
-> **Phase 4 not started and cannot be: it is gated on the worktree drain.** · **Date:** 2026-08-25 · **Owner instruction, verbatim:**
+> release `20260825T104007Z-dc64b741`; purity fix `7e82ce10` on top, comment-only), **still QA
+> Needed.** The code was verified running on production — the loader serves `input-to-tasks`, no
+> step holds a write tool, the route defaults, the worktree call is gone — and **V7's on-the-box
+> gate has now run** (11854 pass / 0 fail at `7e82ce10`; it caught a real red at `dc64b741` that
+> every narrow Mac sweep missed). What keeps it QA Needed: **nobody has driven the screen**, and no
+> workspace run has been started on the live release. See *Implementation status* below for exactly
+> what was and was not executed. **Phase 4 not started and cannot be: it is gated on the worktree
+> drain.** · **Date:** 2026-08-25 · **Owner instruction, verbatim:**
 > *"when creating a task we can by default set scope to workspace and the only available workflow
 > there should be like: input-to-tasks, where retrieve the context across all workspace (like we are
 > doing now in our default workflow). The workflow steps should be: 1. Gather the context. 2. Create
@@ -559,10 +562,36 @@ description of the route was corrected in place with the superseded text kept be
 
 - **V1/V2** — the end-to-end worktree-count negative control and its mutation proof need a real
   twelve-project workspace. Not run. The unit-level equivalents above are not a substitute for it.
-- **V7 (gates on the box, twice)** — **not run, and deliberately deferred.** The box was carrying
-  four concurrent agent runs at the time of writing. The reason to gate there is that it is *idle*;
-  gating on a loaded box reproduces the exact load-sensitive flakes the rule exists to escape, so
-  running it now would buy a worse answer, not a better one. It must still be run.
+- **V7 (gates on the box, twice)** — **EXECUTED 2026-08-25, and it earned its keep.** Deferred at
+  first because the box was carrying four concurrent runs; run once it was idle (load 0.51, one
+  run). `npm run typecheck` **exit 0** across all four projects, then `npm run test` twice on the
+  identical tree at `dc64b741`: **11853 passed, 1 failed, both times, the same test** — a red that
+  did *not* move, which is the signature of a deterministic failure rather than the flake pool.
+
+  The failure was **real and introduced by this change**: `upstream purity (spec Verification #10,
+  whole tree)` in `notifications/transports/webhook.test.ts` scans every file under
+  `packages/{cezar,web}/src` and flagged `workflows/run.ts`, because the Phase 1 comment cited the
+  absolute production path it was measured on, and that path spells the workspace name. The rule
+  exempts exactly one spelling — the fork's own `@loki-labs/better-cezar*` specifier, **stripped**
+  before the scan rather than pattern-matched, so a bare mention in prose still fails. cezar is
+  published; the hazard is a coding cockpit quoting a neighbouring product's paths into a tool that
+  knows nothing about them. Fixed comment-only in `7e82ce10` (the evidence — five concurrent runs,
+  same live checkout, grants 0–106 s apart — survives the rewording). Re-run on the box at
+  `7e82ce10`: **11854 passed, 0 failed, 630 files, exit 0.**
+
+  **Why every Mac gate missed it, worth carrying:** the local sweeps were scoped to
+  `workflows/ workspace/ runs/ todo-cli todos`, `notes/ automations/ scheduling/` and the full web
+  suite. This test is in `notifications/`, so no sweep ever loaded it. A new file or a new comment
+  reddens *shared, whole-tree* gates that its own suite has no reason to run — narrow briefs leave
+  the real gate unrun, and twenty greens read exactly like coverage.
+
+  **Note for the next session:** the box's `npm run typecheck` exits 0 on **all four** projects,
+  including `web`. The Mac reports 8 errors in `web`'s `api/client.ts`, called "pre-existing" here
+  and proven pre-existing with a `git stash` control. Both observations stand; the discrepancy is
+  environmental and unexplained, and it means "web has 8 pre-existing errors" is a fact about the
+  Mac, not about the tree. Worth resolving before anyone trusts either number.
+
+  The earlier local runs are kept below for the record.
 
   What was run locally, and what it shows: sweeps over `workflows/ workspace/ runs/ todo-cli todos`
   (1520/1524) **twice**, plus `notes/ automations/ scheduling/` and the CLI-wiring suites
