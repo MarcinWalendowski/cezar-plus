@@ -1,6 +1,6 @@
 # Config API env isolation
 
-**Status: IMPLEMENTED 2026-08-24 in `b8bce1f5`.** This document is the `spec` step (2 of 9) of run
+**Status: IMPLEMENTED 2026-08-25 in `fe4287c2b4e1991206da753511be41541df0cf72`; QA NEEDED pending deploy.** This document is the `spec` step (2 of 9) of run
 `6446fb82-b878-4818-b54a-e3d2ef7ad714`, workflow `spec-to-deploy`, branch `cez/6446fb82`, worktree
 HEAD `b3d3a44c`. Written against the brief
 `.ai/specs/briefs/2026-08-24-config-api-claude-env-isolation.md` (step 1 of this run). Every file
@@ -613,6 +613,21 @@ the verification at step 4, was wrong to imply it. Step 7c is the runtime eviden
 two probes against the live process, at the committed sha. Until both have exited 0, the honest
 status is **shipped, not deployed** — say that, rather than rounding a green gate up into a green
 deploy.
+
+## Closeout evidence (2026-08-25)
+
+- Implementation phases P1 through P4 and the in-place stale-record correction P5 landed in
+  `fe4287c2b4e1991206da753511be41541df0cf72`, then reached `origin/main` at merge commit
+  `f153b53759af33f7f06cc98f7826e985ed6f55d5`.
+- The recorded run-tests gate completed `npm ci` and `npm run typecheck`, then stopped fail-closed on
+  the hostile full suite. Its exact summary was `Test Files  6 failed | 619 passed | 2 skipped (627)`
+  and `Tests  16 failed | 11732 passed | 4 skipped (11752)`, exit 1. The failures were in six
+  unrelated suites: knowledge catalog, sources scheduler, discovered account API, pasted attachments,
+  stopped steps, and system prompt. `test:unit`, build, and package tests were not run after the gate
+  stopped. The targeted config-api result is not separately claimed here because the run record does
+  not preserve a focused summary.
+- Deployment was not performed in this document step. The next deploy step must rebuild the landed
+  sha, activate it through the documented blue-green path, and pass both service probes.
 
 ## Record
 
