@@ -67,5 +67,10 @@ new aggregate event is introduced because the server receives independent existi
    `npm run test:package` successfully.
 4. Confirm the deploy-probe package suite covers structured verdicts, missing credentials, project
    scope, reconnect continuity, gaps, expiring credentials, and perimeter redirects.
+**CORRECTED 2026-08-25:** The production E2E ran on 2026-08-25 at 08:18. Its artifacts are
+preserved at `/var/lib/cezar/e2e-artifacts/bulk-start-480e0282/`; it failed at the post-start
+row-removal assertion, its cleanup failed and left two live runs, so the feature remains
+**QA Needed**.
+
 5. On production, select two disposable filed tasks, run the batch, verify both runs appear and the
    browser remains on `/tasks`, then cancel or clean up the disposable runs.

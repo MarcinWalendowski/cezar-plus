@@ -802,6 +802,15 @@ worked). Rollback probes readiness itself since `2f91de4b`.
 
 ### P5: Real browser E2E on production *(stop-safe: cleanup runs even on failure)*
 
+> **CORRECTED 2026-08-25:** The recipe below was executed by the 480e0282 production E2E, and its
+> cleanup used the unscoped routes `POST /api/v1/runs/:id/cancel` and `DELETE /api/v1/runs/:id`.
+> It treated their `404` responses as success, even though those routes resolve the boot project
+> and the disposable runs belonged to the `cezar` project. The replacement is to resolve the owning
+> project id from the registry and use `POST /api/v1/p/<projectId>/runs/<id>/cancel`,
+> `DELETE /api/v1/p/<projectId>/runs/<id>`, and `GET /api/v1/p/<projectId>/runs/<id>` for the
+> absence proof. The production E2E failed at the post-start row-removal assertion and remains
+> **QA Needed**.
+
 Driven with Playwright/Chromium against `http://127.0.0.1:4321`, the live production process on
 this box. Loopback clears the **Cloudflare Access** perimeter, and nothing else: the application's
 own session gate still applies, and every data API the Filed table needs answers `401
