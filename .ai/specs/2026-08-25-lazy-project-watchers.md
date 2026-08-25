@@ -1,6 +1,6 @@
 # Lazy Project Watchers
 
-> **Status:** Implemented, not verified. QA Needed until both cold-project paths pass on the
+> **Status:** Implemented, QA Needed until both cold-project paths pass on the
 > production service.
 >
 > **Task:** `1f5aa96e-1254-4b78-a603-0307ff0fee94`, combining board todos
@@ -365,6 +365,22 @@ specifier. The existing whole-tree test remains the enforcement mechanism.
 ## Verification
 
 No command in this section was run while writing the spec.
+
+### Execution record, 2026-08-25
+
+The implementation landed on `origin/main` in merge commit `e8a2b1d6`, with feature commit
+`809c8220`. The focused watcher tests passed: 2 files and 51 tests. Typecheck, `test:unit` with
+44 tests, build, and `test:package` with 25 tests also passed. The full `npm test` gate remains
+red in 5 unrelated suites with 15 failures. There is no root lint script.
+
+The required source-removal regression control was not established. The clean-control stash could
+not run because existing intent-to-add paths were not stashable, no stash was created or popped,
+and the implementation stayed present. The targeted control that was run passed 40 of 40 tests,
+so it does not prove the unfixed behavior fails.
+
+The mandatory production canaries were not run. No production project was used, no non-residency
+proof was recorded, and the manual deployment handoff remains unresolved. The spec therefore
+stays QA Needed.
 
 ### Automated regression
 
