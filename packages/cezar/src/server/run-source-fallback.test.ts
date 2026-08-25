@@ -119,4 +119,30 @@ describe('POST /api/v1/runs — neither workflow nor steps resolves to the defau
     expect(capturedWorkflow?.source).toBe('file');
     expect(capturedWorkflow?.description).toBe('project override');
   });
+
+  /**
+   * `spec-to-deploy-codex` (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, V4): the
+   * derived sibling reaches `POST /api/v1/runs` through the same `resolveRunWorkflow` name lookup
+   * as every other catalog entry, with no route change.
+   */
+  it('a body naming spec-to-deploy-codex resolves to the derived workflow, every step pinned to codex', async () => {
+    const res = await post({ task: 't', workflow: 'spec-to-deploy-codex' });
+    expect(res.status).toBe(201);
+    expect(capturedWorkflow?.name).toBe('spec-to-deploy-codex');
+    for (const step of capturedWorkflow?.steps ?? []) {
+      expect(step.runner, step.id).toBe('codex');
+    }
+  });
+
+  it('a body naming a near-miss of spec-to-deploy-codex is still a 404', async () => {
+    const res = await post({ task: 't', workflow: 'spec-to-deploy-codexx' });
+    expect(res.status).toBe(404);
+    expect(capturedWorkflow).toBeUndefined();
+  });
+
+  it('a body naming neither key still resolves to spec-to-deploy, unchanged by the new sibling existing', async () => {
+    const res = await post({ task: 't' });
+    expect(res.status).toBe(201);
+    expect(capturedWorkflow?.name).toBe('spec-to-deploy');
+  });
 });

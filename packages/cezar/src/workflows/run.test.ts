@@ -1024,6 +1024,129 @@ describe('a chain of 2 selected skills runs BOTH steps, in order (#410)', () => 
 });
 
 /**
+ * `run.workflow.selected` (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, Analytics, V9):
+ * emitted once per CREATED run from `startRun`, not from `execute()` — the distinction matters
+ * because `execute()` is re-entered (`pump`'s dequeue, `reattachBrokeredRun`'s post-restart
+ * re-adopt), and an event emitted there would overcount exactly the long, interrupted runs a rate
+ * most needs to count honestly.
+ */
+describe('run.workflow.selected metric — once per created run, not per execute() entry (V9)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-workflow-selected-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    manager?.dispose();
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  function selectedEvents(runId: string) {
+    return store
+      .readEvents(runId)
+      .filter((e) => e.type === 'metric' && (e as { name?: unknown }).name === 'run.workflow.selected');
+  }
+
+  async function waitTerminal(runId: string): Promise<void> {
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + 20_000;
+    while (!terminal.has(store.getRun(runId)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  it('fires exactly once at creation — before the run has executed at all — and a second execute() entry does not add a second one', async () => {
+    const workflow: WorkflowDef = {
+      name: 'spec-to-deploy-codex',
+      source: 'built-in',
+      steps: [
+        { id: 'a', name: 'a', prompt: '{{task}}', runner: 'claude' },
+        { id: 'b', name: 'b', prompt: '{{task}}', runner: 'claude' },
+      ],
+    };
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      runner: 'codex',
+      worktree: false,
+    });
+
+    // Read events SYNCHRONOUSLY, immediately after `startRun` returns and before any `await` runs
+    // in this test — `startRun` fires `void this.pump()` but returns before pump's async body gets
+    // a single microtask, so nothing has executed yet. Emitting from `execute()` instead of
+    // `startRun` would read as a count of 0 here.
+    const before = selectedEvents(record.id);
+    expect(before).toHaveLength(1);
+    expect(before[0]).toMatchObject({
+      name: 'run.workflow.selected',
+      runId: record.id,
+      workflow: 'spec-to-deploy-codex',
+      requestedRunner: 'codex',
+      stepCount: 2,
+    });
+
+    await waitTerminal(record.id);
+    expect(selectedEvents(record.id)).toHaveLength(1);
+
+    // A second `execute()` entry — the same re-entry point `pump`'s dequeue and
+    // `reattachBrokeredRun`'s post-restart re-adopt use — must not add a second event. Called
+    // directly here rather than through the live-spool machinery `recover-brokered.test.ts`
+    // exercises: the fact under test is whether `execute()` itself ever emits this event, which it
+    // must not, however many times it runs.
+    const finishedRecord = store.getRun(record.id)!;
+    const input = (
+      manager as unknown as {
+        queuedInputFromRecord: (r: RunRecord, g: boolean | undefined) => unknown;
+      }
+    ).queuedInputFromRecord(finishedRecord, false);
+    await (
+      manager as unknown as {
+        execute: (runId: string, wf: WorkflowDef, input: unknown) => Promise<void>;
+      }
+    ).execute(record.id, workflow, input);
+
+    expect(selectedEvents(record.id)).toHaveLength(1);
+  }, 30_000);
+
+  it('also fires for a run started on the default (non-codex) workflow — the rate needs its denominator', async () => {
+    const workflow: WorkflowDef = {
+      name: 'spec-to-deploy',
+      source: 'built-in',
+      steps: [{ id: 'a', name: 'a', prompt: '{{task}}' }],
+    };
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      worktree: false,
+    });
+    const before = selectedEvents(record.id);
+    expect(before).toHaveLength(1);
+    expect(before[0]).toMatchObject({ workflow: 'spec-to-deploy', stepCount: 1 });
+
+    await waitTerminal(record.id);
+    expect(selectedEvents(record.id)).toHaveLength(1);
+  }, 30_000);
+});
+
+/**
  * The other half of #410's contract: the note exists to explain a step
  * boundary, so a workflow with only ONE agent step must not get it — its
  * prompt stays exactly what the author wrote. Check steps are shell commands,

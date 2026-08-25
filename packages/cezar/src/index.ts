@@ -143,7 +143,8 @@ Options:
   -p, --port <n>              cockpit port (default 4321; server-install: this
                               instance's loopback port — auto-picked per domain)
       --repo <dir>            repo to operate on (default: cwd)
-      --workflow <name>       workflow for \`run\` (default: spec-to-deploy)
+      --workflow <name>       workflow for \`run\` (default: spec-to-deploy;
+                              spec-to-deploy-codex pins every step to codex)
       --model <model>         model override for \`run\`
       --no-open               don't open the browser
       --platform <id>         server-install target (ubuntu-vps | macosx-ngrok | hetzner)

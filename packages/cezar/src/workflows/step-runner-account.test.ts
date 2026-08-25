@@ -15,7 +15,7 @@ import {
   type AgentAccountUsageStore,
 } from '../workspace/agent-account-usage.ts';
 import { RunManager } from './run.ts';
-import type { WorkflowDef } from './types.ts';
+import { pinWorkflowRunner, type WorkflowDef } from './types.ts';
 
 const exec = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -313,5 +313,40 @@ describe('a step pinning its own runner', () => {
     await dispatched(record.id, 'pinned');
 
     expect(stepOf(record.id, 'pinned')?.profileId).toBe('secondary');
+  }, 30_000);
+
+  /**
+   * `spec-to-deploy-codex` (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, D1/D2, V5): a
+   * DERIVED pin resolves an account exactly like an authored one. The base step here carries no
+   * `runner` at all — `pinWorkflowRunner` is what puts one there — so this is the case that
+   * separates "the derivation reaches account resolution" from "account resolution already
+   * handled every pinned step", which the tests above (authored `runner: 'claude'`) cannot tell
+   * apart. Nine pinned steps on the real `spec-to-deploy-codex` mean nine of these where the base
+   * chain has two; this is one of the seven that is new.
+   */
+  it('a step pinned only by derivation still binds its own account, on a run started on a different runner', async () => {
+    writeAccounts({ claude: 'pool:*' });
+    manager = new RunManager(store, repoRoot);
+
+    const plainBase: WorkflowDef = {
+      name: 'derived-base',
+      source: 'built-in',
+      steps: [{ id: 'work', name: 'Work', prompt: '{{task}}' }],
+    };
+    const derived = pinWorkflowRunner(plainBase, 'codex', { name: 'derived-codex' });
+    expect(plainBase.steps[0]?.runner).toBeUndefined();
+    expect(derived.steps[0]?.runner).toBe('codex');
+
+    const record = manager.startRun(derived, {
+      author: localCliAuthor(),
+      task: 'ship it',
+      runner: 'claude',
+      worktree: false,
+    });
+    await dispatched(record.id, 'work');
+
+    // The run itself was started on claude; the derived pin is what puts this step on codex.
+    expect(stepOf(record.id, 'work')?.backend).toBe('codex');
+    expect(stepOf(record.id, 'work')?.profileId).toBe('default');
   }, 30_000);
 });
