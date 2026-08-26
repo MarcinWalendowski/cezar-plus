@@ -4,6 +4,8 @@ import {
   markReopenStarted,
   onReopenRequestsChanged,
   readReopenRequests,
+  readReopenRequestsSnapshot,
+  type ReopenReadSnapshot,
   type ReopenRequest,
 } from './reopen-requests.ts';
 import type { RunManager } from './workflows/run.ts';
@@ -26,6 +28,20 @@ import type { RunManager } from './workflows/run.ts';
 export interface ReopenWatchProject {
   dataDir: string;
   manager: RunManager;
+}
+
+export function hasPendingReopenRequests(snapshot: Pick<ReopenReadSnapshot, 'requests'>): boolean {
+  return snapshot.requests.some(isReopenPending);
+}
+
+export interface ReopenIntentSnapshot extends ReopenReadSnapshot {
+  pending: boolean;
+}
+
+/** Snapshot the reopen inbox without entering the normal reader or write path. */
+export async function readReopenIntentSnapshot(dataDir: string): Promise<ReopenIntentSnapshot> {
+  const snapshot = await readReopenRequestsSnapshot(dataDir);
+  return { ...snapshot, pending: hasPendingReopenRequests(snapshot) };
 }
 
 /**

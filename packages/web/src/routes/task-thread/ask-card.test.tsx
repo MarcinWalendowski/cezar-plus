@@ -176,10 +176,13 @@ describe('AskCard', () => {
     expect(screen.queryByRole('button', { name: /date-fns/ })).toBeNull()
   })
 
+  // The client no longer decides (spec 2026-08-25-logged-out-account-fallback, Solution 6): a
+  // live message is reroutable (site 3), so the server is the only thing that may refuse it, and
+  // it does so on the attempt rather than pre-emptively disabling the option chips.
   it.each([
-    ['disabled', { provider: 'claude', status: 'connected', enabled: false }, 'Claude Code is disabled. Enable it in Settings → Agents → Providers.'],
-    ['disconnected', { provider: 'claude', status: 'disconnected', enabled: true }, 'Claude Code credentials are unavailable. Authorize it in Settings → Agents → Providers.'],
-  ] as const)('disables Ask submissions when its active provider is %s', (_case, claude, reason) => {
+    ['disabled', { provider: 'claude', status: 'connected', enabled: false }],
+    ['disconnected', { provider: 'claude', status: 'disconnected', enabled: true }],
+  ] as const)('attempts an Ask submission even when its active provider is %s — the server decides', (_case, claude) => {
     providerStatus = {
       providers: [
         claude,
@@ -190,12 +193,9 @@ describe('AskCard', () => {
 
     renderAsk(singleAsk)
 
-    expect((screen.getByRole('button', { name: /date-fns/ }) as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getByText(reason)).toBeTruthy()
-    expect(screen.getByRole('link', { name: 'Configure providers' }).getAttribute('href')).toBe(
-      '/settings/providers',
-    )
-    expect(mutateAsync).not.toHaveBeenCalled()
+    expect((screen.getByRole('button', { name: /date-fns/ }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /date-fns/ }))
+    expect(mutateAsync).toHaveBeenCalledWith({ text: 'Library: date-fns' })
   })
 })
 
@@ -281,7 +281,7 @@ describe('AskCard — answering after the session has ended', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('does not silently switch to another connected provider when the run provider is unavailable', () => {
+  it('attempts the resume, without a runner override, when the run provider is unavailable — the server decides', async () => {
     providerStatus = {
       providers: [
         { provider: 'claude', status: 'disconnected', enabled: true },
@@ -292,13 +292,34 @@ describe('AskCard — answering after the session has ended', () => {
 
     renderAsk(singleAsk, closedRun)
 
-    expect((screen.getByRole('button', { name: /date-fns/ }) as HTMLButtonElement).disabled).toBe(true)
-    expect(
-      screen.getByText(
-        'Claude Code credentials are unavailable. Authorize it in Settings → Agents → Providers.',
+    expect((screen.getByRole('button', { name: /date-fns/ }) as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /date-fns/ }))
+    await waitFor(() => expect(continueAsync).toHaveBeenCalledTimes(1))
+    // No runner override: a server-side reroute must not be requested as a silent engine switch.
+    expect(continueAsync).toHaveBeenCalledWith({ text: 'Library: date-fns' })
+  })
+
+  it('renders the server refusal verbatim on the attempt, rather than inventing a client-side reason', async () => {
+    continueAsync.mockRejectedValueOnce(
+      new ApiError(
+        409,
+        'Claude Code credentials are unavailable, and account fallback is off. Authorize it in Settings → Agents → Providers, or turn on Account fallback in Settings → Resources.',
       ),
-    ).toBeTruthy()
-    expect(continueAsync).not.toHaveBeenCalled()
+    )
+    providerStatus = {
+      providers: [
+        { provider: 'claude', status: 'disconnected', enabled: true },
+        { provider: 'codex', status: 'connected', enabled: true },
+        { provider: 'opencode', status: 'not-installed', enabled: true },
+      ],
+    }
+
+    renderAsk(singleAsk, closedRun)
+    fireEvent.click(screen.getByRole('button', { name: /date-fns/ }))
+
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'Claude Code credentials are unavailable, and account fallback is off. Authorize it in Settings → Agents → Providers, or turn on Account fallback in Settings → Resources.',
+    )
   })
 
   it('a refused delivery is shown on the card instead of being dropped', async () => {

@@ -24,7 +24,14 @@ export function watchProviderRuntimeAuthFailures(
       ? run.steps.find(({ id }) => id === event.stepId)
       : undefined;
     const provider: ProviderId = step?.backend ?? run.runner ?? 'claude';
-    const report = providerAuth.reportRuntimeAuthFailure(provider);
+    // The ACCOUNT this rejection is attributed to, same step-first-run-second precedence as the
+    // PROVIDER just above. Step-less is the routine case, not a corner one — `AUTH_ERROR_EVENT_TYPES`
+    // includes `session.error` and `note`, and only `error` events carry a `stepId` on the
+    // well-trodden path. Falling back to `step?.profileId` alone would collapse every step-less
+    // failure onto the DEFAULT account regardless of which login the run was actually using
+    // (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 1).
+    const profileId = step?.profileId ?? run.agentProfile;
+    const report = providerAuth.reportRuntimeAuthFailure(provider, profileId);
     if (!report) return;
     if (report.transitioned) onInvalidated(report.status);
 

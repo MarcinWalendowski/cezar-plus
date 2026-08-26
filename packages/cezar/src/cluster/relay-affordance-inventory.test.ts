@@ -790,6 +790,16 @@ const FIELD_CLASSIFICATION: Record<string, Verdict> = {
   description: { verdict: 'safe', why: 'display text' },
   multiSelect: { verdict: 'safe', why: 'a boolean' },
   url: { verdict: 'safe', why: 'a relative `/api/v1/runs/.../images/...` path, resolved against a node base URL the cluster roster already discloses — not an additional secret' },
+  site: { verdict: 'safe', why: 'small closed enum naming which account-fallback call site emitted the event ("explicit-reroute" | "pinned-step" | "pool")' },
+  requestedRoute: { verdict: 'safe', why: 'an agent-route string ("account:<id>" / "pool:<provider>") naming a configured account slot, not a filesystem/session coordinate' },
+  requestedProvider: { verdict: 'safe', why: 'a provider name string (e.g. "claude" / "codex")' },
+  requestedAccount: { verdict: 'safe', why: 'an account key string (provider:profile), the same identifying shape as `requestedRoute` — not a credential or a resume handle' },
+  selectedProvider: { verdict: 'safe', why: 'a provider name string, same as `requestedProvider`' },
+  selectedAccount: { verdict: 'safe', why: 'an account key string, same as `requestedAccount`' },
+  selectedTier: { verdict: 'safe', why: 'small closed enum ("runnable" | "waitable")' },
+  cause: { verdict: 'safe', why: 'small closed enum ("quota" | "credentials" | "quota+credentials")' },
+  skippedDisconnected: { verdict: 'safe', why: 'array of account key strings, same shape as `requestedAccount`' },
+  actualAccount: { verdict: 'safe', why: 'an account key string, same as `requestedAccount`' },
 };
 
 // ============================================================================================

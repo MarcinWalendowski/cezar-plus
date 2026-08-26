@@ -104,14 +104,20 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
   // user named is a product decision — that decision has now been made, so the absent key reads
   // as ON to match the engine, whose own default is `?? true`. The two must agree: a UI reading
   // absent-as-OFF over an engine reading absent-as-ON shows a switch that lies.
+  //
+  // The key is still named `fallbackAcrossAccountsWhenLimited` (spec
+  // 2026-08-25-logged-out-account-fallback §"The config key is NOT renamed, and that is
+  // deliberate" — cezar is a published CLI and renaming it would silently flip every user who
+  // turned it off back to on), but it no longer only means "out of quota": the same switch now
+  // also governs whether a task reroutes off an account that is simply logged out.
   const accountFallback = config.resources.fallbackAcrossAccountsWhenLimited ?? true
   const saveAccountFallback = (on: boolean) => save.mutate(
     { resources: { fallbackAcrossAccountsWhenLimited: on } },
     {
       onSuccess: () => toast(
         on
-          ? 'Tasks will start on any available account when the chosen one is out of quota'
-          : 'Tasks will wait for the account they were given',
+          ? 'Tasks will start on any available account when the chosen one is out of quota or logged out'
+          : 'Tasks will wait for the account they were given if it is only out of quota — a logged-out account still needs you to sign back in',
       ),
     },
   )
@@ -264,11 +270,11 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
       </SettingsField>
 
       <SettingsField
-        title="Out-of-quota fallback"
-        hint="When the account a task was given is out of quota, start it on any available account — another login, or another agent — instead of waiting. On is the default: a task is never blocked by a limit. Off makes an account you picked a requirement rather than a preference, and the task waits for that account's window. Tasks set to use an account pool move around a limit either way."
+        title="Account fallback"
+        hint="When the account a task was given is out of quota or logged out, start it on any available account — another login, or another agent — instead of waiting or failing. On is the default: a task is never blocked by a limit or a stale login. Off makes an account you picked a requirement rather than a preference: an out-of-quota account is waited on, and a logged-out one is refused until you sign back in. Tasks set to use an account pool move around either cause either way."
       >
         <select
-          aria-label="Out-of-quota fallback"
+          aria-label="Account fallback"
           data-slot="resources-account-fallback"
           value={accountFallback ? 'on' : 'off'}
           disabled={save.isPending}

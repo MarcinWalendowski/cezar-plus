@@ -14,8 +14,11 @@ import { DrainController, resolveDrainMs } from './server/drain.ts';
 import {
   ProviderAuthService,
   providerAuthChecksDisabled,
+  type ProviderId,
 } from './core/provider-auth.ts';
 import { applyProviderEnablement } from './core/provider-availability.ts';
+import { accountAuthFromService, assessAccountViability, loadViabilityInput } from './workspace/account-viability.ts';
+import { defaultAgentAccountStore, loadAgentAccounts } from './workspace/agent-accounts.ts';
 import { canonicalPath, pruneOrphans } from './git-worktree.ts';
 import { getRepoInfo } from './server/git.ts';
 import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from './config.ts';
@@ -35,10 +38,7 @@ import {
   ProviderRuntimeAuthObserver,
   recoverWithProviderRuntimeAuthObservation,
 } from './server/provider-auth-runtime.ts';
-import {
-  providersRequiredByWorkflow,
-  unavailableProviderMessage,
-} from './server/provider-action-gate.ts';
+import { disabledProviderMessage, requirementsForWorkflowRun, viabilityRefusalMessage } from './server/provider-action-gate.ts';
 import { checkForUpdate } from './update-check.ts';
 import { ensureBootRepo, holdsOnlyRuntimeState } from './workspace/boot-repo.ts';
 import { loadWorkspaceConfig } from './workspace/config.ts';
@@ -788,8 +788,15 @@ async function serveCommand(
   // keepLive + recover() (#367): runs that were queued/running/waiting when
   // the previous process exited are re-queued or resumed instead of failed.
   const store = openStore(repoRoot, { keepLive: true });
-  const manager = new RunManager(store, repoRoot, { semaphore, bootScratchRoot });
+  // Built BEFORE the manager so its dispatch pickers can be handed a real credentials read from
+  // the moment they exist, rather than the seam's `'unknown'` default
+  // (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1).
   const providerAuth = new ProviderAuthService();
+  const manager = new RunManager(store, repoRoot, {
+    semaphore,
+    bootScratchRoot,
+    accountAuth: accountAuthFromService(providerAuth),
+  });
   const workspaceEvents = new WorkspaceEventBus();
   const providerRuntimeAuth = new ProviderRuntimeAuthObserver(providerAuth, (status) => {
     workspaceEvents.emit('provider-status', status);
@@ -1024,21 +1031,44 @@ async function runCommand(
   }
 
   const providerAuth = new ProviderAuthService();
-  const requiredProviders = providersRequiredByWorkflow(
+  // Shares the one module `providerActionError` (server.ts) and the RunManager pickers read too —
+  // `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Architecture: `providerActionError` is
+  // a closure declared inside `createApp` and this package cannot call it, so the headless
+  // preflight calls `assessAccountViability` directly instead of reimplementing its decision.
+  const fallback = (await loadConfig(repoRoot)).defaultRunner;
+  const [accounts, workspace] = await Promise.all([
+    loadAgentAccounts().catch(() => defaultAgentAccountStore()),
+    loadWorkspaceConfig(),
+  ]);
+  const requirements = requirementsForWorkflowRun({
     workflow,
-    (await loadConfig(repoRoot)).defaultRunner,
-  );
-  if (requiredProviders.length > 0 && !providerAuthChecksDisabled()) {
-    const [discovered, workspace] = await Promise.all([
-      providerAuth.status(),
-      loadWorkspaceConfig(),
-    ]);
-    const blocked = unavailableProviderMessage(
-      requiredProviders,
-      applyProviderEnablement(discovered, workspace.disabledProviders),
-    );
-    if (blocked) {
-      console.error(blocked);
+    accounts,
+    repoRoot,
+    fallback,
+    overrideAgentProfile: undefined,
+    fallbackAcrossAccountsWhenLimited: workspace.resources.fallbackAcrossAccountsWhenLimited,
+  });
+  if (requirements.length > 0 && !providerAuthChecksDisabled()) {
+    const discovered = await providerAuth.status();
+    const providerRows = applyProviderEnablement(discovered, workspace.disabledProviders).providers;
+    // Disabled is a settings fact, terminal regardless of what else is authorized — checked FIRST,
+    // same as `providerActionError`'s own first rung, and unlike that rung this preflight has no
+    // `poolHasConnectedAccount` behind it to fall through to, so this must not be skipped.
+    const pinned = [...new Set(requirements.map((r) => r.provider).filter((p): p is ProviderId => p !== undefined))];
+    const disabledMessage = disabledProviderMessage(pinned, { providers: providerRows });
+    if (disabledMessage) {
+      console.error(disabledMessage);
+      process.exitCode = 1;
+      return;
+    }
+    const input = await loadViabilityInput(repoRoot, providerAuth, {
+      requirements,
+      disabledProviders: workspace.disabledProviders,
+      providerRows,
+    });
+    const viability = assessAccountViability(input);
+    if (!viability.placeable) {
+      console.error(viabilityRefusalMessage(viability));
       process.exitCode = 1;
       return;
     }
@@ -1054,7 +1084,11 @@ async function runCommand(
   // 2.5) — one refreshed semaphore, even with just one manager in play.
   const semaphore = new WorkspaceSemaphore();
   await semaphore.refresh();
-  const manager = new RunManager(store, repoRoot, { semaphore, bootScratchRoot });
+  const manager = new RunManager(store, repoRoot, {
+    semaphore,
+    bootScratchRoot,
+    accountAuth: accountAuthFromService(providerAuth),
+  });
 
   store.on('event', ({ event }) => {
     switch (event.type) {

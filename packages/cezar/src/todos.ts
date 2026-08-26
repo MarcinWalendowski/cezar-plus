@@ -354,55 +354,61 @@ function stampPending(item: TodoItem, options: TodoClusterOptions | undefined, t
 
 // ---- read / write -----------------------------------------------------------
 
-/** Parse + validate the file. Broken JSON / non-array → []; bad entries are
- *  skipped with a warning; entries without an id get one assigned — and, when clustering is on,
- *  the same pending marker a `createTodo` would have written (D5a). */
-async function readRaw(
-  dataDir: string,
-  options?: TodoClusterOptions,
-): Promise<{ items: TodoItem[]; needsRewrite: boolean }> {
-  let raw: string;
+export interface TodoReadSnapshot {
+  items: TodoItem[];
+  /** A non-absence filesystem failure. Missing state is represented by an empty item list. */
+  error?: Error;
+}
+
+type TodoFileRead =
+  | { raw: string }
+  | { absent: true }
+  | { error: Error };
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function isAbsentFileError(error: unknown): boolean {
+  const code = (error as { code?: unknown })?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+async function readTodoFile(dataDir: string): Promise<TodoFileRead> {
   try {
-    raw = await fs.readFile(todosPath(dataDir), 'utf8');
-  } catch {
-    return { items: [], needsRewrite: false }; // no file yet — empty inbox
+    return { raw: await fs.readFile(todosPath(dataDir), 'utf8') };
+  } catch (error) {
+    return isAbsentFileError(error) ? { absent: true } : { error: asError(error) };
   }
+}
+
+function parseTodoFile(
+  raw: string,
+  options?: TodoClusterOptions,
+): { items: TodoItem[]; needsRewrite: boolean } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[cez] todos.json is not valid JSON — showing an empty inbox (${message})`);
+    console.warn(`[cez] todos.json is not valid JSON - showing an empty inbox (${message})`);
     return { items: [], needsRewrite: false };
   }
   if (!Array.isArray(parsed)) {
-    console.warn('[cez] todos.json is not a JSON array — showing an empty inbox');
+    console.warn('[cez] todos.json is not a JSON array - showing an empty inbox');
     return { items: [], needsRewrite: false };
   }
   const items: TodoItem[] = [];
   let needsRewrite = false;
   for (const entry of parsed) {
-    // `storedTodoSchema`, not `todoSchema`: a field a NEWER node in the cluster wrote must survive
-    // this read-and-rewrite untouched (D13). See the schema's own docblock.
     const result = storedTodoSchema.safeParse(entry);
     if (!result.success) {
       console.warn(`[cez] skipped a malformed todos.json entry: ${result.error.issues.map((i) => i.message).join('; ')}`);
       continue;
     }
     if (!result.data.id) {
-      // Agent entries arrive without ids — assign one so the GUI can address
-      // the entry; the file is rewritten (under the lock) on this read.
       needsRewrite = true;
       const healed = { ...result.data, id: randomUUID() } as TodoItem;
-      // D5a: a raw `CEZ_TODOS_FILE` append (`handoff.ts`'s `FOLLOWUP_INSTRUCTIONS`) is a local
-      // write like any other, and it never went through `createTodo`, so this is the only place it
-      // can be marked pending. Keyed on the SAME condition as the id assignment, which is what
-      // makes it idempotent for free: after this rewrite the entry has an id, so a second read
-      // heals nothing and stamps nothing. Stamping every unmarked entry instead would re-file all
-      // 137 existing rows as unsent ops on the first clustered boot — the reconcile (Phase 2.4),
-      // not this reader, is what adopts records that predate the hub.
-      // Every present key is "touched": the hub has never seen this id (it had none until this
-      // line), so the whole entry is new to it, not a narrow patch onto something it already has.
       stampPending(healed, options, Object.keys(healed));
       items.push(healed);
     } else {
@@ -410,6 +416,29 @@ async function readRaw(
     }
   }
   return { items, needsRewrite };
+}
+
+/** Read and parse todos without taking a lease, subscribing, creating a directory, or healing ids. */
+export async function readTodosSnapshot(
+  dataDir: string,
+  options?: TodoClusterOptions,
+): Promise<TodoReadSnapshot> {
+  const file = await readTodoFile(dataDir);
+  if ('error' in file) return { items: [], error: file.error };
+  if ('absent' in file) return { items: [] };
+  return { items: parseTodoFile(file.raw, options).items };
+}
+
+/** Parse + validate the file. Broken JSON / non-array -> []; bad entries are
+ *  skipped with a warning; entries without an id get one assigned, and when clustering is on,
+ *  the same pending marker a `createTodo` would have written (D5a). */
+async function readRaw(
+  dataDir: string,
+  options?: TodoClusterOptions,
+): Promise<{ items: TodoItem[]; needsRewrite: boolean }> {
+  const file = await readTodoFile(dataDir);
+  if ('error' in file || 'absent' in file) return { items: [], needsRewrite: false };
+  return parseTodoFile(file.raw, options);
 }
 
 async function writeAtomic(dataDir: string, items: TodoItem[]): Promise<void> {
