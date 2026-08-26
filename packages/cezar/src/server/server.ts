@@ -52,6 +52,7 @@ import { createWorkspaceRunMutationRoutes } from './workspace-run-mutations-rout
 import { createWorkspaceGitRoutes } from './workspace-git-routes.ts';
 import { createWorkspaceKnowledgeRoutes } from './workspace-knowledge-routes.ts';
 import { createWorkspaceTodosRoutes } from './workspace-todos-routes.ts';
+import { createWorkspaceAnalyticsRoutes } from './workspace-analytics-routes.ts';
 import { createBackupRoutes } from './backup-routes.ts';
 import { BackupScheduler } from '../backup/scheduler.ts';
 import { loadBackupConfig } from '../backup/config.ts';
@@ -7105,6 +7106,12 @@ export function createApp(deps: ServerDeps) {
   // at all — it never builds or peeks a `ProjectContext`, only derives each registered project's
   // `<root>/.ai/cezar` the same way `WorkspaceRunIndex`/`WorkspaceKnowledgeIndex` derive theirs.
   const workspaceTodosRoutes = createWorkspaceTodosRoutes();
+  // The filed-task detail page's analytics delivery (`.ai/specs/2026-08-26-filed-task-detail-
+  // page.md`): a browser-reachable ingestion route for `todo.detail_opened` and any future
+  // workspace-scoped event, appended to `<CEZ_HOME>/analytics/events.ndjson`. Workspace-level and
+  // single-mount for the same reason every sibling family above is: the project is a prop on the
+  // event, not a URL segment.
+  const workspaceAnalyticsRoutes = createWorkspaceAnalyticsRoutes();
   // The composer's Workspace submit (`.ai/specs/2026-08-15-cross-project-workspace-run.md`): ONE
   // run, not scoped to any project, granted read/write in every registered project directory.
   //
@@ -7377,6 +7384,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceKnowledgeRoutes)
     .route('/', workspaceReportsRoutes)
     .route('/', workspaceTodosRoutes)
+    .route('/', workspaceAnalyticsRoutes)
     .route('/', workspaceRunRoutes)
     .route('/', notificationsRoutes)
     .route('/', backupRoutes)
