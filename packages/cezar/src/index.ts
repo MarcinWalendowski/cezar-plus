@@ -915,6 +915,21 @@ async function serveCommand(
   }
   if (port !== preferredPort) console.log(`  (port ${preferredPort} was busy — using ${port})`);
   console.log(`\n  cockpit → ${url}\n`);
+
+  // An ACTIVATION IS A RESTART on a blue-green box, so THIS is the moment every run parked on a
+  // `manual-deploy` handoff may have just been satisfied by the deploy that restarted us. It runs
+  // here, after `startServer`, and not in `manager.recover()` above, because a deploy probe asks
+  // THIS server which sha it is serving: from `recover()` it would interrogate a socket that is
+  // not accepting yet and report red for every run. `/api/v1/ready` is the gate rather than
+  // `/api/v1/health` because it is uncached by construction and 503s until the server really is
+  // ready — `waitForHealth` polls until `res.ok`, which is exactly that condition.
+  void waitForHealth(`${url}/api/v1/ready`, 30_000)
+    .then(async (ready) => {
+      if (!ready) return;
+      const requeued = await manager.recheckManualDeployParks();
+      if (requeued > 0) console.log(`  rechecked ${requeued} run(s) parked on a manual deploy\n`);
+    })
+    .catch(() => undefined);
   // Graceful drain (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P3).
   //
   // This used to be `store.flush(); process.exit(0)` — immediate and unconditional, cutting

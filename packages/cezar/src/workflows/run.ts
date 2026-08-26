@@ -2348,6 +2348,9 @@ export class RunManager {
       }
       if (run.status === 'waiting') {
         if (run.pendingHandoff) {
+          // A `manual-deploy` park is re-probed by `recheckManualDeployParks()`, NOT here — see the
+          // ordering note on that method. `recover()` is awaited BEFORE the server listens, so a
+          // deploy probe run from here would interrogate a server that cannot answer yet.
           this.store.appendEvent(run.id, {
             type: 'lifecycle',
             message: `cezar restarted, still waiting for ${run.pendingHandoff.kind === 'manual-deploy' ? 'manual deployment' : 'manual merge'}`,
@@ -6616,6 +6619,73 @@ export class RunManager {
     this.store.updateStep(run.id, pending.stepId, { status: 'pending', error: undefined, finishedAt: undefined });
     await this.reenterChain(this.store.getRun(run.id) ?? run, reason, { resetTo: pending.stepId });
     return { ok: true, resolved: true, verdict: 'handoff recheck queued' };
+  }
+
+  /**
+   * Read-only: run the repo's OWN declared deploy probes in a parked run's worktree and report
+   * whether they now pass. Deliberately engine-generic — it reaches `.ai/deploy-targets.json`
+   * through the same post-condition every deploy step already uses, so nothing here learns what
+   * cezar is, and a repo that declares no manual target never parks this way and never arrives.
+   *
+   * A worktree that is GONE is not evidence of a deploy. Count-based retention reclaims worktrees
+   * (`reclaimedAt`), and the probes cannot run without one, so an absent path stays parked rather
+   * than reading as satisfied — the direction that costs a human a button press instead of
+   * silently continuing a run on an unverified deploy.
+   */
+  /**
+   * Re-probe every run parked on a `manual-deploy` handoff and re-enter the chain for the ones
+   * whose targets are now live. Returns how many were requeued.
+   *
+   * **WHEN.** After the server is listening, at boot. On a blue-green box an ACTIVATION IS A
+   * RESTART — the flip restarts this very service — so boot is the exact moment such a park may
+   * have just been satisfied: no timer, no polling, no race against the cutover it would be
+   * watching for (`.ai/specs/2026-08-26-activate-main-not-worktrees.md` S4). Before this, every
+   * parked run merely re-announced its wait and a human pressed Resolve once per run, so the toil
+   * scaled with the backlog: measured 2026-08-26, production sat 18 commits behind `origin/main`
+   * and every run that finished in that window was parked on the same single action.
+   *
+   * **WHY NOT FROM `recover()`, which is the obvious place.** `recover()` is awaited BEFORE
+   * `startServer()` (`index.ts`), and a deploy probe asks THIS server which sha it is serving. Run
+   * from there it would interrogate a socket that is not accepting yet, spend its full bounded
+   * poll doing it, and report red for every run — never firing at the one moment it exists for,
+   * while adding that poll to boot per parked run. Placement here is ordering, not preference.
+   *
+   * PROBE first, requeue only on green: `requeueHandoff` re-enters the chain at the deploy step,
+   * which is an AGENT step, so requeueing unconditionally would spend a model call per parked run
+   * on every restart — including the crash restarts that changed nothing.
+   */
+  async recheckManualDeployParks(): Promise<number> {
+    const parked = this.store
+      .listRuns()
+      .filter((r) => r.status === 'waiting' && r.pendingHandoff?.kind === 'manual-deploy');
+    let requeued = 0;
+    for (const run of parked) {
+      const pending = run.pendingHandoff;
+      if (!pending) continue;
+      if (!(await this.manualDeployNowLive(run))) continue;
+      this.store.appendEvent(run.id, {
+        type: 'lifecycle',
+        message: 'every deploy target now probes green after the restart — rechecking this handoff',
+      });
+      await this.requeueHandoff(run, pending, 'manual deploy detected after restart');
+      requeued += 1;
+    }
+    return requeued;
+  }
+
+  private async manualDeployNowLive(run: RunRecord): Promise<boolean> {
+    const cwd = run.worktreePath;
+    if (!cwd || !existsSync(cwd)) return false;
+    try {
+      const result = await evaluatePostcondition('all-services-deployed', {
+        cwd,
+        workspaceRun: (run.workspaceProjects?.length ?? 0) > 0,
+      });
+      return result.ok;
+    } catch {
+      // A probe harness failure is not a deploy: stay parked and leave the decision with a person.
+      return false;
+    }
   }
 
   /**
