@@ -1004,6 +1004,35 @@ describe('meta line, tabs, pill and resume hint', () => {
     expect(tabs.getByRole('link', { name: 'Session' }).getAttribute('aria-current')).toBe('page')
     expect(tabs.getByRole('link', { name: 'Changes' }).getAttribute('href')).toBe('/tasks/r1/changes')
     expect(tabs.getByRole('link', { name: 'Files' }).getAttribute('href')).toBe('/tasks/r1/files')
+    // No spec recorded and no declared path — the Spec tab does not exist (P3 test 16).
+    expect(tabs.queryByRole('link', { name: 'Spec' })).toBeNull()
+  })
+
+  // P3 test 16: the Spec tab (spec .ai/specs/2026-08-29-spec-tab-review-feed.md) is present once
+  // a spec exists — either a recorded summary or, for a run written before this feature, the bare
+  // `declaredSpecPath` — and sits between Session and Changes.
+  describe('the Spec tab (P3 test 16)', () => {
+    it('is absent when the run carries neither specReview nor declaredSpecPath', () => {
+      stubFetch()
+      renderHeader(run('done'))
+      expect(screen.queryByRole('link', { name: 'Spec' })).toBeNull()
+    })
+
+    it('appears, between Session and Changes, once specReview is set', () => {
+      stubFetch()
+      renderHeader(run('done', { specReview: { revisions: 1, reviews: 1, latestVerdict: 'pass' } }))
+      const tabs = within(document.querySelector('[data-slot="run-tabs"]') as HTMLElement)
+      const links = tabs.getAllByRole('link').map((el) => el.textContent)
+      expect(links.indexOf('Session')).toBeLessThan(links.indexOf('Spec'))
+      expect(links.indexOf('Spec')).toBeLessThan(links.indexOf('Changes'))
+      expect(tabs.getByRole('link', { name: 'Spec' }).getAttribute('href')).toBe('/tasks/r1/spec')
+    })
+
+    it('appears from declaredSpecPath alone, with no specReview summary yet', () => {
+      stubFetch()
+      renderHeader(run('running', { declaredSpecPath: '.ai/specs/x.md' }))
+      expect(screen.getByRole('link', { name: 'Spec' }).getAttribute('href')).toBe('/tasks/r1/spec')
+    })
   })
 
   it('a queued run shows its position in the pill, from the shared runs list', async () => {

@@ -127,7 +127,7 @@ function RunTotal({ run }: { run: ApiRun }) {
  */
 /** Which run-detail tab this header instance sits above — drives the active underline.
  *  A prop rather than a route match so the header stays testable with a bare render. */
-export type RunTab = 'session' | 'changes' | 'commits' | 'files'
+export type RunTab = 'session' | 'spec' | 'changes' | 'commits' | 'files'
 
 export function RunHeader({
   run,
@@ -210,6 +210,14 @@ export function RunHeader({
           <TabLink to={`/tasks/${run.id}`} active={tab === 'session'}>
             Session
           </TabLink>
+          {/* Spec precedes the code (spec .ai/specs/2026-08-29-spec-tab-review-feed.md, P3):
+              present once a spec exists, before it is ever recorded as a summary — a run whose
+              `specReview` write crashed before `runs.json` saved still has `declaredSpecPath`. */}
+          {run.specReview !== undefined || run.declaredSpecPath !== undefined ? (
+            <TabLink to={`/tasks/${run.id}/spec`} active={tab === 'spec'}>
+              Spec
+            </TabLink>
+          ) : null}
           <TabLink to={`/tasks/${run.id}/changes`} active={tab === 'changes'}>
             Changes
           </TabLink>
