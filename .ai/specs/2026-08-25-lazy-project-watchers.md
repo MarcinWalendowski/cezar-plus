@@ -1,5 +1,15 @@
 # Lazy Project Watchers
 
+> **CORRECTED 2026-08-29 by `.ai/specs/2026-08-29-cold-watcher-closure-record.md`: QA Needed is
+> resolved.** Both cold-project canaries ran on production 2026-08-29 against live sha `17637629`
+> (which contains this spec's fix `809c8220`) and both passed: `mw-site` autostart in 4s,
+> `loki-labs` reopen in 6s, each measured non-resident from the server process in the same
+> invocation as a passing positive control. Board todos `f09bf585-f4fa-416f-a979-5bbd0dac22ed` and
+> `503195a8-1f77-4ff5-b9b7-7a6606a5d639` both read `status: "done"`. See the closure record for the
+> re-verification performed against current HEAD, and
+> `.ai/specs/2026-08-25-cold-watcher-production-verification.md` for the execution record. The
+> original status line follows unchanged.
+>
 > **Status:** Implemented, QA Needed until both cold-project paths pass on the
 > production service.
 >

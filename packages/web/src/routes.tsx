@@ -26,6 +26,7 @@ import { UnknownProjectRoute } from './routes/unknown-project'
 import { WorkflowsLoading } from './routes/workflows/workflows-loading'
 import { GitTabLoading } from './routes/task-git/git-tab-loading'
 import { ThreadLoading } from './routes/task-thread/thread-loading'
+import { FiledTaskDetailLoading } from './routes/filed-task-detail-loading'
 import { visibleSettingsSections, type SettingsSectionId } from './routes/settings/registry'
 import {
   SettingsIndexRoute,
@@ -64,6 +65,14 @@ const CompareVariantsRoute = lazy(() =>
   import('./routes/compare-variants').then((m) => ({ default: m.CompareVariantsRoute })),
 )
 
+/** Lazy for the same reason as the thread above: `FiledTaskDetailContent`
+ *  (`components/filed-task-detail.tsx`) renders `context`/`whatToDo` through the same `Markdown`
+ *  component the thread does, so a static import here would pull that chunk into the main bundle
+ *  for a page most visits to the board never open. */
+const FiledTaskDetailRoute = lazy(() =>
+  import('./routes/filed-task-detail').then((m) => ({ default: m.FiledTaskDetailRoute })),
+)
+
 /** Lazy because both tabs render the shared run header, which lives in the thread chunk
  *  (markdown stack and all) — a static import here would pull that into the main bundle. */
 const TaskChangesRoute = lazy(() =>
@@ -74,6 +83,9 @@ const TaskFilesRoute = lazy(() =>
 )
 const TaskCommitsRoute = lazy(() =>
   import('./routes/task-git/task-commits').then((m) => ({ default: m.TaskCommitsRoute })),
+)
+const TaskSpecRoute = lazy(() =>
+  import('./routes/task-spec/task-spec').then((m) => ({ default: m.TaskSpecRoute })),
 )
 
 /** Lazy because the repo view renders through the `<Diff>` facade and the Shiki singleton —
@@ -512,6 +524,14 @@ export function AppRoutes() {
             }
           />
           <Route
+            path="tasks/:id/spec"
+            element={
+              <Suspense fallback={<GitTabLoading tab="spec" />}>
+                <TaskSpecRoute />
+              </Suspense>
+            }
+          />
+          <Route
             path="tasks/:id/changes"
             element={
               <Suspense fallback={<GitTabLoading tab="changes" />}>
@@ -548,6 +568,20 @@ export function AppRoutes() {
             element={
               <Suspense fallback={<CompareLoading />}>
                 <CompareVariantsRoute />
+              </Suspense>
+            }
+          />
+
+          {/* The filed-task detail page (`.ai/specs/2026-08-29-filed-task-detail-page.md`),
+              replacing the old detail dialog: every filed row, in both board views, at every
+              status, links here. `todos/`, not `tasks/filed/` — todo ids and run ids are
+              different id spaces, and the server already spells this one
+              `/api/v1/p/:projectId/todos/:id`. */}
+          <Route
+            path="todos/:todoId"
+            element={
+              <Suspense fallback={<FiledTaskDetailLoading />}>
+                <FiledTaskDetailRoute />
               </Suspense>
             }
           />

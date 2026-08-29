@@ -140,8 +140,8 @@ describe('loadWorkflows derives spec-to-deploy-codex (V3)', () => {
       const file = wf.steps.find((s) => s.id === 'file')!;
       expect(file.prompt).toContain('cez todo add');
       expect(file.prompt).toMatch(/Do NOT pass --start/i);
-      // …and the optional step is the one that reads the per-run flag. Without this token the
-      // step's own prompt would render the literal `{{autoStart}}` and it could never tell.
+      // …and the dispatch step reads the frozen per-run flag. Without this token the step's own
+      // prompt would render the literal `{{autoStart}}` and it could never tell.
       const dispatch = wf.steps.find((s) => s.id === 'dispatch')!;
       expect(dispatch.prompt).toContain('{{autoStart}}');
       expect(dispatch.prompt).toContain('cez todo start');

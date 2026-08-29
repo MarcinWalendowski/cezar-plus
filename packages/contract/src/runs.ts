@@ -60,6 +60,18 @@ export type StepStatus = z.infer<typeof stepStatusSchema>;
 
 const usageCounterSchema = z.number().finite().nonnegative();
 
+/** One ATTEMPT at a workflow step — the timing half of `iterations` (spec
+ *  2026-08-29-step-retry-timing). Written only by `RunStore.updateStep`, which is the one
+ *  function that sees every `startedAt`/`finishedAt` patch a step ever gets. */
+export const stepAttemptSchema = z.object({
+  /** ISO instant this attempt was entered — the `startedAt` that used to be overwritten. */
+  startedAt: z.string(),
+  /** ISO instant it ended. Absent while the attempt is in flight; also absent, briefly, for an
+   *  attempt a crash interrupted before the next one opened (risk R2). */
+  finishedAt: z.string().optional(),
+});
+export type StepAttempt = z.infer<typeof stepAttemptSchema>;
+
 /** One step of a run's chain. */
 export const stepStateSchema = z.object({
   id: z.string(),
@@ -87,6 +99,20 @@ export const stepStateSchema = z.object({
   usageInvocationEpoch: usageCounterSchema.optional(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
+  /** Every attempt at this step, oldest first — `startedAt`/`finishedAt` above hold only the
+   *  LATEST one, which is why a retried step's clock used to read attempt N rather than the sum
+   *  (spec 2026-08-20-step-and-tool-call-durations risk R3). `attempts.length` equals
+   *  `iterations` for every step whose FIRST `startedAt` was written under spec
+   *  2026-08-29-step-retry-timing. ABSENT, and PERMANENTLY absent, otherwise: a record written
+   *  before that spec, and a step that was already mid-flight (`iterations > 0`) when it landed,
+   *  both keep this field unset for life, because a partial array would read as authoritative
+   *  and silently omit every earlier attempt. The cockpit reads absent as "fall back to the
+   *  single startedAt/finishedAt pair", never as zero attempts. There is no backfill: the
+   *  timestamps one would need were overwritten and are gone. Written only by
+   *  `RunStore.updateStep`, keyed on the ITERATION increment — never on a `startedAt` comparison,
+   *  since two attempts can share a millisecond. Starts are nondecreasing, not strictly
+   *  increasing. */
+  attempts: z.array(stepAttemptSchema).optional(),
   error: z.string().optional(),
   /** Latest agent session id — `claude --resume <id>` and friends. */
   sessionId: z.string().optional(),
@@ -187,6 +213,23 @@ export const workspaceWorktreeSchema = z.object({
 });
 export type WorkspaceWorktree = z.infer<typeof workspaceWorktreeSchema>;
 
+/** One todo filed by a workspace-scoped input-to-tasks run. */
+export const filedTodoSchema = z.object({
+  project: z.string(),
+  todoId: z.string(),
+  summary: z.string().max(500),
+  autostart: z.literal(true).optional(),
+  startedTaskId: z.string().optional(),
+});
+export type FiledTodo = z.infer<typeof filedTodoSchema>;
+
+/** The append-only ledger captured from the registered projects' todo files. */
+export const filedTodosSchema = z.object({
+  items: z.array(filedTodoSchema),
+  at: z.string(),
+});
+export type FiledTodos = z.infer<typeof filedTodosSchema>;
+
 /**
  * The stored run record, as `runs.json` holds it (`src/runs/store.ts`).
  *
@@ -264,6 +307,72 @@ export const testAttestationSchema = z.object({
   at: z.string(),
 });
 export type TestAttestation = z.infer<typeof testAttestationSchema>;
+
+// ---- spec/review feed (spec .ai/specs/2026-08-29-spec-tab-review-feed.md) -----------------------
+//
+// One line of `<runId>.spec-review.ndjson` (`packages/cezar/src/runs/spec-review-log.ts`), the
+// wire shape of the same schemas that module owns server-side. `looseObject` on each member for
+// the same reason `runEventSchema` uses it (`./events.ts`): this is an on-disk append-only format,
+// and a file written by a newer cezar must stay readable by an older one.
+
+const specReviewBaseFields = {
+  seq: z.number().int().nonnegative(),
+  at: z.string(),
+  /** Workflow step that produced it — never assumed to be `spec`/`review-spec`: the writer keys
+   *  on the `CEZ:SPEC_PATH=` declaration, not on the step id. */
+  stepId: z.string(),
+};
+
+export const specReviewSpecEntrySchema = z.looseObject({
+  ...specReviewBaseFields,
+  kind: z.literal('spec'),
+  /** REQUIRED. Counts spec attempts from 1, in capture order. */
+  revision: z.number().int().min(1),
+  specPath: z.string().max(500),
+  /** `recorded` = snapshotted when that attempt finished. `worktree` = synthesised by the read
+   *  route from the live file, for a run written before this feature or still mid-spec. */
+  source: z.enum(['recorded', 'worktree']),
+  text: z.string().optional(),
+  truncated: z.literal(true).optional(),
+  /** The step declared a path that did not resolve, or the containment-safe reader refused it.
+   *  `text` is absent whenever this is set. */
+  missing: z.literal(true).optional(),
+  /** Set alongside `missing` when the reason is specifically that the path was REJECTED
+   *  (traversal, `.git` internals, a symlink) rather than simply not existing. */
+  rejected: z.literal(true).optional(),
+  error: z.string().optional(),
+});
+
+export const specReviewReviewEntrySchema = z.looseObject({
+  ...specReviewBaseFields,
+  kind: z.literal('review'),
+  /** OPTIONAL: absent means this verdict arrived with no captured spec to attach it to — an
+   *  unmatched review, never labelled revision 1. */
+  revision: z.number().int().min(1).optional(),
+  /** `agent` = the `review-spec` step's CEZ:REVIEW verdict. `human` = a person requesting
+   *  changes at the approval gate. Never conflated — they carry different authority. */
+  actor: z.enum(['agent', 'human']),
+  verdict: z.enum(['pass', 'revise']),
+  report: z.string(),
+  truncated: z.literal(true).optional(),
+});
+
+export const specReviewEntrySchema = z.discriminatedUnion('kind', [
+  specReviewSpecEntrySchema,
+  specReviewReviewEntrySchema,
+]);
+export type SpecReviewEntry = z.infer<typeof specReviewEntrySchema>;
+
+/** Enough for the header to decide whether the Spec tab exists and whether the feed is worth
+ *  rendering, without a second fetch. Deliberately three small numbers: `RunRecord` is serialised
+ *  wholesale into `runs.json` on every save, so nothing large may live here — the documents
+ *  themselves stay in `<runId>.spec-review.ndjson`. */
+export const specReviewSummarySchema = z.object({
+  revisions: z.number().int().min(0),
+  reviews: z.number().int().min(0),
+  latestVerdict: z.enum(['pass', 'revise']).optional(),
+});
+export type SpecReviewSummary = z.infer<typeof specReviewSummarySchema>;
 
 export const runRecordSchema = z.object({
   id: z.string(),
@@ -351,6 +460,10 @@ export const runRecordSchema = z.object({
    *  `markerRefs`). Absent until the run declares one, and absent forever on a run that never does
    *  — a fact worth seeing, not one to paper over with a guessed path. */
   declaredSpecPath: z.string().max(500).optional(),
+  /** Cached summary of `<runId>.spec-review.ndjson` (spec 2026-08-29-spec-tab-review-feed, P1) —
+   *  lets the Spec tab decide it exists without a second fetch. The side log is authoritative;
+   *  this is a derived cache, absent or briefly stale without losing data. */
+  specReview: specReviewSummarySchema.optional(),
   /** Set while the run is parked on a human approval gate (spec 2026-08-20, P3); cleared the
    *  moment the gate releases or the chain moves on. Absent on every ungated run. */
   pendingApproval: pendingApprovalSchema.optional(),
@@ -434,7 +547,11 @@ export const runRecordSchema = z.object({
    * `buildWorkspaceGrant` (`workspace/granted-roots.ts`) — a pure function, so nothing re-reads
    * the registry mid-run.
    */
+  /** The composer's frozen input-to-tasks dispatch choice. */
+  autoStart: z.boolean().optional(),
   workspaceProjects: z.array(workspaceGrantProjectSchema).optional(),
+  /** Todos filed by an input-to-tasks workspace run, captured before completion is reported. */
+  filedTodos: filedTodosSchema.optional(),
   /**
    * A parallel WORKSPACE RUN's per-project worktrees
    * (`.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md`). At start, every granted git
@@ -828,6 +945,19 @@ export type RunCommit = z.infer<typeof runCommitSchema>;
 /** `GET /runs/:id/commits` — `<base>..HEAD` on the worktree branch, newest first. */
 export const runCommitsResponseSchema = z.object({ commits: z.array(runCommitSchema) });
 export type RunCommitsResponse = z.infer<typeof runCommitsResponseSchema>;
+
+/** `GET /runs/:id/spec` (spec 2026-08-29-spec-tab-review-feed, P2) — the spec/review feed. Never
+ *  404s for a run with nothing recorded: an empty `entries` array with a zero `summary` is a
+ *  valid 200, not an error. */
+export const specReviewFeedResponseSchema = z.object({
+  /** The path the newest spec entry names, when there is one. */
+  specPath: z.string().max(500).optional(),
+  /** Chronological: spec, review, spec, review… Empty when nothing was recorded and no fallback
+   *  file could be read. */
+  entries: z.array(specReviewEntrySchema),
+  summary: specReviewSummarySchema,
+});
+export type SpecReviewFeedResponse = z.infer<typeof specReviewFeedResponseSchema>;
 
 // ---- parallel variants (spec 010) ----------------------------------------------------------
 //

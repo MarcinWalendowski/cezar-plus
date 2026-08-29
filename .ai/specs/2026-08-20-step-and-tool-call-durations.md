@@ -4,8 +4,15 @@
 against real production data (§Verification 8). Marked done by the owner on 2026-08-20 ("If all
 implemented mark as done"); all three clauses of the original ask are live on `origin/main`.
 **One residual, deliberately not rounded up:** §7's *visual* pass (a-e below) has still never been
-executed — this box has no browser — so it is carried as open todo
-`1f74df2b-9428-4e84-a983-870b00cbdcf2`, not silently closed. What changed to make DONE honest is
+executed — **CORRECTED 2026-08-29: ~~this box has no browser~~ is false.** This repository ships a
+self-provisioning real-browser harness (`.ai/scripts/test-env-up.sh`, `.ai/browsers/agent-browser.md`,
+thirty-plus specs in `packages/web/e2e/`), verified while writing
+`.ai/specs/2026-08-29-per-retry-step-timing.md`, whose own V5b runs a real-browser E2E on exactly
+this harness. The correction says only that the pass is now *possible and unblocked*, not that it
+has run — it is still carried as open todo
+`1f74df2b-9428-4e84-a983-870b00cbdcf2`, not silently closed, until someone actually executes §7's
+a-e checklist; that spec's V5b does not discharge it (it asserts retry-attempt rows and aggregate
+clocks against a captured fixture, not §7's a-e). What changed to make DONE honest is
 §Verification 8: the failure mode §7 exists to catch (the clocks render blank because the data
 lacks timestamps) is now disproved against this run's own production transcript. Written 2026-08-20 by
 step 1 of run `6af4b894` (`spec-to-deploy`); implemented by step 2, gated by step 3, shipped by
@@ -15,7 +22,9 @@ files, +1452/-124, this spec and the replay fixture included), **pushed to `orig
 §"Shipping cezar itself"). Documented by step 5 (this record, plus the `AGENTS.md` scrub
 correction §Verification called for). **Deployed by step 6** — see §Deployment. Phase 4 stays
 deferred by design. Verification 1-6 and 8 executed and green (see §Verification); **§7's visual
-pass remains NOT EXECUTED** — a headless step cannot open `/tasks/:id`.
+pass remains NOT EXECUTED** — **CORRECTED 2026-08-29:** ~~a headless step cannot open
+`/tasks/:id`~~ — it can, on this repository's real-browser harness (see the Status paragraph's
+correction above); the pass simply has not been run.
 **Date:** 2026-08-20
 
 ## TLDR
@@ -336,7 +345,7 @@ from, and what Verification §5 replays.
 | --- | --- | --- |
 | R1 | A duration reads as a verdict ("this step is slow / stuck"). | Measurement only: no thresholds, no colour, no "slow". Directly inherits `2026-08-20-agent-step-inactivity-timeout.md` R1 — silence is the liveness signal, duration is not. |
 | R2 | A 1s tick re-renders six rail rows, or a tool card's whole output block. | Both clocks are `<LiveDuration/>` leaves; the `no-tick-in-thread-containers` guardian rule is extended to `step-rail.tsx` and `thread-items.tsx`, so a future inline `useNow` fails the suite. |
-| R3 | `iterations > 1`: `startedAt` is **overwritten** on each attempt (`run.ts:3360`), so the rail shows the *current attempt*, not the cumulative cost. | Accepted and stated: the row already carries the `×N` badge (`step-rail.tsx:93-97`); the clock's `title` says "this attempt". Cumulative-across-attempts would need a new persisted field — out of the web-only class, and not asked for. |
+| R3 | `iterations > 1`: `startedAt` is **overwritten** on each attempt (`run.ts:3360`), so the rail shows the *current attempt*, not the cumulative cost. | **CORRECTED 2026-08-29**: `.ai/specs/2026-08-29-step-retry-timing.md` closes this deferral — `RunStore.updateStep` now accumulates `StepState.attempts[]`, and the rail's clock sums every recorded attempt instead of showing only the latest. Original mitigation, kept for the record: *"Accepted and stated: the row already carries the `×N` badge (`step-rail.tsx:93-97`); the clock's `title` says "this attempt". Cumulative-across-attempts would need a new persisted field — out of the web-only class, and not asked for."* |
 | R4 | A step parked `waiting` (an unanswered `CEZ:ASK`) or `review` keeps ticking, so human think-time is billed to the step. | Deliberate: `railVisual` already calls those states **active**, and a clock that disagreed with the glyph would be worse. The `title` reads "elapsed since the step started". |
 | R5 | A `finishedAt` that survives from a previous attempt while `status` is `running` would print a negative or absurd duration. | `stepElapsed` prefers `live` whenever the step is active and ignores `finishedAt` there; `formatDuration`/`formatToolDuration` clamp negatives to zero regardless. |
 | R6 | Old records / old NDJSON with no `startedAt`, or an unparseable `ts`. | Render nothing. Every path returns `undefined` rather than a number, exactly as `shortAge` returns `''`. |
@@ -473,8 +482,11 @@ env -u NODE_ENV -u CEZ_REMOTE -u CEZ_OIDC_ISSUER -u CEZ_OIDC_CLIENT_ID \
    e. the run finishing and the header keeping `took h:mm:ss` instead of blanking.
    Capture a screenshot of (b) and (c) into `.ai/specs/assets/` and reference it here.
 
-8. **Production-data pass — EXECUTED 2026-08-20, green.** §7 needs a browser, but its
-   *inputs* can be checked headlessly against real data, and that is where the plausible
+8. **Production-data pass — EXECUTED 2026-08-20, green.** **CORRECTED 2026-08-29:** ~~§7 needs a
+   browser~~ — it needs a REAL RUNTIME PASS, and this repository has a real-browser harness that
+   can give it one (see the Status paragraph's correction); this item was written when that was
+   believed impossible on this host. Its *inputs* can also be checked headlessly against real data
+   independent of a browser, which is what this item does, and that is where the plausible
    failure lives: if the clocks render blank it is because `startedAt`/`finishedAt`/`ts` are
    missing, not because the JSX is wrong (the JSX is covered by 776 web unit tests). Parsed
    this run's own production transcript
@@ -559,7 +571,7 @@ of the hand-written list, with the old list marked as the incomplete thing it wa
 | 4 | `npm test` (whole repo) / `npm run test:unit` | 9093 passed, 1 skipped, **2 failed**; 44 passed |
 | 5 | Replay of this run's own transcript through `reduceThread` | 106 tool entries, all timed; 105 closed, median 76ms, 98/105 under 1s, longest 10.61s — matches the Evidence table, measured independently |
 | 6 | `git diff --name-only` | `packages/web/**` + `.ai/specs/**` only — web-only deploy class holds |
-| 7 | Real runtime pass on `/tasks/:id` (visual, a-e) | **NOT EXECUTED** — no browser on this host; todo `1f74df2b` |
+| 7 | Real runtime pass on `/tasks/:id` (visual, a-e) | **NOT EXECUTED** — **CORRECTED 2026-08-29:** ~~no browser on this host~~; a real-browser harness exists and the pass is possible, it simply has not been run; todo `1f74df2b` stays open |
 | 8 | Production-data pass: real run's own transcript | **GREEN** — 7/7 steps timed; 281/282 tool pairs; median 0.099s, 83% sub-second |
 
 The 2 failures in §4 are **not this change** and are named rather than rounded away:

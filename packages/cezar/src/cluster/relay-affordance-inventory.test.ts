@@ -713,6 +713,10 @@ const FIELD_CLASSIFICATION: Record<string, Verdict> = {
       'handle to reach it with.',
   },
   stepCount: { verdict: 'safe', why: 'a number (workflow.steps.length), from `run.workflow.selected`' },
+  dispatchMode: { verdict: 'safe', why: 'a closed metric label distinguishing filed-only from filed-and-dispatched plans' },
+  todoCount: { verdict: 'safe', why: 'a count of todos in the run-owned completion receipt' },
+  autostartMarked: { verdict: 'safe', why: 'a count of run-owned todos marked for autostart' },
+  projectCount: { verdict: 'safe', why: 'a count of projects represented by the run-owned filed todos' },
   plannedRunner: {
     verdict: 'safe',
     why:

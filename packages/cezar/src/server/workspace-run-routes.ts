@@ -6,7 +6,7 @@ import {
 import { jsonZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';
 import type { RunRecord } from '../runs/store.ts';
-import { INPUT_TO_TASKS_NAME, type WorkflowDef } from '../workflows/types.ts';
+import { INPUT_TO_TASKS_NAME, inputToTasksPlan, type WorkflowDef } from '../workflows/types.ts';
 import type { StartRunInput } from '../workflows/run.ts';
 import { loadWorkspaceGrant, type WorkspaceGrant } from '../workspace/granted-roots.ts';
 import { authorOf } from './request-author.ts';
@@ -102,14 +102,15 @@ export function createWorkspaceRunRoutes(deps: WorkspaceRunRouteDeps) {
       // offers only this one at workspace scope; the route stays open because cezar is published
       // and rejecting a workflow name that worked yesterday is a breaking change
       // (`BACKWARD_COMPATIBILITY.md`), and because `steps` (an inline chain) must keep working.
-      const workflow = body.workflow ?? (body.steps === undefined ? INPUT_TO_TASKS_NAME : undefined);
+      const workflowName = body.workflow ?? (body.steps === undefined ? INPUT_TO_TASKS_NAME : undefined);
       const resolved = await deps.resolveWorkflow(deps.bootRoot, {
-        ...(workflow === undefined ? {} : { workflow }),
+        ...(workflowName === undefined ? {} : { workflow: workflowName }),
         ...(body.steps === undefined ? {} : { steps: body.steps as WorkflowDef['steps'] }),
       });
       if ('error' in resolved) return c.json({ error: resolved.error }, resolved.status);
+      const workflow = inputToTasksPlan(resolved.workflow, body.autoStart === true);
 
-      const blocked = await deps.guard(deps.bootRoot, resolved.workflow, {
+      const blocked = await deps.guard(deps.bootRoot, workflow, {
         ...(body.model === undefined ? {} : { model: body.model }),
         ...(body.runner === undefined ? {} : { runner: body.runner }),
         ...(body.agentProfile === undefined ? {} : { agentProfile: body.agentProfile }),
@@ -155,12 +156,11 @@ export function createWorkspaceRunRoutes(deps: WorkspaceRunRouteDeps) {
         // The decisions this route owns.
         worktree: false,
         workspaceProjects: grant.projects,
-        // Absent means false. Recorded even when false is the default so the run's own record says
-        // what was asked for, rather than leaving `dispatch`'s no-op looking like a failure.
+        // Absent means false. Recorded when supplied so restart recovery has the original choice.
         ...(body.autoStart === undefined ? {} : { autoStart: body.autoStart }),
       };
 
-      const run = deps.startRun(resolved.workflow, input);
+      const run = deps.startRun(workflow, input);
       const response: WorkspaceRunStartResponse = {
         run,
         project: await deps.bootProject(),

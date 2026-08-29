@@ -1,5 +1,7 @@
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 
 /**
  * P2 of `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` — a deployer that survives the
@@ -26,8 +28,42 @@ export const DETACHED_ENV = 'CEZ_DEPLOY_DETACHED';
 
 /** Where a transient deploy streams its log, so a cockpit that was itself restarted mid-deploy
  *  can still read what happened. */
-export function deployLogPath(releaseId: string): string {
-  return `/var/log/cezar/deploy-${releaseId}.log`;
+/**
+ * Where a detached deploy appends its output, most-preferred first.
+ *
+ * `/var/log/cezar` is right for a root deployer and IMPOSSIBLE for a rootless one: on a blue-green
+ * box the service account cannot create a directory under `/var/log` (`mkdir: Permission denied`,
+ * measured on prod-host 2026-08-29). systemd refuses to START a unit whose `append:` target
+ * is unwritable, so an unresolvable log path is not a cosmetic problem — it fails the whole deploy,
+ * silently, because the unit never runs to report anything.
+ */
+export const DEPLOY_LOG_DIRS = ['/var/log/cezar', join(homedir(), '.cezar', 'deploy-logs')];
+
+/** First candidate that can be created. Exported for test; `mkdir` is injected so the decision can
+ *  be driven without touching the real filesystem. */
+export function pickDeployLogDir(candidates: readonly string[], mkdir: (dir: string) => void): string {
+  for (const dir of candidates) {
+    try {
+      mkdir(dir);
+      return dir;
+    } catch {
+      // Not usable by this uid — try the next. A deployer that can use none of them falls through
+      // to the temp dir below, which is always writable, rather than failing the deploy over a log.
+    }
+  }
+  return tmpdir();
+}
+
+let resolvedLogDir: string | undefined;
+
+/** Memoized per process — the answer depends only on the uid, which does not change. */
+export function deployLogDir(): string {
+  resolvedLogDir ??= pickDeployLogDir(DEPLOY_LOG_DIRS, (dir) => mkdirSync(dir, { recursive: true }));
+  return resolvedLogDir;
+}
+
+export function deployLogPath(releaseId: string, dir = deployLogDir()): string {
+  return join(dir, `deploy-${releaseId}.log`);
 }
 
 export function transientUnitName(releaseId: string): string {
@@ -160,6 +196,14 @@ export interface SystemdRunOptions {
    * is the only property the escape actually needs.
    */
   user?: boolean;
+  /**
+   * Where the unit appends its output. Defaults to `deployLogPath(releaseId)` under
+   * `/var/log/cezar`, which only a deployer that can create that directory may use — on a rootless
+   * box the `cezar` uid cannot (`mkdir: Permission denied`, measured 2026-08-29), and systemd
+   * refuses to START a unit whose `append:` target is unwritable. A caller running as the service
+   * account passes a path it owns.
+   */
+  logPath?: string;
 }
 
 /**
@@ -181,8 +225,8 @@ export function buildSystemdRunArgv(opts: SystemdRunOptions): string[] {
     '--property=Type=oneshot',
     '--property=RemainAfterExit=no',
     '--property=KillMode=process',
-    `--property=StandardOutput=append:${deployLogPath(opts.releaseId)}`,
-    `--property=StandardError=append:${deployLogPath(opts.releaseId)}`,
+    `--property=StandardOutput=append:${opts.logPath ?? deployLogPath(opts.releaseId)}`,
+    `--property=StandardError=append:${opts.logPath ?? deployLogPath(opts.releaseId)}`,
     `--setenv=${DETACHED_ENV}=1`,
   ];
   if (opts.cwd) argv.push(`--working-directory=${opts.cwd}`);

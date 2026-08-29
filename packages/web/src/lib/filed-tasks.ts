@@ -240,6 +240,7 @@ export const FILED_SEARCH_PARAMS = {
   /** The ARCHIVED table's created-date sort, unchanged. A bookmarked `?fsort=created-desc` was
    *  verified in the 2026-08-17 prod pass and keeps working exactly as it did. */
   sort: 'fsort',
+  detail: 'fdetail',
   /** The Active table's per-column sort, `<column>:<dir>` (2026-08-25). */
   activeSort: 'fasort',
   /** The Backlog table's per-column sort, same grammar. */
@@ -336,6 +337,14 @@ export function filedPartitionOf(entry: WorkspaceTodoEntry): FiledPartition {
 
 export function filedTaskKey(entry: WorkspaceTodoEntry): string {
   return `${entry.project}:${entry.todo.id}`
+}
+
+/** Parse the global Tasks deep-link key, splitting only at the project/id boundary. */
+export function parseFiledDetailKey(value: string | null | undefined): { project: string; todoId: string } | null {
+  if (!value) return null
+  const separator = value.indexOf(':')
+  if (separator <= 0 || separator === value.length - 1) return null
+  return { project: value.slice(0, separator), todoId: value.slice(separator + 1) }
 }
 
 export function toggleFiledSelection(selected: ReadonlySet<string>, key: string): Set<string> {

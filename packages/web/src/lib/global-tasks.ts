@@ -445,6 +445,7 @@ export const SEARCH_PARAMS = {
   filedStatus: FILED_SEARCH_PARAMS.status,
   filedPriority: FILED_SEARCH_PARAMS.priority,
   filedSort: FILED_SEARCH_PARAMS.sort,
+  filedDetail: FILED_SEARCH_PARAMS.detail,
   filedActiveSort: FILED_SEARCH_PARAMS.activeSort,
   filedBacklogSort: FILED_SEARCH_PARAMS.backlogSort,
 } as const
@@ -466,6 +467,8 @@ export interface GlobalTasksUrlState {
   /** The ARCHIVED Filed table's sort — `created-desc` (newest first) by default. Untouched by
    *  the 2026-08-25 split: that table still sorts client-side on the legacy path. */
   filedSort: FiledSort
+  /** `project:todoId` for a Filed detail dialog opened from a run thread. */
+  filedDetail: string | undefined
   /** The Active table's per-column sort. Server-applied. */
   filedActiveSort: FiledTableSort
   /** The Backlog table's per-column sort. Independent of the Active one on purpose — a sort
@@ -485,6 +488,7 @@ export const DEFAULT_URL_STATE: GlobalTasksUrlState = {
   view: 'active',
   filedFilters: NO_FILED_FILTERS,
   filedSort: DEFAULT_FILED_SORT,
+  filedDetail: undefined,
   filedActiveSort: DEFAULT_FILED_TABLE_SORT,
   filedBacklogSort: DEFAULT_FILED_TABLE_SORT,
 }
@@ -512,6 +516,7 @@ export function urlStateToSearchParams(state: GlobalTasksUrlState): URLSearchPar
   for (const status of state.filedFilters.statuses) params.append(SEARCH_PARAMS.filedStatus, status)
   for (const priority of state.filedFilters.priorities) params.append(SEARCH_PARAMS.filedPriority, priority)
   if (state.filedSort !== DEFAULT_FILED_SORT) params.set(SEARCH_PARAMS.filedSort, state.filedSort)
+  if (state.filedDetail !== undefined) params.set(SEARCH_PARAMS.filedDetail, state.filedDetail)
   if (!isDefaultFiledTableSort(state.filedActiveSort)) {
     params.set(SEARCH_PARAMS.filedActiveSort, formatFiledTableSort(state.filedActiveSort))
   }
@@ -547,6 +552,7 @@ export function urlStateFromSearchParams(params: URLSearchParams): GlobalTasksUr
       priorities: params.getAll(SEARCH_PARAMS.filedPriority).filter(isFiledPriority),
     },
     filedSort: isFiledSort(filedSort) ? filedSort : DEFAULT_FILED_SORT,
+    filedDetail: params.get(SEARCH_PARAMS.filedDetail) ?? undefined,
     filedActiveSort: parseFiledTableSort(params.get(SEARCH_PARAMS.filedActiveSort)),
     filedBacklogSort: parseFiledTableSort(params.get(SEARCH_PARAMS.filedBacklogSort)),
   }

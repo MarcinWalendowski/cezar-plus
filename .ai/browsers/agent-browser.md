@@ -24,6 +24,26 @@ Use an existing healthy `agent-browser` from `PATH`; otherwise install the
 official native release in a per-user cache. Do not add binary files to the
 repository.
 
+**A passing `doctor --json` is evidence, not the gate — a candidate-condition
+launch probe is** (`.ai/specs/2026-08-29-verify-active-backlog-e2e.md`, D2).
+Some containers/VMs need `--no-sandbox` (Chromium's zygote host aborts with
+`No usable sandbox!` otherwise), and Chromium's process-singleton socket
+(`$TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket`) overflows the
+108-byte `sun_path` cap under a long `TMPDIR` (`Socket path too long`). After
+resolving the binary, try real launches (`open about:blank` then `close`)
+under each candidate in order, stopping at the first success:
+
+1. `{}` — no extra variables (the default on a Mac).
+2. `{AGENT_BROWSER_ARGS: "--no-sandbox"}`.
+3. `{TMPDIR: <a short scratch dir>}`.
+4. Both together.
+
+`BROWSER_INSTALLED=1` only when a real launch succeeded under some candidate;
+the winning candidate's variables are recorded as `browser.env` in
+`.ai/qa/test-env.json` and applied to every subsequent operation this
+provider runs, not only the probe. `doctor --json` is still run once, for the
+diagnostic text that goes into `BROWSER_NOTES` when every candidate fails.
+
 POSIX shell (macOS, Linux, WSL2, Git Bash/MSYS):
 
 ```bash
@@ -169,6 +189,26 @@ The absolute path avoids the CLI treating a relative multi-segment path as a
 selector. PowerShell resolves it with
 `[IO.Path]::GetFullPath($ScreenshotPath)`, creates the parent directory, then
 checks `Test-Path` and a non-zero file length.
+
+### record
+
+Video capture (WebM), added spec 2026-08-29-per-retry-step-timing. Start it
+AFTER the page has actually loaded — `open` alone starts no browser session
+capable of recording, so a `record start` issued before the first real
+navigation has nothing to capture. Stop it before `close`, in `finally`, and
+gate on a non-empty file the same way `screenshot` does.
+
+```bash
+"$AGENT_BROWSER_BIN" --session "$BROWSER_SESSION" record start "$ABS_RECORDING_PATH" --json
+# … drive the page …
+"$AGENT_BROWSER_BIN" --session "$BROWSER_SESSION" record stop --json
+test -s "$ABS_RECORDING_PATH"
+```
+
+Not verified headless on every box this descriptor runs on. If `record`
+produces no file (or an empty one) here, say so in the run's own gate notes
+and keep the retained screenshots as the visual evidence — never report a
+video pass that did not happen.
 
 ### close
 

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { collectSecretValues, redactDeep, redactSecrets } from '../core/secret-redaction.ts';
@@ -11,6 +11,12 @@ import { pendingApprovalSchema, pendingHandoffSchema, testAttestationSchema } fr
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 import { resolveContextWindow } from '../core/context-window.ts';
 import { taskAuthorSchema, type TaskAuthor } from './task-author.ts';
+import {
+  readSpecReviewEntries,
+  specReviewLogPath as specReviewLogPathFor,
+  specReviewSummarySchema,
+  summariseSpecReview,
+} from './spec-review-log.ts';
 
 import type { RunnerId } from '../core/agent-runner.ts';
 // Type-only, so no runtime edge is added from the store to the contract package — one definition
@@ -62,6 +68,18 @@ const storedRunnerSchema = z
   .enum([...RUNNER_IDS, 'claude-cli'])
   .transform((id) => (id === 'claude-cli' ? ('claude' as const) : id));
 
+/** Local mirror of the contract's `stepAttemptSchema` (spec 2026-08-29-step-retry-timing) — one
+ *  attempt at a step, written only by `updateStep` below. */
+const stepAttemptSchema = z.object({
+  startedAt: z.string(),
+  finishedAt: z.string().optional(),
+});
+type StepAttempt = z.infer<typeof stepAttemptSchema>;
+
+/** The statuses `updateStep`'s D3 rule (2) treats as "an attempt is in flight" (spec
+ *  2026-08-29-step-retry-timing). Leaving any of these closes the open attempt. */
+const ACTIVE_STEP_STATUSES: ReadonlySet<StepStatus> = new Set(['running', 'waiting', 'review']);
+
 const stepStateSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -87,6 +105,10 @@ const stepStateSchema = z.object({
   usageInvocationEpoch: usageCounterSchema.optional(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
+  /** Mirror of the contract's `StepState.attempts` — see there for the full doc comment.
+   *  Accumulated only by `updateStep`, keyed on the iteration transition (spec
+   *  2026-08-29-step-retry-timing). */
+  attempts: z.array(stepAttemptSchema).optional(),
   error: z.string().optional(),
   /** Latest backend-owned session id, used for same-backend Continue. */
   sessionId: z.string().optional(),
@@ -135,6 +157,19 @@ const queuedMessageSchema = z.object({
   /** `/api/v1/runs/:id/images/…` URLs — the base64 never enters `runs.json`. */
   images: z.array(z.string()).optional(),
   createdAt: z.string(),
+});
+
+const filedTodoSchema = z.object({
+  project: z.string(),
+  todoId: z.string(),
+  summary: z.string().max(500),
+  autostart: z.literal(true).optional(),
+  startedTaskId: z.string().optional(),
+});
+
+const filedTodosSchema = z.object({
+  items: z.array(filedTodoSchema),
+  at: z.string(),
 });
 
 /** Exported for `./run-index.ts`, the read-only reader of the same file. Nothing else should
@@ -326,6 +361,13 @@ export const runRecordSchema = z.object({
    * invented path.
    */
   declaredSpecPath: z.string().max(500).optional(),
+  /**
+   * Cached three-number summary of `<dataDir>/runs/<id>.spec-review.ndjson` (spec
+   * `.ai/specs/2026-08-29-spec-tab-review-feed.md`, P1) — lets the Spec tab decide it exists
+   * without a second fetch. The side log is authoritative; this is a derived cache that can be
+   * absent or briefly stale (see `RunStore.open`'s load-path reconcile) without losing data.
+   */
+  specReview: specReviewSummarySchema.optional(),
   /** Set while the run is parked on a human approval gate (spec 2026-08-20, P3); cleared the
    *  moment the gate releases or the chain moves on. Absent on every ungated run. */
   pendingApproval: pendingApprovalSchema.optional(),
@@ -446,6 +488,7 @@ export const runRecordSchema = z.object({
       }),
     )
     .optional(),
+  filedTodos: filedTodosSchema.optional(),
   /** A parallel workspace run's per-project worktrees (spec
    *  2026-08-19-parallel-workspace-runs-worktrees). Each granted git project is isolated in its own
    *  `cez/<id8>` worktree; the diff is applied back to the real checkout and the worktree removed on
@@ -780,15 +823,24 @@ export class RunStore extends EventEmitter {
   private runs = new Map<string, RunRecord>();
   private saveTimer: NodeJS.Timeout | null = null;
 
-  private constructor(private readonly dataDir: string) {
+  private constructor(
+    private readonly dataDir: string,
+    /** Clock `updateStep`'s D3 rule (2) reads to close an attempt with no explicit `finishedAt`
+     *  (spec 2026-08-29-step-retry-timing). Overridable only through `RunStore.open`'s `now`
+     *  option — the constructor itself is private, so no test reaches it directly. */
+    private readonly now: () => string = () => new Date().toISOString(),
+  ) {
     super();
     this.setMaxListeners(100);
   }
 
-  /** See `reconcileLoadedRun` for what `keepLive` (#367) decides about live-looking rows. */
-  static open(dataDir: string, opts?: { keepLive?: boolean }): RunStore {
+  /** See `reconcileLoadedRun` for what `keepLive` (#367) decides about live-looking rows.
+   *  `now` (spec 2026-08-29-step-retry-timing) overrides the clock `updateStep` uses to close an
+   *  attempt on a status exit with no explicit `finishedAt` — every production call site omits
+   *  it and gets the real clock; tests inject a fixed one so rule (2) is asserted, not raced. */
+  static open(dataDir: string, opts?: { keepLive?: boolean; now?: () => string }): RunStore {
     mkdirSync(join(dataDir, 'runs'), { recursive: true });
-    const store = new RunStore(dataDir);
+    const store = new RunStore(dataDir, opts?.now);
     const indexPath = join(dataDir, 'runs.json');
     if (existsSync(indexPath)) {
       try {
@@ -796,7 +848,9 @@ export class RunStore extends EventEmitter {
         const parsed = z.array(runRecordSchema).safeParse(raw);
         if (parsed.success) {
           for (const run of parsed.data) {
-            store.runs.set(run.id, reconcileLoadedRun(run, opts));
+            const reconciled = reconcileLoadedRun(run, opts);
+            store.reconcileSpecReviewSummary(reconciled);
+            store.runs.set(reconciled.id, reconciled);
           }
         }
       } catch {
@@ -829,6 +883,7 @@ export class RunStore extends EventEmitter {
     worktree?: false;
     /** A workspace run's grant — see the schema field above. */
     workspaceProjects?: WorkspaceGrantProject[];
+    filedTodos?: z.infer<typeof filedTodosSchema>;
     /** `input-to-tasks` auto-start — see the schema field above. */
     autoStart?: boolean;
     groupId?: string;
@@ -863,6 +918,7 @@ export class RunStore extends EventEmitter {
       stepBudgetOverride: input.stepBudgetOverride,
       worktree: input.worktree,
       workspaceProjects: input.workspaceProjects,
+      filedTodos: input.filedTodos,
       autoStart: input.autoStart,
       groupId: input.groupId,
       variant: input.variant,
@@ -979,7 +1035,63 @@ export class RunStore extends EventEmitter {
     this.touch(run);
   }
 
-  updateStep(runId: string, stepId: string, patch: Partial<Omit<StepState, 'id'>>): void {
+  /**
+   * Accumulate `step.attempts` from a raw `updateStep` patch, BEFORE the `Object.assign` merge —
+   * every field it reads (`step.iterations`, `step.status`, `step.attempts`) must still be the
+   * PREVIOUS attempt's values (spec 2026-08-29-step-retry-timing, §"The writer, precisely").
+   * Three rules, order fixed:
+   *
+   *   (1) explicit close  — the patch supplies `finishedAt`, e.g. `finishStep`.
+   *   (2) implicit close  — the step leaves the active set (`running`/`waiting`/`review`) with
+   *       nothing to close on; closes at `this.now()`. Six of the nine retry paths in the engine
+   *       take exactly this shape (`{status:'pending'}` and nothing else).
+   *   (3) new attempt     — an ITERATION INCREMENT, never a `startedAt` comparison: two attempts
+   *       can share a millisecond. Guarded by the upgrade boundary so a step that was already
+   *       mid-flight when this shipped never gains a partial array.
+   *
+   * `attempts` is mutated on `step` directly; it is excluded from `patch`'s type so a caller
+   * cannot race this accumulation with its own write.
+   */
+  private accumulateStepAttempts(step: StepState, patch: Partial<Omit<StepState, 'id' | 'attempts'>>): void {
+    const prevIterations = step.iterations;
+    const prevStatus = step.status;
+    const open = (): StepAttempt | undefined => {
+      const attempts = step.attempts;
+      if (!attempts || attempts.length === 0) return undefined;
+      const last = attempts.at(-1);
+      return last && last.finishedAt === undefined ? last : undefined;
+    };
+
+    // (1) explicit close
+    if (typeof patch.finishedAt === 'string') {
+      const openAttempt = open();
+      if (openAttempt) openAttempt.finishedAt = patch.finishedAt;
+    }
+
+    // (2) implicit close — the step left the active set with nothing to close on
+    if (
+      typeof patch.status === 'string' &&
+      ACTIVE_STEP_STATUSES.has(prevStatus) &&
+      !ACTIVE_STEP_STATUSES.has(patch.status)
+    ) {
+      const openAttempt = open();
+      if (openAttempt) openAttempt.finishedAt = this.now();
+    }
+
+    // (3) a NEW attempt is an ITERATION INCREMENT, never a timestamp comparison
+    if (typeof patch.iterations === 'number' && patch.iterations > prevIterations && typeof patch.startedAt === 'string') {
+      // the upgrade boundary — a step that already had `iterations > 0` and no `attempts` when
+      // this shipped never gains the field; only a fresh step (iterations 0) or one already
+      // accumulating may mint an entry.
+      if (prevIterations === 0 || step.attempts !== undefined) {
+        const openAttempt = open();
+        if (openAttempt) openAttempt.finishedAt = patch.startedAt; // fallback close, see D3
+        step.attempts = [...(step.attempts ?? []), { startedAt: patch.startedAt }];
+      }
+    }
+  }
+
+  updateStep(runId: string, stepId: string, patch: Partial<Omit<StepState, 'id' | 'attempts'>>): void {
     const run = this.runs.get(runId);
     const step = run?.steps.find((s) => s.id === stepId);
     if (!run || !step) return;
@@ -990,6 +1102,7 @@ export class RunStore extends EventEmitter {
     // patch counts as a report (spec 2026-08-22-context-window-denominator-per-step).
     const reportedWindow = patch.contextWindow;
     const touchesContext = 'contextTokens' in patch || 'contextWindow' in patch;
+    this.accumulateStepAttempts(step, patch);
     Object.assign(step, this.redactStepPatch(patch));
     if (touchesContext) {
       step.contextWindow = resolveContextWindow({
@@ -1158,7 +1271,18 @@ export class RunStore extends EventEmitter {
     const full: RunEvent = this.redact({ ...event, seq, ts: new Date().toISOString() });
     // Sync append keeps event order without a write queue; local NDJSON
     // appends at agent-event rates are effectively free.
-    appendFileSync(this.eventsPath(runId), `${JSON.stringify(full)}\n`, 'utf8');
+    const eventPath = this.eventsPath(runId);
+    let separator = '';
+    try {
+      const size = statSync(eventPath).size;
+      if (size > 0) {
+        const lastByte = readFileSync(eventPath).at(-1);
+        if (lastByte !== 0x0a) separator = '\n';
+      }
+    } catch {
+      // The append below creates the event file for a new run.
+    }
+    appendFileSync(eventPath, `${separator}${JSON.stringify(full)}\n`, 'utf8');
     this.emit('event', { runId, event: full });
 
     // The janitor trick: agents print the PR URL after `gh pr create` — the
@@ -1389,6 +1513,7 @@ export class RunStore extends EventEmitter {
         rmSync(this.eventsPath(id), { force: true });
         rmSync(this.handoffPath(id), { force: true }); // spec 007: the journal goes with the task
         rmSync(this.imagesDir(id), { recursive: true, force: true }); // agent screenshots
+        rmSync(this.specReviewLogPath(id), { force: true }); // spec .../2026-08-29-spec-tab-review-feed.md
       } catch {
         // best effort — the index is authoritative
       }
@@ -1397,6 +1522,37 @@ export class RunStore extends EventEmitter {
       this.emit('deleted', id);
     }
     return existed;
+  }
+
+  /**
+   * `<dataDir>/runs/<id>.spec-review.ndjson` — the spec/review feed's side log (spec
+   * `.ai/specs/2026-08-29-spec-tab-review-feed.md`, P1). Public, not a `dataDir` accessor, for the
+   * same reason `readHandoffText` hands out the handoff file rather than the directory it lives in
+   * (see that method's doc comment): the read route needs this exact path, and the store already
+   * owns the file's whole lifecycle (writes it via `workflows/run.ts`, deletes it here and in
+   * `pruneOldRuns`).
+   */
+  specReviewLogPath(runId: string): string {
+    return specReviewLogPathFor(this.dataDir, runId);
+  }
+
+  /**
+   * Recompute `run.specReview` from the side log when the record has a log but no summary — the
+   * crash-recovery case: `runs.json` saves on a debounce while the NDJSON append is immediate, so a
+   * kill between the two leaves a record with a log and no summary that nothing else self-heals
+   * (see the spec's "The summary on RunRecord", point 3). Runs once per record, in `open()`, before
+   * the run list is exposed to any caller. Fail-open: a read error leaves the record as it was.
+   */
+  private reconcileSpecReviewSummary(run: RunRecord): void {
+    if (run.specReview !== undefined) return;
+    try {
+      const logPath = this.specReviewLogPath(run.id);
+      const info = statSync(logPath);
+      if (!info.isFile() || info.size === 0) return;
+      run.specReview = summariseSpecReview(readSpecReviewEntries(this.dataDir, run.id));
+    } catch {
+      // no log, or unreadable — leave the record exactly as loaded
+    }
   }
 
   /** Write the index out now (used on shutdown). */
@@ -1463,6 +1619,7 @@ export class RunStore extends EventEmitter {
         rmSync(this.eventsPath(stale.id), { force: true });
         rmSync(this.handoffPath(stale.id), { force: true });
         rmSync(this.imagesDir(stale.id), { recursive: true, force: true });
+        rmSync(this.specReviewLogPath(stale.id), { force: true });
       } catch {
         // best effort
       }

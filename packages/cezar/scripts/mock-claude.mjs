@@ -6,7 +6,8 @@
 // events + a terminal `result`), and exits when stdin closes (EOF).
 
 import { createInterface } from 'node:readline';
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const emit = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`);
@@ -171,6 +172,81 @@ async function respond(userText, imageCount) {
   const refsMarkers = userText.includes('mock:refs')
     ? '\nCEZ:PR=4242\nCEZ:ISSUE=17\nCEZ:TITLE=implementing marker refs'
     : '';
+  // Spec 2026-08-29-spec-tab-review-feed.md testability hooks: a `spec`-shaped step declares
+  // `CEZ:SPEC_PATH=` and a `review-spec`-shaped step declares `CEZ:REVIEW=`, so the P1 end-to-end
+  // workflow tests can drive the spec/review side log's write path under CEZ_DRY_RUN=1 without a
+  // real model.
+  //
+  // A loop-back retry's prompt is the ORIGINAL task text plus the fed-back review report APPENDED
+  // after it (`run.ts`'s `checkFailure` channel) — so a revision-2 spec attempt's `userText` still
+  // contains revision 1's trigger, textually earlier. `lastMatch` below always takes the LAST
+  // occurrence, mirroring the "last declaration wins" rule `parseTaskMarkers` itself already uses,
+  // so a fixture that changes the marker in its review report naturally overrides the original.
+  const lastMatch = (re, text) => {
+    const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    let match;
+    let last;
+    while ((match = global.exec(text))) last = match;
+    return last;
+  };
+  // `mock:spec-path=<path>` both writes a real file (containment-safe reads need real bytes) AND
+  // declares it; `mock:spec-path-declare=<path>` declares ONLY, for the "path never resolves" /
+  // hostile-path fixtures where writing the file would be wrong or unsafe. `mock:spec-body=<id>`
+  // is what the written file's content is keyed on — a separate trigger, so a fixture can force
+  // TWO revisions of the SAME path to hold visibly different bytes without relying on where in the
+  // (ever-growing) prompt the marker happens to sit.
+  let specPathMarker = '';
+  {
+    const declareOnly = lastMatch(/mock:spec-path-declare=(\S+)/, userText);
+    const writeAndDeclare = lastMatch(/mock:spec-path=(\S+)/, userText);
+    if (declareOnly) {
+      specPathMarker = `\nCEZ:SPEC_PATH=${declareOnly[1]}`;
+    } else if (writeAndDeclare) {
+      const specFilePath = writeAndDeclare[1];
+      const body = lastMatch(/mock:spec-body=(\S+)/, userText);
+      try {
+        const dir = dirname(specFilePath);
+        if (dir && dir !== '.') mkdirSync(dir, { recursive: true });
+        writeFileSync(specFilePath, `# mock spec\n\n${body ? body[1] : 'no mock:spec-body given'}\n`);
+      } catch {
+        // read-only cwd — the marker still fires, just without a real file backing it
+      }
+      specPathMarker = `\nCEZ:SPEC_PATH=${specFilePath}`;
+    }
+  }
+  // `mock:review-check=<path>=<substring>` → an actually-deterministic reviewer: read the real
+  // file at `<path>` (which the `spec` step just wrote, for real, above) and answer `pass` only if
+  // its CURRENT content contains `<substring>`, `revise` otherwise. This is what lets ONE
+  // `review-spec` step, entered twice with the textually IDENTICAL prompt (a loop-back re-enters
+  // it fresh, with no per-attempt counter available to a stateless mock process), answer `revise`
+  // the first time and `pass` the second — the file on disk is the one thing that has genuinely
+  // changed between the two entries. Falls back to the static `mock:review=pass|revise` trigger
+  // when no check is given.
+  const reviewCheck = lastMatch(/mock:review-check=(\S+?)=(\S+)/, userText);
+  let reviewVerdictWord = null;
+  if (reviewCheck) {
+    let checked = '';
+    try {
+      checked = readFileSync(reviewCheck[1], 'utf8');
+    } catch {
+      // no file yet — reads as not-yet-passing, i.e. revise
+    }
+    reviewVerdictWord = checked.includes(reviewCheck[2]) ? 'pass' : 'revise';
+  } else {
+    reviewVerdictWord = lastMatch(/mock:review=(\S+)/, userText)?.[1] ?? null;
+  }
+  // On `revise`, the report FEEDS FORWARD the exact `mock:spec-body=` token the retried `spec`
+  // attempt should write — `reviewCheck`'s own expected substring when a check drove the verdict,
+  // so revision 2 is precisely what makes `mock:review-check` pass next time. This report text
+  // becomes the retried step's prompt verbatim (`specRevisionFeedback` embeds it unmodified), so
+  // the mock never needs its own cross-process memory of "which revision is this".
+  const forwardedBody = reviewCheck ? `\n   (carrying forward: mock:spec-body=${reviewCheck[2]})` : '';
+  const reviewMarker =
+    reviewVerdictWord === 'revise'
+      ? `\n\n1. FILE: mock spec\n   SECTION: ## Mock\n   CHANGE: mock:review requested this change.${forwardedBody}\nCEZ:REVIEW=revise`
+      : reviewVerdictWord === 'pass'
+        ? '\n\nCEZ:REVIEW=pass'
+        : '';
   const forceReport = userText.includes('mock:report');
   const questionSuffix = !forceReport && questionArmed
     ? '\n\nSo: merge and deploy now, or hold for review?'
@@ -590,7 +666,7 @@ async function respond(userText, imageCount) {
       type: 'assistant',
       message: {
         role: 'assistant',
-        content: [{ type: 'text', text: `Done with the first pass. Opened a draft PR: https://github.com/open-mercato/demo/pull/123. (dry-run mock)${questionSuffix}${refsMarkers}${doneMarker}${monitoringMarker}${askMarker}` }],
+        content: [{ type: 'text', text: `Done with the first pass. Opened a draft PR: https://github.com/open-mercato/demo/pull/123. (dry-run mock)${questionSuffix}${refsMarkers}${specPathMarker}${reviewMarker}${doneMarker}${monitoringMarker}${askMarker}` }],
         usage: { input_tokens: 300, output_tokens: 90 },
       },
     });
@@ -610,7 +686,7 @@ async function respond(userText, imageCount) {
     type: 'assistant',
     message: {
       role: 'assistant',
-      content: [{ type: 'text', text: `Follow-up #${turn - 1} received: "${userText.slice(0, 100)}".${imgNote} Applied (dry run).${questionSuffix}${refsMarkers}${doneMarker}${monitoringMarker}${askMarker}` }],
+      content: [{ type: 'text', text: `Follow-up #${turn - 1} received: "${userText.slice(0, 100)}".${imgNote} Applied (dry run).${questionSuffix}${refsMarkers}${specPathMarker}${reviewMarker}${doneMarker}${monitoringMarker}${askMarker}` }],
       usage: { input_tokens: 200, output_tokens: 60 },
     },
   });

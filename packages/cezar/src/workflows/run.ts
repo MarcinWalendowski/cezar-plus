@@ -60,6 +60,7 @@ import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.ts';
 import { LEASE_HEARTBEAT_MS, removeWorktreeLeases, touchWorktreeLeases, writeWorktreeLease } from '../workspace/worktree-lease.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
+import { readWorktreePath } from '../server/git-changes.ts';
 import { loadWorkflows } from './load.ts';
 import { deriveBaseBranch, evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
 import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/store.ts';
@@ -73,6 +74,7 @@ import {
 } from '../runs/agent-tmpdir.ts';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.ts';
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
+import { appendSpecReviewEntry, readSpecReviewEntries, SPEC_SNAPSHOT_CAP, summariseSpecReview } from '../runs/spec-review-log.ts';
 import {
   autoNamingActive,
   generateRunName,
@@ -128,9 +130,10 @@ import {
   applyWorkspaceWorktrees,
   discardWorkspaceWorktrees,
 } from '../workspace/workspace-worktrees.ts';
-import type { PendingApproval, PendingHandoff, TestAttestation, TestAttestationProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
+import type { FiledTodo, PendingApproval, PendingHandoff, TestAttestation, TestAttestationProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
+import { WorkspaceTodoIndex, type WorkspaceTodoEntry } from '../workspace/todo-index.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
 import type { UiEvent } from '../core/ui-events.ts';
 import {
@@ -139,15 +142,31 @@ import {
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_WORKFLOW,
   DEFAULT_WORKFLOW_NAME,
+  INPUT_TO_TASKS_DISPATCH_STEP,
+  inputToTasksPlan,
   parseReviewVerdict,
   resolveStepModel,
   stepKind,
+  isBuiltInInputToTasksRun,
+  isBuiltInInputToTasks,
   type ReviewVerdict,
   type StepModelChoice,
   type TaskClass,
   type WorkflowDef,
   type WorkflowStepDef,
 } from './types.ts';
+import {
+  activationArgv,
+  activationEnv,
+  activationInFlight,
+  activationLogPath,
+  defaultActivationHost,
+  ensureActivationLogDir,
+  markActivationLaunched,
+  readActivationCommands,
+  readActivationCommandsFromRef,
+  type ActivationHost,
+} from './manual-activation.ts';
 import { classifyTask } from '../task-classifier.ts';
 
 const CHECK_OUTPUT_CAP = 20_000;
@@ -186,6 +205,22 @@ export async function resolveTodoWorkflow(
   return workflows.find((w) => w.name === DEFAULT_WORKFLOW_NAME) ?? DEFAULT_WORKFLOW;
 }
 
+/** Select and order the todos belonging to one input-to-tasks run. */
+export function filedTodoEntriesForRun(runId: string, entries: readonly WorkspaceTodoEntry[]): FiledTodo[] {
+  return entries
+    .filter((entry) => entry.todo.author?.parentTaskId === runId)
+    .map(({ project, todo }) => ({
+      project,
+      todoId: todo.id,
+      summary: todo.summary.length > 500 ? `${todo.summary.slice(0, 497)}…` : todo.summary,
+      ...(todo.autostart === true ? { autostart: true as const } : {}),
+      ...(todo.startedTaskId !== undefined ? { startedTaskId: todo.startedTaskId } : {}),
+      ts: todo.ts ?? '',
+    }))
+    .sort((a, b) => a.ts.localeCompare(b.ts) || a.todoId.localeCompare(b.todoId))
+    .map(({ ts: _ts, ...item }) => item);
+}
+
 async function configuredModelProvider(
   backend: RunnerId,
   repoRoot: string,
@@ -219,6 +254,34 @@ const MONITORING_MARKER_RE = /CEZ:MONITORING\s*$/;
  * newlines in `AgentRunResult`; matching that contract here prevents a
  * trailing `CEZ:TITLE=` block from absorbing later commentary (#623).
  */
+/**
+ * Combine the verdicts of a step's post-conditions into the single one the engine acts on.
+ *
+ * Exported only so the retry budget it picks can be asserted directly. That number decides whether
+ * a failing step is re-entered at all, and the engine path reaching it needs a live agent session
+ * plus `CEZ_DRY_RUN=1` — which makes every BUILT-IN post-condition pass, so the one branch that
+ * matters here is unreachable from an end-to-end test by construction.
+ *
+ * The budget comes from the GATE when the gate states one, and from the workflow otherwise. A
+ * post-condition that knows re-running the step cannot change its verdict — `tested-revision-shipped`
+ * on base drift — says `retryMax: 0` and is believed. Until this read `first.retryMax`, every
+ * verdict's own budget was silently overwritten by `entry.max`, which is why the `merge` branch's
+ * `retryMax: 1` had been dead code since it was written.
+ */
+export function combineVerdicts(results: Array<PostconditionResult & { max: number }>): PostconditionResult {
+  const failed = results.filter((result) => !result.ok);
+  if (failed.length === 0) {
+    return { ok: true, detail: results.map((result) => result.detail).filter(Boolean).join('\n') };
+  }
+  const first = failed[0] as PostconditionResult & { max: number };
+  return {
+    ok: false,
+    detail: failed.map((result) => result.detail).join('\n'),
+    ...(first.handoff ? { handoff: first.handoff } : {}),
+    retryMax: first.retryMax ?? first.max,
+  };
+}
+
 export function appendTurnText(current: string, next: string): string {
   if (!current) return next;
   if (!next) return current;
@@ -339,11 +402,22 @@ interface ActiveRun {
   reviewVerdict?: ReviewVerdict;
   /** The reviewing turn's full report — what a `revise` verdict hands to the retried step. */
   reviewReport?: string;
+  /**
+   * The spec path the CURRENT step's finished turn declared via `CEZ:SPEC_PATH=` (spec
+   * `.ai/specs/2026-08-29-spec-tab-review-feed.md`, P1) — set in the turn-end handler beside
+   * `reviewVerdict`, read and cleared by the step loop just before the review block, which
+   * snapshots the file into the spec-review side log. Read from the turn text directly rather than
+   * `RunRecord.declaredSpecPath`, because that field's own doc comment records it as NOT
+   * guaranteed to be set on the persistence path (`recordTurnEnd` is fire-and-forget), while this
+   * capture is synchronous and not gated on `interactive` — exactly the property a mid-chain
+   * `spec` step needs.
+   */
+  stepSpecPath?: string;
   /** Resolver for a run parked on a human approval gate (spec 2026-08-20, P3). Present ONLY
    *  while parked; `approve`/`requestChanges` call it, `cancel` aborts it. */
   approvalWaiter?: (outcome: ApprovalOutcome) => void;
   /** Resolver for a run parked on a manual deployment or merge handoff. */
-  handoffWaiter?: (outcome: { kind: 'resolve' | 'skip' }) => Promise<{ resolved: boolean; verdict: string }>;
+  handoffWaiter?: (outcome: { kind: 'resolve' | 'skip' }) => Promise<{ resolved: boolean; verdict: string; activating?: boolean }>;
   /**
    * A continuation ended its turn with `CEZ:DONE` while its run's CHAIN still had pending steps
    * (spec 2026-08-20, P2). The marker is a statement about the agent's OWN step, so the session
@@ -1106,6 +1180,10 @@ type PinnedPlacement =
  * The user's working tree is never touched.
  */
 export class RunManager {
+  /** How an activation escapes this process's cgroup. Replaced in tests, which must never spawn a
+   *  real deploy — the default's `spawnDetached` would otherwise run one. */
+  activationHost: ActivationHost = defaultActivationHost;
+
   private readonly active = new Map<string, ActiveRun>();
   // Queue + `starting` set (spec 006, janitor's pump() pattern): `starting`
   // covers the window between shifting a run off the queue and the run
@@ -1715,6 +1793,15 @@ export class RunManager {
       requestedRunner: input.runner,
       stepCount: workflow.steps.length,
     });
+    if (isBuiltInInputToTasks(workflow) && (input.workspaceProjects?.length ?? 0) > 0) {
+      this.store.appendEvent(run.id, {
+        type: 'metric',
+        name: 'run.input_to_tasks.planned',
+        runId: run.id,
+        dispatchMode: input.autoStart === true ? 'filed-and-dispatched' : 'filed-only',
+        stepCount: workflow.steps.length,
+      });
+    }
     // Initial pasted images must be visible while the run is still queued (#612),
     // and must survive a restart before a slot opens. Persist them before the job
     // enters `pendingJobs`; `hydrateQueuedInput` reconstructs their content blocks
@@ -2945,7 +3032,12 @@ export class RunManager {
     const def = run.workflowDef;
     if (def) return def;
     const { workflows } = await loadWorkflows(this.repoRoot);
-    return workflows.find((w) => w.name === run.workflow) ?? null;
+    const catalog = workflows.find((w) => w.name === run.workflow);
+    if (!catalog) return null;
+    if (!isBuiltInInputToTasks(catalog)) return catalog;
+    const shaped = inputToTasksPlan(catalog, run.autoStart === true);
+    this.store.updateRun(run.id, { workflowDef: shaped });
+    return shaped;
   }
 
   /**
@@ -6136,10 +6228,34 @@ export class RunManager {
             checkFailure = attempt;
             continue; // same `i` — the step re-runs to finish its own job
           }
+          // Some goals cannot be met by re-entering the step that reported them. `commit-push`
+          // merging a base that moved since the tests ran is the case that forced this: the diff
+          // against the attested tree is a fact about an EARLIER step's output, so re-running the
+          // shipping step re-computes the identical verdict forever. A check step has consulted
+          // `onFail` since it existed; an agent step never did, so its post-condition was terminal
+          // however the workflow was configured (run `872b396a`, 2026-08-29 — it died here with its
+          // work already on `origin/main`).
+          if (canLoopBack(step)) {
+            const spent = retriesUsed.get(step.id) ?? 0;
+            this.finishStep(runId, step.id, 'failed', `post-condition failed — ${verdict.detail}`, emit);
+            i = loopBackTo(
+              i,
+              step,
+              `The post-condition of a LATER step ("${step.id}") failed, so its goal was not met:\n\n${verdict.detail}`,
+              `post-condition failed — retrying from "${step.onFail?.retry}" (attempt ${spent + 1}/${step.onFail?.max})`,
+            );
+            continue;
+          }
           this.finishStep(runId, step.id, 'failed', `post-condition failed — ${verdict.detail}`, emit);
           runError = `step "${step.id}" did not meet its post-condition: ${verdict.detail}`;
           break;
         }
+
+        // The spec/review feed's snapshot (spec 2026-08-29-spec-tab-review-feed, P1): a step that
+        // declared `CEZ:SPEC_PATH=` on this attempt gets its file captured into the side log NOW,
+        // before either gate below runs — so a review of THIS attempt is always recorded after its
+        // own draft, never before it.
+        await this.recordSpecSnapshot(runId, state, step.id);
 
         // ---- the spec reviewer's verdict (spec 2026-08-20, P2) -------------------------------
         // Read and CLEAR: the verdict belongs to the step that just ran, and leaving it set would
@@ -6148,6 +6264,13 @@ export class RunManager {
         const report = state.reviewReport;
         state.reviewVerdict = undefined;
         state.reviewReport = undefined;
+        // Recorded for BOTH verdicts (spec 2026-08-29-spec-tab-review-feed, P1) — a clean `pass`
+        // is what lets the feed end honestly rather than simply stopping, and a `pass` immediately
+        // followed by a human `revise` (both gates can fire on one revision) is a real event the
+        // log must not throw away, even though the display suppresses the provisional card.
+        if (reviewVerdict) {
+          this.recordSpecReview(runId, step.id, 'agent', reviewVerdict, report ?? '');
+        }
         if (reviewVerdict === 'revise' && step.onFail) {
           const used = retriesUsed.get(step.id) ?? 0;
           if (canLoopBack(step)) {
@@ -6185,6 +6308,10 @@ export class RunManager {
           const outcome = await this.awaitApproval(runId, state, step, emit, config);
           if (outcome.kind === 'cancelled') break;
           if (outcome.kind === 'changes') {
+            // Spec 2026-08-29-spec-tab-review-feed, P1: recorded at the moment of the human's
+            // decision, whether or not a revision slot remains below — the request happened
+            // either way, and the terminal "no revisions left" branch is a real objection too.
+            this.recordSpecReview(runId, step.id, 'human', 'revise', outcome.notes);
             const used = retriesUsed.get(step.id) ?? 0;
             if (canLoopBack(step)) {
               this.finishStep(runId, step.id, 'done', undefined, emit);
@@ -6213,6 +6340,7 @@ export class RunManager {
           if (!capture.ok) { runError = capture.runError; break; }
         }
         this.finishStep(runId, step.id, 'done', undefined, emit);
+        if (step.id === 'file') await this.collectFiledTodos(runId);
         i++;
         continue;
       }
@@ -6405,6 +6533,12 @@ export class RunManager {
         const checked = await recheck();
         if (checked.ok) {
           once({ kind: 'resolved', verdict: checked });
+          // One deployment satisfies every run parked on it. Without this, a person who deployed
+          // once has to press Resolve on each of the others to tell them what already happened.
+          // Deliberately NOT awaited: each sibling runs its OWN probe in its OWN worktree, bounded
+          // at 60s each, and the click must not wait for all of them. `exceptRunId` keeps this run
+          // out of it — it is still `waiting` at this instant, and would otherwise be requeued twice.
+          void this.recheckManualDeployParks(runId).catch(() => undefined);
           return { resolved: true, verdict: checked.detail };
         }
         const next: PendingHandoff = {
@@ -6418,6 +6552,15 @@ export class RunManager {
         };
         this.store.updateRun(runId, { pendingHandoff: next, status: 'waiting', waitingReason: 'handoff' });
         emit({ type: 'note', stepId: step.id, message: `handoff recheck is still red: ${checked.detail}` });
+        // The button DEPLOYS, when the repo has said how (owner decision 2026-08-29). Placed AFTER
+        // the re-probe on purpose: a service that is already live is never redeployed to satisfy a
+        // click, so the cheap answer stays cheap and only a genuine red spends a cutover.
+        if (checked.handoff?.kind === 'manual-deploy') {
+          const attempt = this.launchManualDeploy(runId, state.cwd, step.id, checked.handoff.targets ?? [], emit);
+          // `activating` only when something really started. The lock refusal is also a message,
+          // and reporting it as progress would tell someone a deploy is running that is not.
+          if (attempt) return { resolved: false, ...(attempt.launched ? { activating: true } : {}), verdict: attempt.message };
+        }
         // `summary` over `detail` HERE only: this value is the answer to a button press, and
         // `detail` carries every probe's source. The full text is already in the note above.
         return { resolved: false, verdict: checked.summary ?? checked.detail };
@@ -6755,7 +6898,7 @@ export class RunManager {
     runId: string,
     by = 'unknown',
     note?: string,
-  ): Promise<{ ok: boolean; resolved?: boolean; verdict?: string; error?: string }> {
+  ): Promise<{ ok: boolean; resolved?: boolean; verdict?: string; activating?: boolean; error?: string }> {
     const run = this.store.getRun(runId);
     if (!run) return { ok: false, error: 'not found' };
     const pending = run.pendingHandoff;
@@ -6768,7 +6911,7 @@ export class RunManager {
     const state = this.active.get(runId);
     if (state?.handoffWaiter) {
       const result = await state.handoffWaiter({ kind: 'resolve' });
-      return { ok: true, resolved: result.resolved, verdict: result.verdict };
+      return { ok: true, resolved: result.resolved, verdict: result.verdict, ...(result.activating ? { activating: true } : {}) };
     }
     return this.requeueHandoff(run, pending, 'handoff resolve requested after restart');
   }
@@ -6838,10 +6981,10 @@ export class RunManager {
    * which is an AGENT step, so requeueing unconditionally would spend a model call per parked run
    * on every restart — including the crash restarts that changed nothing.
    */
-  async recheckManualDeployParks(): Promise<number> {
+  async recheckManualDeployParks(exceptRunId?: string): Promise<number> {
     const parked = this.store
       .listRuns()
-      .filter((r) => r.status === 'waiting' && r.pendingHandoff?.kind === 'manual-deploy');
+      .filter((r) => r.id !== exceptRunId && r.status === 'waiting' && r.pendingHandoff?.kind === 'manual-deploy');
     let requeued = 0;
     for (const run of parked) {
       const pending = run.pendingHandoff;
@@ -6882,6 +7025,104 @@ export class RunManager {
    * answer exactly as it would have, and this touches the object db and remote-tracking refs
    * only — never HEAD, the index, or the working tree.
    */
+  /**
+   * Run the manual deployment this park is waiting on, and return what to tell the person who
+   * pressed the button — or `undefined` when the repo declares no way to deploy, in which case the
+   * caller reports the probe's verdict exactly as it always did.
+   *
+   * Nothing is awaited. The command restarts `cezar.service`, so this connection is about to be
+   * cut; the run is resumed by the post-restart park sweep, not by anything on this code path.
+   */
+  private launchManualDeploy(
+    runId: string,
+    cwd: string | undefined,
+    stepId: string,
+    failing: readonly string[],
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): { launched: boolean; message: string } | undefined {
+    if (!cwd) return undefined;
+    // The worktree first — a branch may legitimately change how its own service is deployed.
+    //
+    // Then the PROJECT ROOT, and that fallback is the whole reason a park from last week can be
+    // deployed at all: a worktree carries `.ai/deploy-targets.json` as it was when the worktree was
+    // cut, so the runs that need this most are exactly the ones whose copy predates it. This is the
+    // same shape as the probe's own fetch repair — a fix that ships in the artefact under test
+    // cannot reach the copies already taken — and the root checkout is the copy that keeps moving.
+    const commands = ((): ReturnType<typeof readActivationCommands> => {
+      const own = readActivationCommands(cwd, failing);
+      if (own.length > 0 || cwd === this.repoRoot) return own;
+      // The base REF before the project root's working tree. On this box the project root is the
+      // shared checkout worktrees fork from, which nothing pulls — 22 commits behind with 4 dirty
+      // files when measured — so its working tree is the least current copy of the three. The ref
+      // is current the moment anything fetched. The working-tree read stays last, for a repo with
+      // no remote at all, where the ref does not resolve.
+      const base = this.store.getRun(runId)?.baseBranch ?? 'main';
+      const fromRef = readActivationCommandsFromRef(this.repoRoot, `origin/${base}`, failing);
+      return fromRef.length > 0 ? fromRef : readActivationCommands(this.repoRoot, failing);
+    })();
+    if (commands.length === 0) return undefined;
+    const dataDir = join(this.repoRoot, '.ai', 'cezar');
+    const now = Date.now();
+    const others = this.store
+      .listRuns()
+      .filter((r) => r.id !== runId && r.status === 'waiting' && r.pendingHandoff?.kind === 'manual-deploy').length;
+    const started = activationInFlight(dataDir, now);
+    if (started !== undefined) {
+      // Two cutovers at once is the one genuinely destructive outcome here: the second flips the
+      // symlink under the first, mid-stage. A person clicking twice because the page went quiet is
+      // the EXPECTED way to reach this, since the restart is what made the page go quiet.
+      const mins = Math.max(1, Math.round((now - started) / 60_000));
+      emit({ type: 'note', stepId, message: `manual deployment NOT started — one launched ${mins} minute(s) ago is still presumed to be running` });
+      return {
+        launched: false,
+        message: `an activation started ${mins} minute(s) ago is still running — nothing new was launched. Wait for it to finish, or read the deploy log on the box.`,
+      };
+    }
+    const user = !this.activationHost.isRoot();
+    const systemdRun = this.activationHost.systemdRunAvailable();
+    ensureActivationLogDir(dataDir);
+    const env = activationEnv(process.env, user && systemdRun);
+    const launched: string[] = [];
+    const failures: string[] = [];
+    for (const { name, command } of commands) {
+      const unitId = `activate-${runId.slice(0, 8)}-${name.replace(/[^A-Za-z0-9_-]+/g, '-')}`.slice(0, 60);
+      const logPath = activationLogPath(dataDir, unitId);
+      const argv = activationArgv({ unitId, command, cwd, user, systemdRun, logPath });
+      if (systemdRun) {
+        const outcome = this.activationHost.registerUnit(argv, env, cwd);
+        if (!outcome.ok) {
+          failures.push(`${name}: ${outcome.error ?? 'the transient unit did not start'}`);
+          emit({ type: 'note', stepId, message: `manual deployment FAILED TO START for ${name}: ${outcome.error ?? 'unknown'}` });
+          continue;
+        }
+      } else {
+        this.activationHost.spawnDetached(argv, env, cwd);
+      }
+      launched.push(name);
+      emit({ type: 'note', stepId, message: `manual deployment launched for ${name}: ${command} (log: ${logPath})` });
+    }
+    // The lock is taken ONLY for something that really started. Taking it regardless is what turned
+    // a silent launch failure into a 15-minute block over nothing running — measured on the first
+    // production press, 2026-08-29.
+    if (launched.length === 0) {
+      return {
+        launched: false,
+        message: `the deployment did not start — ${failures.join('; ') || 'no command could be launched'}`,
+      };
+    }
+    markActivationLaunched(dataDir, now);
+    // One deployment settles EVERY run waiting on it, so say so — otherwise the other parked runs
+    // look ignored and invite a second click, which is the one thing the lock above exists to stop.
+    const also = others > 0
+      ? ` ${others} other run${others === 1 ? '' : 's'} waiting on this deployment ${others === 1 ? 'is' : 'are'} re-checked automatically too.`
+      : '';
+    const partial = failures.length > 0 ? ` (${failures.length} did NOT start: ${failures.join('; ')})` : '';
+    return {
+      launched: true,
+      message: `deploying ${launched.join(', ')} now. This restarts the server, so the cockpit will drop for a moment — the run resumes by itself once the new build is live.${also}${partial}`,
+    };
+  }
+
   private async refreshParkedWorktree(cwd: string | undefined): Promise<void> {
     // A MISSING cwd must not become "the process's own directory". `execFile` with `cwd:
     // undefined` inherits the server's, so a run with no worktree would have this reaching the
@@ -6937,6 +7178,10 @@ export class RunManager {
     }
     let changesFeedback: string | undefined;
     if (outcome.kind === 'changes') {
+      // Spec 2026-08-29-spec-tab-review-feed, P1: the restart-recovery twin of the step loop's own
+      // write (there is no live `execute()` here — that path returned above, through
+      // `approvalWaiter`, which is what the step loop's own instrumentation already covers).
+      this.recordSpecReview(runId, pending.stepId, 'human', 'revise', outcome.notes);
       const def = await this.reviveWorkflow(run);
       const target = def?.steps.find((s) => s.id === pending.stepId);
       changesFeedback =
@@ -7020,11 +7265,17 @@ export class RunManager {
       }
     }
 
+    const runForDispatch = this.store.getRun(runId);
+    if (step.id === INPUT_TO_TASKS_DISPATCH_STEP && runForDispatch && isBuiltInInputToTasksRun(runForDispatch)) {
+      await this.collectFiledTodos(runId);
+    }
     // Read from the RECORD, not from `input`: a resume rebuilds `input`, and `autoStart` is a
     // decision taken once at creation that must survive every later restart unchanged.
-    const autoStart = this.store.getRun(runId)?.autoStart === true;
+    const currentRun = this.store.getRun(runId);
+    const autoStart = currentRun?.autoStart === true;
+    const filedTodos = currentRun?.filedTodos?.items ?? [];
     let userPrompt =
-      resumeFrom?.prompt ?? applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart);
+      resumeFrom?.prompt ?? applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart, formatFiledTodos(filedTodos));
     if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
     if (checkFailure) {
       userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
@@ -7134,6 +7385,13 @@ export class RunManager {
           // (capped like any other fed-back output) rather than reduced to the verdict word.
           state.reviewReport = turnText.trimEnd().slice(-CHECK_OUTPUT_CAP);
         }
+        // The spec/review feed's snapshot trigger (spec 2026-08-29-spec-tab-review-feed, P1):
+        // parsed here, beside the verdict above, for the same reason — synchronous and NOT gated
+        // on `interactive`, unlike `RunRecord.declaredSpecPath`'s own write path
+        // (`applyTurnMarkers`, reached through the fire-and-forget `recordTurnEnd` above). Declared
+        // path wins on the LAST turn that names one, same rule as the verdict.
+        const declaredSpecPath = parseTaskMarkers(turnText).specPath;
+        if (declaredSpecPath) state.stepSpecPath = declaredSpecPath;
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
         // `CEZ:ASK` → the user is blocked; wins over `CEZ:MONITORING`, loses to
         // `CEZ:DONE` (#473).
@@ -7428,7 +7686,7 @@ export class RunManager {
         // `userPrompt` must be rebuilt from the step's own template — not just the session id —
         // or the fresh session runs contextless. Re-run exactly the three lines that built it the
         // first time, with `resumeFrom` treated as absent.
-        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart);
+        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart, formatFiledTodos(this.store.getRun(runId)?.filedTodos?.items ?? []));
         if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
         if (checkFailure) {
           userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
@@ -7998,6 +8256,20 @@ export class RunManager {
     this.store.updateRun(runId, { workspaceWorktrees: kept.length > 0 ? kept : undefined });
   }
 
+  /** Snapshot the todos this run filed, preserving project identity and start marks. */
+  private async collectFiledTodos(runId: string): Promise<FiledTodo[]> {
+    const run = this.store.getRun(runId);
+    if (!run || !isBuiltInInputToTasksRun(run)) return [];
+    const listed = await new WorkspaceTodoIndex({
+      listProjects: async () => run.workspaceProjects ?? [],
+    }).list();
+    const filedTodos = filedTodoEntriesForRun(runId, listed.todos);
+    this.store.updateRun(runId, {
+      filedTodos: { items: filedTodos, at: new Date().toISOString() },
+    });
+    return filedTodos;
+  }
+
   private async settleSuccess(runId: string, opts: { pendingAsk?: boolean } = {}): Promise<void> {
     // Invariant I1 (spec 2026-08-20-chain-integrity-restart-and-continuation): only the CHAIN
     // finishes the run. `settleSuccess` has three callers and only `execute()`'s success path can
@@ -8029,6 +8301,23 @@ export class RunManager {
     this.chainReentries.delete(runId);
     await this.applyWorkspaceRun(runId);
     const run = this.store.getRun(runId);
+    if (run && isBuiltInInputToTasksRun(run)) {
+      const items = await this.collectFiledTodos(runId);
+      const completed = this.store.readEvents(runId).some(
+        (event) => event.type === 'metric' && event.name === 'run.input_to_tasks.completed',
+      );
+      if (!completed) {
+        this.store.appendEvent(runId, {
+          type: 'metric',
+          name: 'run.input_to_tasks.completed',
+          runId,
+          dispatchMode: run.autoStart === true ? 'filed-and-dispatched' : 'filed-only',
+          todoCount: items.length,
+          autostartMarked: items.filter((item) => item.autostart === true || item.startedTaskId !== undefined).length,
+          projectCount: new Set(items.map((item) => item.project)).size,
+        });
+      }
+    }
     let review = false;
     if (run?.worktreePath && existsSync(run.worktreePath)) {
       const diff = await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD');
@@ -8364,15 +8653,7 @@ export class RunManager {
       }
       results.push({ ...result, max: entry.max });
     }
-    const failed = results.filter((result) => !result.ok);
-    if (failed.length === 0) return { ok: true, detail: results.map((result) => result.detail).filter(Boolean).join('\n') };
-    const first = failed[0] as PostconditionResult & { max: number };
-    return {
-      ok: false,
-      detail: failed.map((result) => result.detail).join('\n'),
-      ...(first.handoff ? { handoff: first.handoff } : {}),
-      retryMax: first.max,
-    };
+    return combineVerdicts(results);
   }
 
   /**
@@ -8476,6 +8757,123 @@ export class RunManager {
       `step "${stepId}" complete — status=${status}${stopReason ? ' (stopped, not failed)' : ''}`,
     );
   }
+
+  // ---- spec/review feed (spec 2026-08-29-spec-tab-review-feed, P1) ---------------------------
+  //
+  // Three write sites feed the same side log: the step loop snapshots a finished `spec` step
+  // (`recordSpecSnapshot`), the agent verdict block and both human "changes requested" branches
+  // record a review (`recordSpecReview`). Every one of them is fail-open by construction — this is
+  // a display feature bolted onto a workflow that ships code, and it must never be able to fail a
+  // run or reject a human's decision.
+
+  /**
+   * Redacted note for a spec-review write failure — errno/error name ONLY, never the thrown
+   * error's message or any path, since both can carry file text or host layout. Best-effort on top
+   * of best-effort: `store.appendEvent` throws for an unknown run, which this swallows too.
+   */
+  private noteSpecReviewFailure(runId: string, stepId: string | undefined, err: unknown): void {
+    const code =
+      err && typeof err === 'object' && 'code' in err && typeof (err as { code?: unknown }).code === 'string'
+        ? (err as { code: string }).code
+        : err instanceof Error
+          ? err.name
+          : 'unknown';
+    try {
+      this.store.appendEvent(runId, { type: 'note', stepId, message: `spec-review log unavailable (${code})` });
+    } catch {
+      // the run may already be gone from the store's map — nothing more to do
+    }
+  }
+
+  /** Recompute and persist `RunRecord.specReview` from the side log — called after every append.
+   *  Its own try/catch is deliberately SEPARATE from the append's: a summary-write failure (P1
+   *  test 10e) must not read as "the append failed" and must not stop the caller either. */
+  private updateSpecReviewSummary(runId: string, stepId: string | undefined): void {
+    try {
+      const entries = readSpecReviewEntries(this.dataDir, runId);
+      this.store.updateRun(runId, { specReview: summariseSpecReview(entries) });
+    } catch (err) {
+      this.noteSpecReviewFailure(runId, stepId, err);
+    }
+  }
+
+  /**
+   * Snapshot the file a just-finished step declared via `CEZ:SPEC_PATH=` into the run's
+   * spec-review side log. Called once per attempt, in the step loop, AFTER the step's own
+   * post-condition passed and BEFORE the review verdict is consulted — so the draft always
+   * precedes its verdict in the log, which is what lets `appendSpecReviewEntry` associate a
+   * review with "the latest spec entry already in the log" with no extra bookkeeping.
+   *
+   * The read is untrusted input (the path came from an agent's own turn text) and is bounded and
+   * containment-checked by `readWorktreePath` — reused rather than re-implemented, see that
+   * function's own doc comment for the checks (traversal, `.git` internals, a symlinked final
+   * component, an intermediate symlinked directory). A refused or unresolved path still gets an
+   * entry, with `missing`/`rejected` set and no `text` — "the step said it wrote a spec and there
+   * is no file there" is a fact worth surfacing, not skipping silently.
+   */
+  private async recordSpecSnapshot(
+    runId: string,
+    state: ActiveRun,
+    stepId: string,
+  ): Promise<void> {
+    const specPath = state.stepSpecPath;
+    // Spent regardless of outcome: a failed attempt must not make the NEXT attempt re-snapshot a
+    // path that may no longer describe what is on disk.
+    state.stepSpecPath = undefined;
+    if (!specPath) return;
+    try {
+      const result = await readWorktreePath(state.cwd, specPath, SPEC_SNAPSHOT_CAP);
+      const entry =
+        result.kind === 'file' && result.content !== undefined
+          ? { kind: 'spec' as const, stepId, specPath, source: 'recorded' as const, text: result.content }
+          : result.kind === 'invalid'
+            ? {
+                kind: 'spec' as const,
+                stepId,
+                specPath,
+                source: 'recorded' as const,
+                missing: true as const,
+                rejected: true as const,
+                error: result.error,
+              }
+            : result.kind === 'missing'
+              ? { kind: 'spec' as const, stepId, specPath, source: 'recorded' as const, missing: true as const, error: result.error }
+              : {
+                  kind: 'spec' as const,
+                  stepId,
+                  specPath,
+                  source: 'recorded' as const,
+                  missing: true as const,
+                  error:
+                    result.kind === 'file'
+                      ? result.binary
+                        ? `binary file, not snapshotted: ${specPath}`
+                        : `file too large to snapshot (${result.size} bytes): ${specPath}`
+                      : `declared path is a directory, not a file: ${specPath}`,
+                };
+      appendSpecReviewEntry(this.dataDir, runId, entry);
+      this.updateSpecReviewSummary(runId, stepId);
+    } catch (err) {
+      this.noteSpecReviewFailure(runId, stepId, err);
+    }
+  }
+
+  /** Append a `review` entry — `actor: 'agent'` for the `review-spec` step's own verdict (both
+   *  `pass` and `revise`), `actor: 'human'` for a person's decision at the approval gate. */
+  private recordSpecReview(
+    runId: string,
+    stepId: string,
+    actor: 'agent' | 'human',
+    verdict: ReviewVerdict,
+    report: string,
+  ): void {
+    try {
+      appendSpecReviewEntry(this.dataDir, runId, { kind: 'review', stepId, actor, verdict, report });
+      this.updateSpecReviewSummary(runId, stepId);
+    } catch (err) {
+      this.noteSpecReviewFailure(runId, stepId, err);
+    }
+  }
 }
 
 function runGit(
@@ -8518,17 +8916,24 @@ function findLastAgentStepIndex(workflow: WorkflowDef): number {
  * Prompt tokens. `{{task}}` is the original and the only one a user-written workflow file is
  * documented to use (`types.ts` header).
  *
- * `{{autoStart}}` was added 2026-08-25 for `input-to-tasks`'s optional `dispatch` step
- * (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`): that step has to know whether the run
- * was created with auto-start, and it is a per-RUN fact, not something the step can read from the
- * repo. It renders as the literal `true`/`false` so the prompt can compare against it in words.
+ * `{{autoStart}}` and `{{filedTodos}}` were added 2026-08-25 for the built-in `input-to-tasks`
+ * dispatch step (`.ai/specs/2026-08-25-composer-dispatch-mode.md`). Both are per-run facts read
+ * from the persisted record, so a restart gives the agent the same decision and ledger.
  *
  * Unknown tokens are LEFT ALONE, as they always were — `replaceAll` only touches what it matches.
  * That is deliberate: a workflow file containing `{{foo}}` gets it through to the agent verbatim
  * rather than an empty string, so a typo in a prompt is visible rather than silently blanked.
  */
-function applyTemplate(template: string, task: string, autoStart = false): string {
-  return template.replaceAll('{{task}}', task).replaceAll('{{autoStart}}', String(autoStart));
+export function formatFiledTodos(items: readonly FiledTodo[]): string {
+  if (items.length === 0) return '(none)';
+  return items.map((item) => `- ${item.todoId}  --project ${item.project}  ${item.summary}`).join('\n');
+}
+
+function applyTemplate(template: string, task: string, autoStart = false, filedTodos = '(none)'): string {
+  return template
+    .replaceAll('{{task}}', task)
+    .replaceAll('{{autoStart}}', String(autoStart))
+    .replaceAll('{{filedTodos}}', filedTodos);
 }
 
 /**

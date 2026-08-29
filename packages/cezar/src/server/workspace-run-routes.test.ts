@@ -6,6 +6,7 @@ import { apiRequest } from './loopback-request.testkit.ts';
 import type { ProjectApiEnv } from './server.ts';
 import type { RunRecord } from '../runs/store.ts';
 import type { StartRunInput } from '../workflows/run.ts';
+import { INPUT_TO_TASKS_WORKFLOW } from '../workflows/types.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
 import { buildWorkspaceGrant } from '../workspace/granted-roots.ts';
 
@@ -192,12 +193,12 @@ describe('POST /api/v1/workspace/runs', () => {
    */
   describe('input-to-tasks default and autoStart', () => {
     /** Records what the route asked `resolveWorkflow` for — the only place the default is visible. */
-    const asking = () => {
+    const asking = (resolvedWorkflow: WorkflowDef = WORKFLOW) => {
       const asked: Array<Record<string, unknown>> = [];
       const h = harness({
         resolveWorkflow: async (_root: string, opts: Record<string, unknown>) => {
           asked.push(opts);
-          return { workflow: WORKFLOW };
+          return { workflow: resolvedWorkflow };
         },
       } as Partial<WorkspaceRunRouteDeps>);
       return { ...h, asked };
@@ -241,6 +242,30 @@ describe('POST /api/v1/workspace/runs', () => {
         expect((await post(app, body)).status).toBe(201);
         expect(started[0]!.input.autoStart).toBe(expected);
       }
+    });
+
+    it.each([
+      [{ task: 'x' }, 2],
+      [{ task: 'x', autoStart: false }, 2],
+      [{ task: 'x', autoStart: true }, 3],
+    ] as const)('freezes %j into the built-in workflow topology', async (body, stepCount) => {
+      const { app, started } = asking(INPUT_TO_TASKS_WORKFLOW);
+      expect((await post(app, body)).status).toBe(201);
+      expect(started[0]!.workflow.steps).toHaveLength(stepCount);
+      expect(started[0]!.workflow.steps.some((step) => step.id === 'dispatch')).toBe(stepCount === 3);
+    });
+
+    it('leaves a named non-built-in workflow and an inline chain untouched', async () => {
+      const custom = { ...INPUT_TO_TASKS_WORKFLOW, name: 'spec-to-deploy' };
+      const named = asking(custom);
+      expect((await post(named.app, { task: 'x', workflow: 'spec-to-deploy', autoStart: false })).status).toBe(201);
+      expect(named.started[0]!.workflow).toBe(custom);
+
+      const inline = { ...WORKFLOW, name: 'inline' };
+      const inlineRun = asking(inline);
+      const steps = [{ id: 'only', prompt: '{{task}}' }];
+      expect((await post(inlineRun.app, { task: 'x', steps, autoStart: false })).status).toBe(201);
+      expect(inlineRun.started[0]!.workflow).toBe(inline);
     });
 
     it('rejects a non-boolean autoStart rather than coercing it', async () => {
