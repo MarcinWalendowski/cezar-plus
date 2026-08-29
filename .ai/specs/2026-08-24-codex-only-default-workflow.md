@@ -4,6 +4,15 @@
 as `8443096f`); Phase 6 (V8, the runtime E2E) has not run and needs explicit owner approval
 before it does, per this spec's own V8 section. Do not read this as `Implemented` until V8 has
 actually passed.
+
+**Superseding decision recorded, not yet shipped, 2026-08-29
+(`.ai/specs/2026-08-29-global-provider-toggle.md`, D2/D6):** once a global provider lock exists and
+its dispatch-time enforcement (that spec's D4) is wired, a lock will outrank the workflow-variant
+pin this spec created too — D8 below will then hold only when no lock is set. **As shipped today
+(`58f5ede5`, merged `b3a7c153`) the lock has no effect on dispatch** — `applyRunnerLock` exists and
+is unit-tested but is never called from `run.ts`'s actual dispatch path (see that spec's "Known
+implementation gap") — so D8 remains exactly as true as when this spec was written. Do not read
+this note as D8 already being overridden.
 **Date:** 2026-08-24
 **Repo:** `cezar`
 **Read at:** `e38cb619` (worktree `a15215ef`, clean, tracking `origin/main`)
@@ -380,6 +389,10 @@ deliberately out of scope. `pinWorkflowRunner` is generic and takes any `Workflo
 later is a one-line registration, not a redesign.
 
 ### D8. When the engine pill and the workflow disagree, the workflow wins, visibly
+
+**See the spec-level banner above:** `.ai/specs/2026-08-29-global-provider-toggle.md` records the
+decision that a global lock should outrank this too, but its dispatch-time enforcement is not
+wired yet, so this section is still current behaviour as written.
 
 A user can pick `default (codex)` and then pick `claude` in the runner pill. The step pin wins
 (`run.ts:6304`), which is correct and is the whole point of D2, but it renders as a contradiction.

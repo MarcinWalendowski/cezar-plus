@@ -914,6 +914,14 @@ const SPEC_AUTHORING_MODEL = 'opus';
  * `pinWorkflowRunner`/`SPEC_TO_DEPLOY_CODEX_NAME` below for the opt-in sibling that pins all nine
  * to codex, `spec` included.
  *
+ * **CORRECTED AGAIN 2026-08-29 (`.ai/specs/2026-08-29-global-provider-toggle.md`, found
+ * re-reading the chain for that spec's P3):** the correction above was itself already stale when
+ * written — the same D1 that moved `review-spec` to codex also added `review-spec-local`, which
+ * pins `runner: SPEC_AUTHORING_RUNNER` (Claude) too. The chain is TEN steps, not nine, and THREE
+ * are pinned, not two: `spec` and `review-spec-local` on Claude, `review-spec` on codex. Seven of
+ * ten carry no runner (the count of unpinned steps happens to still be seven; only the denominator
+ * and the Claude-pin count were wrong). The opt-in sibling pins all TEN, not nine.
+ *
  * Original text follows, unedited:
  *
  * `spec` and `review-spec` pin the RUNNER as well as the model, and the runner pin is what makes

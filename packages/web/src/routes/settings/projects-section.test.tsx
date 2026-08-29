@@ -95,6 +95,7 @@ function serve(answers: Answers = {}) {
   const config: WorkspaceConfigResponse = {
     agentDefaults: {},
     projectDefaults: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
+    runnerLock: null,
     browseRoot: '~/',
     projectsDir: '~/cezar/projects',
     composerDefaults: {

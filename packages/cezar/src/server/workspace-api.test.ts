@@ -111,6 +111,9 @@ describe('the workspace settings API (step 2.7)', () => {
       // the `composerDefaults` convention, not `agentDefaults`' optional-key one — because a UI
       // has to tell "the machine says nothing" from "the machine says false".
       projectDefaults: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
+      // The global provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`). `null` = Auto,
+      // ALWAYS present on the wire, same convention as `projectDefaults`.
+      runnerLock: null,
     });
     // Absolute project roots belong on /api/v1/projects; schemaVersion is a
     // migration cursor, not a setting.
@@ -159,6 +162,7 @@ describe('the workspace settings API (step 2.7)', () => {
       // unrelated questions, so one must never materialize the other.
       agentDefaults: {},
       projectDefaults: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
+      runnerLock: null,
     });
     // Round-trip through GET and the raw file.
     expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).resources.maxParallel).toBe(5);
@@ -427,6 +431,161 @@ describe('the workspace settings API (step 2.7)', () => {
     });
     expect(res.status).toBe(400);
     expect((await res.json()) as { error: string }).toHaveProperty('error');
+  });
+
+  // ---- the global provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, V4) --------
+
+  const putProviderEnabled = (provider: string, enabled: boolean) =>
+    apiRequest(app, `/api/v1/providers/${provider}/enabled`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+
+  it('PUT sets the lock, GET reflects it, and the semaphore accessor moves without a restart', async () => {
+    const res = await putConfig({ runnerLock: 'claude' });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as WorkspaceConfigResponse).runnerLock).toBe('claude');
+    expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).runnerLock).toBe('claude');
+    expect(semaphore.runnerLock()).toBe('claude');
+  });
+
+  it('PUT { runnerLock: null } clears the lock back to Auto', async () => {
+    await putConfig({ runnerLock: 'codex' });
+    const res = await putConfig({ runnerLock: null });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as WorkspaceConfigResponse).runnerLock).toBeNull();
+    expect(semaphore.runnerLock()).toBeUndefined();
+  });
+
+  it('a PUT omitting runnerLock leaves it untouched (partial-patch rule)', async () => {
+    await putConfig({ runnerLock: 'claude' });
+    await putConfig({ resources: { maxParallel: 4 } });
+    expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).runnerLock).toBe('claude');
+  });
+
+  it('rejects locking to a disabled provider with 400, persisting nothing', async () => {
+    await putProviderEnabled('codex', false);
+    const before = rawConfig();
+    const res = await putConfig({ runnerLock: 'codex' });
+    expect(res.status).toBe(400);
+    expect(rawConfig()).toEqual(before);
+    expect(semaphore.runnerLock()).toBeUndefined();
+  });
+
+  it('rejects a lock naming a non-lockable provider with 400 from the schema', async () => {
+    for (const bad of ['pi', 'opencode']) {
+      const res = await putConfig({ runnerLock: bad });
+      expect(res.status, bad).toBe(400);
+    }
+    expect(() => readFileSync(workspaceConfigPath(), 'utf8')).toThrow(); // never created
+  });
+
+  it('a garbage runnerLock on disk degrades to no lock, and every other key survives', async () => {
+    writeFileSync(
+      workspaceConfigPath(),
+      JSON.stringify({ browseRoot: '~/kept', runnerLock: 'gpt-5' }),
+      'utf8',
+    );
+    const body = (await (await getConfig()).json()) as WorkspaceConfigResponse;
+    expect(body.runnerLock).toBeNull();
+    expect(body.browseRoot).toBe('~/kept');
+  });
+
+  it('disabling the locked provider clears the lock AND the semaphore accessor immediately', async () => {
+    await putConfig({ runnerLock: 'codex' });
+    expect(semaphore.runnerLock()).toBe('codex');
+    const res = await putProviderEnabled('codex', false);
+    expect(res.status).toBe(200);
+    expect(((await (await getConfig()).json()) as WorkspaceConfigResponse).runnerLock).toBeNull();
+    // D7 #3: this route called no `refresh()` at all before this feature — the accessor must move
+    // WITHOUT any other write happening first.
+    expect(semaphore.runnerLock()).toBeUndefined();
+  });
+
+  it('disabling an unlocked provider does not touch the lock', async () => {
+    await putConfig({ runnerLock: 'claude' });
+    await putProviderEnabled('codex', false);
+    expect(semaphore.runnerLock()).toBe('claude');
+  });
+
+  it('D7 #2: a lock-only PUT (no resources key at all) still refreshes the semaphore', async () => {
+    // A body that also sets `maxParallel` would pass on the OLD `if (resources !== undefined)`
+    // gate and prove nothing — this body carries exactly one key.
+    const res = await putConfig({ runnerLock: 'claude' });
+    expect(res.status).toBe(200);
+    expect(semaphore.runnerLock()).toBe('claude');
+  });
+
+  it('D3b item 2: a lock-only PUT reaches every registered participant\'s onRunnerLockChanged, before the pump', async () => {
+    const calls: string[] = [];
+    const unregister = semaphore.register({
+      busySlots: () => 0,
+      pump: () => {
+        calls.push('pump');
+      },
+      oldestQueuedAt: () => null,
+      onRunnerLockChanged: () => {
+        calls.push('lock-changed');
+      },
+    });
+    try {
+      await putConfig({ runnerLock: 'claude' });
+      expect(calls).toContain('lock-changed');
+      // Ordering: the hook must run before the pump sweep, or the first sweep after a lock
+      // change still holds runs back on the old verdict.
+      expect(calls.indexOf('lock-changed')).toBeLessThan(calls.indexOf('pump'));
+    } finally {
+      unregister();
+    }
+  });
+
+  it('D7a negatives: onRunnerLockChanged is NOT called when nothing actually transitioned', async () => {
+    let calls = 0;
+    const unregister = semaphore.register({
+      busySlots: () => 0,
+      pump: () => {},
+      oldestQueuedAt: () => null,
+      onRunnerLockChanged: () => {
+        calls += 1;
+      },
+    });
+    try {
+      // (i) setting the lock to the value it already has is not a transition.
+      await putConfig({ runnerLock: 'claude' });
+      expect(calls).toBe(1);
+      await putConfig({ runnerLock: 'claude' });
+      expect(calls).toBe(1);
+      // clearing an already-clear lock is not a transition either.
+      await putConfig({ runnerLock: null });
+      expect(calls).toBe(2);
+      await putConfig({ runnerLock: null });
+      expect(calls).toBe(2);
+      // (ii) a refresh that carries no lock at all — a resources-only PUT.
+      await putConfig({ resources: { maxParallel: 6 } });
+      expect(calls).toBe(2);
+    } finally {
+      unregister();
+    }
+  });
+
+  it('D7a negative (iii): a failed load() fires no hook, keeping the last good snapshot', async () => {
+    let calls = 0;
+    const throwing = new WorkspaceSemaphore({
+      load: () => Promise.reject(new Error('boom')),
+      initial: { runnerLock: 'claude' as const },
+    });
+    throwing.register({
+      busySlots: () => 0,
+      pump: () => {},
+      oldestQueuedAt: () => null,
+      onRunnerLockChanged: () => {
+        calls += 1;
+      },
+    });
+    await throwing.refresh();
+    expect(calls).toBe(0);
+    expect(throwing.runnerLock()).toBe('claude'); // last good snapshot, unmoved
   });
 
   // ---- GET/PUT /api/v1/workspace/ui-state -------------------------------------

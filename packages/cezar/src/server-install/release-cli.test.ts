@@ -362,7 +362,7 @@ describe('releaseDeployCommand rollback', () => {
       async waitReady() { return results[probe++] ?? { ok: true }; },
       freeBytes: () => Number.POSITIVE_INFINITY,
       now: () => '2026-08-22T00:00:04.000Z',
-      spawnDetached() {},
+      spawnDetached: () => ({ ok: true }),
       systemdRunAvailable: () => false,
       cgroup: () => '0::/user.slice/cezar-runs.slice',
       killMode: () => 'process',

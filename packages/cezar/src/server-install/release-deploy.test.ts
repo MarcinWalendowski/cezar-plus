@@ -64,7 +64,10 @@ describe('runReleaseDeploy', () => {
       },
       freeBytes: () => Number.POSITIVE_INFINITY,
       now: () => new Date(Date.parse('2026-08-21T09:00:00.000Z') + nowTick++ * 1_000).toISOString(),
-      spawnDetached: (argv) => rec.detached.push(argv),
+      spawnDetached: (argv) => {
+        rec.detached.push(argv);
+        return { ok: true };
+      },
       systemdRunAvailable: () => false,
       cgroup: () => '0::/user.slice/session-1.scope',
       ...overrides,
@@ -121,6 +124,40 @@ describe('runReleaseDeploy', () => {
     expect(rec.detached).toHaveLength(1);
     expect(rec.detached[0]?.[0]).toBe('systemd-run');
     // Nothing was staged, flipped or restarted by THIS process — it is only the launcher now.
+    expect(rec.staged).toEqual([]);
+    expect(rec.restarts).toBe(0);
+  });
+
+  /**
+   * MEASURED 2026-08-29. `systemd-run` fails for ordinary, recoverable reasons — no session bus
+   * inside `cezar.service`, an `append:` target under `/var/log/cezar` a service account cannot
+   * create — and `spawnDetached` returned `void`, so every one of them was reported as a started
+   * deploy carrying a `detachedUnit`. The caller then waits for a release that will never appear,
+   * which is indistinguishable from a hung deploy.
+   *
+   * Nothing has been staged or flipped at this point, so failing here is both safe and honest.
+   */
+  it('reports a FAILED handoff as a failure, not as a detached deploy', async () => {
+    const box = migratedBox();
+    const attempted: string[][] = [];
+    const rec = recorder({
+      systemdRunAvailable: () => true,
+      cgroup: () => '0::/system.slice/cezar.service',
+      spawnDetached: (argv: string[]) => {
+        attempted.push(argv);
+        return { ok: false, error: 'Failed to connect to user scope bus via local transport' };
+      },
+    });
+    const result = await runReleaseDeploy({ ...box, env: {} }, rec.host);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('transient unit did not start');
+    expect(result.error).toContain('user scope bus');
+    // The decisive one: no unit id handed back for something that never started.
+    expect(result.detachedUnit).toBeUndefined();
+    // …and it really did try, rather than failing earlier for an unrelated reason.
+    expect(attempted).toHaveLength(1);
+    expect(attempted[0]?.[0]).toBe('systemd-run');
     expect(rec.staged).toEqual([]);
     expect(rec.restarts).toBe(0);
   });

@@ -104,3 +104,29 @@ export function needsOnboardingGate(probe: OnboardingProbe | undefined): boolean
   if (probe.kind === 'needs-org') return true
   return probe.kind === 'ready' && !probe.hasProjects
 }
+
+/**
+ * `.ai/specs/2026-08-29-global-provider-toggle.md` D9: whether `AppShellContainer` may pass a
+ * `globalBar` to `AppShell` at all. **Finer-grained than `needsOnboardingGate` above** — that
+ * function answers one boolean for three states that are NOT alike from the global lock bar's
+ * point of view:
+ *
+ * | probe | `needsOnboardingGate` (chromeless) | this function (bar) |
+ * | --- | --- | --- |
+ * | `signed-out` | `true` | **`false`** — an authentication boundary. No session, so
+ *   `GET`/`PUT /workspace/config` cannot be read or written; a control there would 401 or lie. |
+ * | `needs-org` | `true` | `true` — authenticated, the workspace config is fully readable and
+ *   writable, and the lock the user sets here is the lock their first run will use. |
+ * | `ready && !hasProjects` | `true` | `true`, same reasoning. |
+ * | `unavailable`, `needs-invite`, `ready && hasProjects` | `false` | `true` — the ordinary
+ *   cockpit, which already gets the bar like every other screen. |
+ *
+ * `undefined` (still loading, or the probe errored) reads as `false`, the conservative default:
+ * unlike `needsOnboardingGate`'s "don't strand a returning user behind a blank gate", showing the
+ * bar before we know the probe is not `signed-out` risks a flash of a control that immediately
+ * 401s.
+ */
+export function allowsGlobalBar(probe: OnboardingProbe | undefined): boolean {
+  if (probe === undefined) return false
+  return probe.kind !== 'signed-out'
+}

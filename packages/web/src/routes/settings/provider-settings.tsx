@@ -8,12 +8,18 @@ import {
   useRetryProviderAuth,
   workspaceQueryKeys,
 } from '@/api/queries'
-import type { ProviderId, ProviderStatusResponse } from '@loki-labs/better-cezar-api-client'
+import type {
+  ProviderId,
+  ProviderStatusResponse,
+  WorkspaceConfigResponse,
+} from '@loki-labs/better-cezar-api-client'
+import { EngineLockBarContainer } from '@/components/engine-lock-bar'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toaster'
 import { providerStatusFor } from '@/lib/provider-status'
+import { SettingsField } from './settings-field'
 
 const PROVIDERS = [
   { id: 'claude', label: 'Claude Code', login: 'claude auth login' },
@@ -104,6 +110,21 @@ export function ProviderSettings() {
       writeChain.current = writeChain.current.then(async () => {
         try {
           const confirmed = await setProviderEnabled(provider, enabled)
+          // D10a (`.ai/specs/2026-08-29-global-provider-toggle.md`): disabling the LOCKED
+          // provider clears `runnerLock` to `null` server-side (D10), but this write only ever
+          // touches `workspaceQueryKeys.providerStatus` — the mounted global lock bar would keep
+          // rendering the stale value until something else refetches `workspace/config`. Only
+          // for a successful disable, guarded on the cache still showing THIS provider as the
+          // lock (enabling can never clear a lock; disabling an unlocked provider changes none),
+          // and never in the `catch` branch below — a rolled-back toggle cleared no lock either.
+          if (enabled === false) {
+            const cachedConfig = queryClient.getQueryData<WorkspaceConfigResponse>(
+              workspaceQueryKeys.config,
+            )
+            if (cachedConfig?.runnerLock === provider) {
+              void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.config })
+            }
+          }
           const confirmedEnabled = providerStatusFor(confirmed, provider)?.enabled
           if (confirmedEnabled === undefined) return
           lastConfirmed.current = withProviderEnabled(

@@ -1,6 +1,26 @@
 # Verify Active Backlog Tables
 
-- **Status:** Specified (no code written by this step)
+- **Status:** **CORRECTED 2026-08-29 (same run) — Phases 1-3 implemented, not "no code written."**
+  The candidate-condition launch probe (D2/D3) landed in `.ai/scripts/test-env-up.sh`
+  (Phase 1); the boot and gate (Phases 2-3) ran for real: `sh .ai/scripts/test-env-up.sh`
+  booted past the hosted-no-auth gate, and
+  `npx vitest run --config packages/web/e2e/vitest.config.ts filed-partitions` passed, writing
+  all seven artifacts to `.ai/qa/artifacts_e2e/` (five PNGs, `filed-partitions-verdict.json`,
+  `filed-partitions-deployed-requests.json`). The verdict matches Verification item 4 exactly:
+  `initial = {active: 20, backlog: 30}`, both `appendedOnly`/`*Unchanged` true, both `showMore`
+  analytics events present, request-phase counts `2/1/1/1/1` with the expected `partition` and
+  `fasort`/`fbsort` query keys on each. This work was committed alongside the spec text itself in
+  `3e6f77c2` ("docs: split the Active/Backlog E2E verification into its own spec" — a misleading
+  message for a commit that also shipped the harness fix and ran the gate), merged into
+  `origin/main` as `54ff9bc1`, confirmed a direct ancestor of `origin/main`'s current tip.
+  **Not yet run: Phase 4 (§10a, the deployed-bytes check against the live `/opt/cezar` bundle)**
+  — `filed-partitions-deployed-requests.json` on disk still reads `deployed: false` with
+  `serverCli` pointing at this worktree's own build, not `/opt/cezar/packages/cezar/dist/index.js`,
+  so that check has not executed even once. **Not run, and not an agent step: §10b, the owner's
+  authenticated pass on `https://cockpit.example.com`** (`AGENTS.md:614-622`). Both are tracked as
+  todo `7e35a93d-18ec-4afc-a5b3-eaaac14a1a0b`. **Until both close, this is QA Needed, not Done.**
+  See Results below for the full numbers. Original text, kept for the record:
+  ~~Specified (no code written by this step)~~
 - **Date:** 2026-08-29
 - **Task:** `265c2695-f524-4a40-b0e8-d613cf1a31fd`, workflow `spec-to-deploy`, branch `cez/265c2695`
 - **Brief:** step 1 of this run left one at
@@ -995,14 +1015,54 @@ Every step names its command and its artifact. Nothing here is satisfied by pros
       landed:** `cez kb search` will not find it until a human applies the proposal, and saying
       otherwise would be the same "a corpus write is not a KB write" failure in a different
       costume.
-    - **Tracker:** `1da9c2bb-fec2-43b9-9f91-4f13eb32fcc4` is `in-progress` (this tracker has no
-      `qa-needed`), and the reason is stated: §10b has not run.
+    - **Tracker: CORRECTED 2026-08-29 (document step) — not hand-flipped to `in-progress`.**
+      `todos.json` has no CLI to transition an existing row's status (only `add`, `start`,
+      `list`); hand-editing the live file the running cezar server also owns risks a lost update
+      against a concurrent write, so this step follows this same run's own precedent
+      (`2095597b`, `eb854e91`: leave the originating row alone, file a fresh todo for what
+      remains) instead. The originating row `1da9c2bb-fec2-43b9-9f91-4f13eb32fcc4` is left as
+      filed; the remaining work (§10a, §10b) is tracked as new todo
+      `7e35a93d-18ec-4afc-a5b3-eaaac14a1a0b`, referencing this spec.
 12. **Ownership**: `find /var/lib/cezar -not -user cezar | wc -l` = `0` at the end of the session.
 
 ## Results
 
-*(Filled in by Phase 3 and Phase 4. Empty is the honest state until they run; do not
-pre-populate.)*
+**Phase 1-3, local: PASS.** Filled in by the document step (2026-08-29) reading the artifacts
+Phase 3 actually left on disk, not re-run here.
+
+- Launch probe (Verification 1-2): the candidate loop in `.ai/scripts/test-env-up.sh:288-446`
+  is present and is the code path that produced the descriptor `.ai/qa/test-env.json` this run
+  consumed.
+- Gate (Verification 4): `.ai/qa/artifacts_e2e/filed-partitions-verdict.json` (mtime
+  2026-08-29T15:44:29Z) shows `initial: {active: 20, backlog: 30}`; `activeExpansion` and
+  `backlogExpansion` both carry `appendedOnly: true` and `backlogUnchanged`/`activeUnchanged:
+  true`; every row id matches the `fixture:<id>` shape the composite key check expects.
+  `analytics.partitionViewed = ["active", "backlog"]`, `analytics.sorted` carries one entry per
+  partition (`priority asc` on Active, `task asc` on Backlog), `analytics.showMore` carries
+  exactly the two expected objects. `requests[].count` reads `2, 1, 1, 1, 1` for
+  `load, sort-active, sort-backlog, expand-active, expand-backlog`, each URL carrying the
+  expected `partition` and, for the sort/expand phases, the expected `fasort`/`fbsort` key. The
+  five PNGs (`both-sections`, `active-sorted-priority`, `backlog-sorted-task`,
+  `active-expanded`, `backlog-expanded`) are present and non-empty.
+- Gates green (Verification 8): re-confirmed on the merged `54ff9bc1` tree by the commit-push
+  step (2026-08-29T15:55Z): `npm run typecheck` exit 0, `npm test` 12142 passed / 4 skipped / 0
+  failed.
+- No leaked browser (Verification 7): not independently re-checked by this document step;
+  `pgrep -fc 'chrome|chromium'` on this box currently reports 1 live process, of unknown
+  origin (not attributed to this task's run, which closed its session before this step started).
+  Carried forward as an open question rather than asserted either way.
+
+**Phase 4 / §10a, deployed bytes: NOT RUN.** `.ai/qa/artifacts_e2e/filed-partitions-deployed-requests.json`
+reads `"deployed": false`, `"liveSha": null`, `"serverCli"` pointing at this worktree's own
+`packages/cezar/dist/index.js` rather than `/opt/cezar/packages/cezar/dist/index.js`. No assertion
+in Verification item 9 has been checked against the live bundle.
+
+**§10b, production: NOT RUN.** Not an agent step; the owner has not yet made the pass.
+
+**Verdict: QA Needed, not Done.** Ten of the design spec's eleven acceptance clauses are met by
+landed, gated tests plus the Phase 3 artifacts above. The eleventh — the deployed/production half
+of "browser E2E artifacts prove both sections" — is unmet. Tracked as todo
+`7e35a93d-18ec-4afc-a5b3-eaaac14a1a0b`.
 
 ## What could not be confirmed
 

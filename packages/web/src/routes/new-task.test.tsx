@@ -176,6 +176,7 @@ const CONFIG: ConfigResponse = {
 const WORKSPACE_CONFIG: WorkspaceConfigResponse = {
   agentDefaults: {},
   projectDefaults: { systemPrompt: null, liveTitleUpdates: null, reviewGate: null, stepBudget: null },
+  runnerLock: null,
   browseRoot: '~/',
   projectsDir: '~/cezar/projects',
   composerDefaults: {

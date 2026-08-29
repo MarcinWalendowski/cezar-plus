@@ -1,4 +1,9 @@
-import { DEFAULT_AGENT_ACCOUNT_ID, parseAgentRoute, type AgentRoute } from '@loki-labs/better-cezar-contract';
+import {
+  DEFAULT_AGENT_ACCOUNT_ID,
+  parseAgentRoute,
+  type AgentRoute,
+  type LockableRunner,
+} from '@loki-labs/better-cezar-contract';
 import type {
   ProviderId,
   ProviderStatusResponse,
@@ -172,6 +177,14 @@ export interface WorkflowRunRequirementsInput {
    *  `options.agentProfile ?? selectionFor(...)` (`agent-route-select.ts:263-265`). */
   overrideAgentProfile: string | undefined;
   fallbackAcrossAccountsWhenLimited: boolean;
+  /** The global provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D4b). When set, it
+   *  overrides every setting below it: the run-level requirement is computed against the LOCKED
+   *  provider, re-deriving its route from the locked provider's own stored selection rather than
+   *  inheriting `overrideAgentProfile`/`fallback` (same provider-scoped-account reason as D6a), and
+   *  no per-step requirement is emitted for a step whose pin the lock overrides — that pin will not
+   *  be honoured, so demanding its provider be viable would refuse a run over a provider it will
+   *  never touch (the gate-tier mirror of D2 rank 2). */
+  runnerLock: LockableRunner | undefined;
 }
 
 /**
@@ -183,16 +196,22 @@ export interface WorkflowRunRequirementsInput {
  * workflow dispatches nothing, so nothing needs to be viable.
  */
 export function requirementsForWorkflowRun(input: WorkflowRunRequirementsInput): DispatchRequirement[] {
-  const { workflow, accounts, repoRoot, fallback, overrideAgentProfile, fallbackAcrossAccountsWhenLimited } = input;
+  const { workflow, accounts, repoRoot, fallback, overrideAgentProfile, fallbackAcrossAccountsWhenLimited, runnerLock } = input;
   if (!workflow.steps.some((step) => stepKind(step) === 'agent')) return [];
-  const runRoute = parseAgentRoute(overrideAgentProfile ?? selectionFor(accounts, repoRoot, fallback));
+  const runRoute = runnerLock
+    ? parseAgentRoute(selectionFor(accounts, repoRoot, runnerLock))
+    : parseAgentRoute(overrideAgentProfile ?? selectionFor(accounts, repoRoot, fallback));
   const requirements: DispatchRequirement[] = [
     {
-      provider: runLevelProvider(runRoute, fallback, accounts),
+      provider: runnerLock ?? runLevelProvider(runRoute, fallback, accounts),
       route: runRoute,
       reroutable: runRoute.kind === 'pool' ? true : fallbackAcrossAccountsWhenLimited,
     },
   ];
+  // Under a lock, every agent step effectively pins to the lock (D3), so a per-step requirement
+  // for the step's OWN pin would demand viability of a provider the run will never touch. The
+  // run-level requirement above already covers what actually runs.
+  if (runnerLock !== undefined) return requirements;
   const pinned = new Set<ProviderId>();
   for (const step of workflow.steps) {
     if (stepKind(step) !== 'agent' || step.runner === undefined || pinned.has(step.runner)) continue;
@@ -218,11 +237,17 @@ export function requirementForExistingRun(
   run: RunRecord,
   overrideProvider: ProviderId | undefined,
   fallbackAcrossAccountsWhenLimited: boolean,
+  /** D4b: the locked provider wins over the run's own session/account, and — same
+   *  provider-scoped-account reason as D6a — the route is RE-DERIVED for it (a `pool:*` naming the
+   *  locked provider) rather than inherited from a session that may belong to the other provider. */
+  runnerLock: LockableRunner | undefined,
 ): DispatchRequirement {
   const sessionStep = [...run.steps].reverse().find((step) => step.sessionId);
-  const route = parseAgentRoute(sessionStep?.profileId ?? run.agentProfile);
+  const route = runnerLock
+    ? ({ kind: 'pool', provider: runnerLock } as const)
+    : parseAgentRoute(sessionStep?.profileId ?? run.agentProfile);
   return {
-    provider: providerForExistingRun(run, overrideProvider),
+    provider: runnerLock ?? providerForExistingRun(run, overrideProvider),
     route,
     reroutable: route.kind === 'pool' ? true : fallbackAcrossAccountsWhenLimited,
   };
@@ -236,10 +261,14 @@ export function requirementForRetarget(
   run: RunRecord,
   target: { runner?: ProviderId; agentProfile?: string },
   fallbackAcrossAccountsWhenLimited: boolean,
+  /** D4b/D6a, same reasoning as `requirementForExistingRun`. */
+  runnerLock: LockableRunner | undefined,
 ): DispatchRequirement {
-  const route = parseAgentRoute(target.agentProfile ?? run.agentProfile);
+  const route = runnerLock
+    ? ({ kind: 'pool', provider: runnerLock } as const)
+    : parseAgentRoute(target.agentProfile ?? run.agentProfile);
   return {
-    provider: providerForExistingRun(run, target.runner),
+    provider: runnerLock ?? providerForExistingRun(run, target.runner),
     route,
     reroutable: route.kind === 'pool' ? true : fallbackAcrossAccountsWhenLimited,
   };
@@ -259,10 +288,16 @@ export function requirementForPlanner(
   accounts: Pick<AgentAccountStore, 'accounts' | 'selections' | 'defaults'>,
   repoRoot: string,
   fallbackAcrossAccountsWhenLimited: boolean,
+  /** D4b: `/plan` is behind this gate, and a lock overrides `defaultRunner` here exactly as it
+   *  does at every other entry point — re-deriving the route for the locked provider's OWN stored
+   *  selection, never the unlocked default's. This requirement's `runnable` set is also what
+   *  `planChain`'s injected chooser picks from (D4c), so this edit is not only about the refusal. */
+  runnerLock: LockableRunner | undefined,
 ): DispatchRequirement {
-  const route = parseAgentRoute(selectionFor(accounts, repoRoot, defaultRunner));
+  const provider = runnerLock ?? defaultRunner;
+  const route = parseAgentRoute(selectionFor(accounts, repoRoot, provider));
   return {
-    provider: defaultRunner,
+    provider,
     route,
     reroutable: route.kind === 'pool' ? true : fallbackAcrossAccountsWhenLimited,
   };

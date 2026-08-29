@@ -1383,6 +1383,16 @@ the other doesn't.
 
 ### D14 — the cockpit is gated on onboarding, and logout exists
 
+**NARROWED 2026-08-29 (`.ai/specs/2026-08-29-global-provider-toggle.md`, D9) — a live decision
+being scoped, not a stale fact.** The global provider lock bar (`EngineLockBar`, shipped in
+`58f5ede5`) is machine-wide state, not a dashboard element, so it renders on the two
+*authenticated* states this gate covers — `needs-org` and `ready && !hasProjects` — where the
+session exists to read and write `workspace/config` with, while `signed-out` keeps this decision
+exactly as written below: no session, no bar, no dashboard. Implemented via
+`allowsGlobalBar(onboardingProbe.data)` in `packages/web/src/routes/onboarding/onboarding-gate.ts`,
+wired at `packages/web/src/components/app-shell-container.tsx:93,193`. Everything below continues
+to describe the wizard-only surface for the states it always covered.
+
 **Owner decision, 2026-08-07. This REVERSES D13's repair-round-3 "decline" behaviour**
 (`onboarding-decline.ts`, the "Not now" button, and the Settings re-entry path added to
 make declining reversible). Those were added because a reviewer objected that an

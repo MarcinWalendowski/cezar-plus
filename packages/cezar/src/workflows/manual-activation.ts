@@ -51,9 +51,18 @@ export const ACTIVATION_LOCK_TTL_MS = 15 * 60 * 1000;
  * actually reported red, so a green service is never redeployed to satisfy a different one.
  */
 export function readActivationCommands(cwd: string, failing: readonly string[]): ActivationCommand[] {
+  try {
+    return selectActivations(readFileSync(join(cwd, DEPLOY_TARGETS_FILE), 'utf8'), failing);
+  } catch {
+    return [];
+  }
+}
+
+/** The shared half: parse one targets document and pick the runnable activations out of it. */
+function selectActivations(source: string, failing: readonly string[]): ActivationCommand[] {
   let parsed;
   try {
-    parsed = deployTargetsSchema.safeParse(JSON.parse(readFileSync(join(cwd, DEPLOY_TARGETS_FILE), 'utf8')));
+    parsed = deployTargetsSchema.safeParse(JSON.parse(source));
   } catch {
     return [];
   }
@@ -71,6 +80,32 @@ export function readActivationCommands(cwd: string, failing: readonly string[]):
     else seen.set(t.activate, { name: t.name, command: t.activate });
   }
   return [...seen.values()];
+}
+
+/**
+ * The same declaration, read from a git REF instead of a working tree.
+ *
+ * The project-root fallback exists for a run whose own worktree predates the feature — but on this
+ * box the project root is the SHARED checkout task worktrees fork from, and nothing brings it
+ * forward: `activate-main.sh` refuses to `reset --hard` there by design, and agents fetch without
+ * pulling. Measured 2026-08-29: 22 commits behind `origin/main` with 4 dirty files. Reading its
+ * working tree is therefore reading a snapshot from whenever someone last touched it.
+ *
+ * A ref has none of that. `git show origin/main:<file>` is current the moment anything fetched, is
+ * unaffected by dirty files, and needs no checkout to be mutated. Worktrees already resolve their
+ * base this way (`resolveBaseRef` prefers `origin/<base>` when the local branch is behind), so this
+ * keeps the two answers consistent instead of inventing a third.
+ */
+export function readActivationCommandsFromRef(
+  repoRoot: string,
+  ref: string,
+  failing: readonly string[],
+): ActivationCommand[] {
+  const shown = spawnSync('git', ['-C', repoRoot, 'show', `${ref}:${DEPLOY_TARGETS_FILE}`], {
+    encoding: 'utf8',
+  });
+  if (shown.status !== 0 || !shown.stdout) return [];
+  return selectActivations(shown.stdout, failing);
 }
 
 /**
