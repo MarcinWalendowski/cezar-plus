@@ -3552,10 +3552,14 @@ export class RunManager {
             `running on ${target} instead`,
         });
         // Named now (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, Analytics), alongside
-        // the note above: nine steps can downgrade on `spec-to-deploy-codex` where the default
-        // chain has two, so the promise is degraded LOUDLY rather than silently. `reason` is a
-        // named field rather than an implied constant so a second downgrade cause does not
-        // silently merge into the quota number.
+        // the note above: CORRECTED 2026-08-29 (`.ai/specs/2026-08-29-global-provider-toggle.md`,
+        // found re-reading the chain for that spec's P3) — ten steps can downgrade on
+        // `spec-to-deploy-codex` where the default chain has three (`spec`/`review-spec-local` on
+        // Claude, `review-spec` on codex), not nine/two: `review-spec-local` was added by
+        // `.ai/specs/2026-08-24-default-workflow-ten-stages.md` D1 after this comment was written.
+        // The promise is degraded LOUDLY rather than silently either way. `reason` is a named
+        // field rather than an implied constant so a second downgrade cause does not silently
+        // merge into the quota number.
         this.store.appendEvent(runId, {
           type: 'metric',
           stepId: step.id,
@@ -7299,10 +7303,15 @@ export class RunManager {
     // say "`spec-to-deploy` pins `runner: claude` + `opus` on `spec`/`review-spec`" from the
     // owner's 2026-08-22 "writing spec + spec review should be by opus always" — stale since
     // `.ai/specs/2026-08-24-default-workflow-ten-stages.md` D1 moved `review-spec` to `runner:
-    // 'codex'`. Today only `spec` pins Claude; the opt-in `spec-to-deploy-codex` sibling
-    // (`pinWorkflowRunner` in `workflows/types.ts`) pins all nine steps to codex instead. When
-    // EVERY account of a pinned provider is out of quota, that pin has nowhere to go and the step
-    // used to die there.
+    // 'codex'`.
+    // CORRECTED AGAIN 2026-08-29 (`.ai/specs/2026-08-29-global-provider-toggle.md`, found
+    // re-reading the chain for that spec's P3): "today only `spec` pins Claude" was already stale
+    // when the line above was written — `review-spec-local` (added by the same
+    // `default-workflow-ten-stages.md` D1) also pins `runner: SPEC_AUTHORING_RUNNER` (Claude).
+    // Three of ten steps are pinned today (`spec`, `review-spec-local` on Claude, `review-spec` on
+    // codex), not one of nine. The opt-in `spec-to-deploy-codex` sibling (`pinWorkflowRunner` in
+    // `workflows/types.ts`) pins all TEN steps to codex, not nine. When EVERY account of a pinned
+    // provider is out of quota, that pin has nowhere to go and the step used to die there.
     //
     // The owner's 2026-08-23 ruling is that availability outranks the pin: proceed on whatever is
     // available and say so. So the quality pin is now a preference with a fallback, not a

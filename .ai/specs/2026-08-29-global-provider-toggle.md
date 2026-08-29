@@ -1,6 +1,16 @@
 # Global provider toggle
 
-**Status:** Specified, not implemented. No code, test or gate has been run for it.
+**Status:** Partially implemented. Committed as `58f5ede5`, merged into `origin/main` as
+`b3a7c153`. Gates (`test:package`) were green and the merge landed, but **the mechanism this spec
+exists for — D4's dispatch-time enforcement — was not wired**, so a lock set today does not change
+what provider a run or step actually executes on. See "Known implementation gap" immediately
+below, written 2026-08-29 by this spec's own documentation step after re-reading the landed diff
+line by line. **Do not run V8. Do not read this as `Implemented` or `QA Needed` in the
+gates-passed-so-it-works sense** — V8 would fail on acceptance criterion 3 as shipped. What
+genuinely landed: the storage/contract layer (D7), the pre-flight 409 entry gates (D4b, in
+`provider-action-gate.ts`), the `onRunnerLockChanged` queue-clear hook (D7a), the shell UI (D9,
+`EngineLockBar` + the onboarding narrowing), the Settings mirror, and the pure, unit-tested
+`applyRunnerLock` helper that nothing calls yet.
 **Date:** 2026-08-29
 **Repo:** `cezar`
 **Read at:** `95b93175` (worktree `41f30bd7-8553-4f88-9b96-04d6aaf64714`, clean, branch `cez/41f30bd7`)
@@ -33,6 +43,57 @@ resolution note says, verbatim: *"A hard pin would be a new decision and a new s
 correction of this one."* This spec is that new decision and that new setting. It does not reopen
 `81ab4ebd`; it supersedes the scope of its answer for the case where a lock is set, and leaves the
 unlocked behaviour exactly as `81ab4ebd` left it.
+
+## Known implementation gap (written 2026-08-29, this document step)
+
+**The dispatch-time mechanism (D4) — the entire reason this spec exists — is not wired.**
+Measured directly against `b3a7c153` (`origin/main`), by grepping every file the feature commit
+(`58f5ede5`) touched or should have touched:
+
+- `run.ts` imports `applyRunnerLock` (`workflows/run.ts:119`) and **never calls it.** `grep -n
+  "applyRunnerLock(" packages/cezar/src/workflows/run.ts` (a call, not the import/declaration)
+  returns nothing. None of D4's eight dispatch sites — `resolvePoolForDispatch`'s
+  `fallbackProvider`, `taskBackend`, the per-step `backend = downgrade?.runner ?? step.runner ??
+  taskBackend`, `downgradePinnedRunner`, `rerouteExplicitAccountIfUnavailable`, `heldAccountFor` —
+  reads the lock. `run.ts`'s entire diff against pre-feature `main` is 24 lines: the import, the
+  `onRunnerLockChanged()` hook (D7a, clears `heldAtSpawn`/`heldNotified` on a lock change — real,
+  but it is cleanup for a mechanism that doesn't otherwise exist), and nothing else.
+- `input.runner` is never assigned from `runnerLock` anywhere. `grep -n "input\.runner\s*="
+  packages/cezar/src/workflows/run.ts packages/cezar/src/server/server.ts` returns nothing. The
+  route that starts a run from a workflow (`server.ts:6604-6607`) passes `runner:
+  parsed.data?.runner` — the caller's raw request — straight into `manager.startRun`, lock or no
+  lock.
+- `provider-action-gate.ts`'s requirement builders **do** read `runnerLock` (D4b — confirmed
+  wired, e.g. `:201-214`), but that machinery answers one question only: *is this HTTP action
+  allowed to proceed* (a pre-flight 409 check against account viability). It is disconnected from
+  what `RunManager` actually dispatches on. A gate computed against the locked provider can pass
+  while the run it lets through still executes on whatever `config.defaultRunner` /
+  `input.runner` / `pool:*` / `step.runner` would have picked anyway — which is unaffected by any
+  of this, per the two bullets above.
+- `runner-lock.test.ts` — the only test file for `applyRunnerLock` — unit-tests the pure function
+  in complete isolation (three cases, no `RunManager`, no dispatch). **No test anywhere asserts
+  that a run with a lock set actually executes on the locked provider.** `run-tests` reporting
+  green is exactly what you'd expect from a gap with no coverage, not evidence against this
+  finding.
+- **Consequence for the acceptance criteria:** criterion 3 ("a newly started run … executes EVERY
+  step on claude … including a project whose settings and `pool:*` account selection would
+  otherwise have chosen codex") is false as shipped. A locked project whose `defaultRunner` is
+  codex still dispatches on codex.
+- **Also not shipped:** Phase 3's picker-fixed-rendering across the six surfaces D2 rank 5 / D6
+  name (`engine-pills.tsx:168`, `new-task.tsx`, `follow-up-engine.tsx`, `retarget-engine.tsx`,
+  `inbox.tsx:347`, `github/hand-to-agent.tsx:265`) and P6's lock-conditional `ADVISORY_NOTE` string
+  in `picker-pill.tsx`. None of those five component files, nor `picker-pill.tsx`, appear in the
+  feature commit's diff. What *did* ship of Phase 3: the `AppShell` `globalBar` slot, the
+  `EngineLockBar`/`EngineLockBarContainer` pair, the Settings → Providers mirror, and the D3c
+  `resources-section.tsx` copy.
+
+**What is genuinely true and durable regardless of this gap:** the *decision* — D2's precedence
+table and D3's "overrides settings, not availability" ruling — was made, reviewed thirteen times,
+and is sound. What is missing is entirely mechanical follow-through: threading `applyRunnerLock`
+(already written, already unit-tested) through the eight call sites D4 already enumerates by name
+and line. A todo is filed for this (see Tracker sync in this step's report) rather than fixed here,
+because writing dispatch-path code is implementation work, not documentation, and doing it without
+a fresh implementation+test pass would repeat the exact failure mode this note exists to catch.
 
 ## TLDR
 
@@ -1666,6 +1727,11 @@ which is *why* this is the only record work that may follow the commit. In the s
 
 **Phase 7: QA, not code.** **V8**, the live runs, on owner approval. Until V8 passes this is
 `Implemented / QA Needed` and must say so in its own Status line.
+
+**CORRECTED 2026-08-29, after the feature commit landed:** do not run V8 yet. See "Known
+implementation gap" near the top of this document — D4's dispatch-time wiring is missing, so V8
+would fail on its own acceptance check rather than pass or reveal a smaller defect. Phase 7 is
+blocked on a follow-up implementation pass, not on owner approval to spend quota.
 
 Flipping that Status to `Implemented`, and recording V8's three run ids and step tables, is a second,
 later edit to this tracked file. It is **not** a violation of the one-commit rule and must not be
