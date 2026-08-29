@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
 /**
@@ -9,7 +9,7 @@ import { dirname, resolve } from 'node:path'
  * Swapping providers must mean rewriting this file only.
  *
  * Each exported function maps to one operation in that descriptor: open, snapshot, eval/get
- * (assert), screenshot, close.
+ * (assert), screenshot, record (spec 2026-08-29-per-retry-step-timing), close.
  */
 
 const repoRoot = resolve(import.meta.dirname, '../../..')
@@ -277,6 +277,31 @@ export class AgentBrowser {
     mkdirSync(dirname(absolute), { recursive: true })
     this.run(viewport ? ['screenshot', absolute] : ['screenshot', '--full', absolute])
     if (statSync(absolute).size === 0) throw new Error(`cezar e2e: empty screenshot at ${absolute}`)
+    return absolute
+  }
+
+  /** operation: record (start). WebM, per the descriptor's `record` operation
+   *  (spec 2026-08-29-per-retry-step-timing, Phase 2 item 8) — added alongside `screenshot`
+   *  because no e2e spec in this repository could retain video before it. Call AFTER the first
+   *  `goto`, never right after `open()`: `open()` starts no browser, it only reads
+   *  `.ai/qa/test-env.json` and returns this wrapper, so a `record start` issued before the first
+   *  real page load has nothing to record. */
+  startRecording(path: string): void {
+    const absolute = resolve(path)
+    mkdirSync(dirname(absolute), { recursive: true })
+    this.run(['record', 'start', absolute])
+  }
+
+  /** operation: record (stop). Gates on a non-empty file, the same discipline `screenshot`
+   *  applies to its PNGs — a `record` that produced nothing is a missing artifact, not a silent
+   *  no-op. If `record` turns out not to work headless on the box a spec runs on, that spec must
+   *  say so in its own gate notes rather than swallow the assertion. */
+  stopRecording(path: string): string {
+    const absolute = resolve(path)
+    this.run(['record', 'stop'])
+    if (!existsSync(absolute) || statSync(absolute).size === 0) {
+      throw new Error(`cezar e2e: empty or missing recording at ${absolute}`)
+    }
     return absolute
   }
 
