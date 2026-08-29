@@ -1,11 +1,15 @@
 # Logged-Out Account Fallback
 
-**Status:** Implemented / QA Needed — landed on `main` as `c569aee8` (PR #11, merged 2026-08-25),
-shipped revision `d385cd5c`. The full repo gate suite (`npm ci --include=dev`, `npm run typecheck`,
-`npm test`: 631 files / 11911 tests, 0 failing) has run green on that exact merged tree. **V6**
-(the isolated-secondary-server runtime E2E) and **V7** (the packed-CLI E2E) below have not run, and
-the change has not been deployed. Do not read this as `Implemented` until V6, V7 and the deploy
-have actually happened. Tracked as cezar todo `21e18103-dd69-41de-8343-b6d401df75db`.
+**Status:** Implemented / QA Needed. PR #11 landed on `main` as `c569aee8` (merged 2026-08-25)
+and the feature is present in live release `20260829T111523Z-17637629` (activated 2026-08-29
+11:15:27Z). On 2026-08-29, the full repository gates passed on merged tree `87ad92bb`: `npm test`
+reported 634 files and 11927 tests, and `npm run test:package` reported 25 passed tests. **V7**
+(the packed-CLI E2E) passed. **V6** (the isolated-secondary-server runtime E2E) was executed with
+isolated credential shims but remains incomplete: the live unauthenticated provider-status baseline
+returned HTTP 401, and the complete event, waitable, terminal, and browser assertions did not
+complete. Retained V6 artifacts are `/var/tmp/cez-e2e-art.HMO8QR` and `/var/tmp/cez-e2e-art.Bv2rt3`.
+Activation of latest `origin/main` remains a manual handoff, and a real production dispatch proof
+remains outstanding. Tracked as cezar todo `21e18103-dd69-41de-8343-b6d401df75db`.
 **Date:** 2026-08-25
 **Repo:** `cezar`
 **Task:** `90836867-2ad6-4c51-abfd-b242ba46da6d`
