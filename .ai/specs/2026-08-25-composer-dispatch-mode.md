@@ -1,6 +1,7 @@
 # Composer dispatch mode shapes the plan
 
-- **Status:** Implemented, QA Needed. Focused workflow, contract, typecheck, unit, build and package
+- **Status:** Implemented, QA Needed. Landed on `origin/main` as merge commit `33ea5803`, after
+  feature commit `53af6a51` and recovery correction `d033c5d2`. Focused workflow, contract, typecheck, unit, build and package
   gates passed on 2026-08-29. The full `npm test` gate remains red in six unrelated recovery and
   account-routing tests. Browser E2E was skipped because `agent-browser` could not launch, and the
   production V8 check has not run. The feature therefore remains QA Needed.
