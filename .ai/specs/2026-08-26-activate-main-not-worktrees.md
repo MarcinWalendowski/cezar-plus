@@ -271,4 +271,24 @@ sweep is indistinguishable from one cleared by hand.
    parked afterwards. Without it, "everything went green" is equally consistent with a sweep that
    clears parks unconditionally.
 
+**CORRECTED 2026-08-29: steps 4 to 7 were never executed, and step 6 FAILED the first time it
+was.** This spec shipped in `6a40929d` on 2026-08-26 and was never deployed, so the production
+verification above stayed hypothetical while its claim ("the operator presses Resolve zero times")
+was read as fact by the handoff card. Production sat on `dc64b741` for four days with two runs
+parked, and an operator pressed Resolve five times against five honest reds.
+
+When step 4 was finally run on 2026-08-29, `deploy.sha` matched `origin/main` (step 5 passed) and
+step 6 **failed**: both runs stayed `waiting`, while each one's own probe exited 0 when run by hand
+in its worktree. Two causes, neither visible from this spec's own tests:
+
+- **S4's sweep swept the boot project only.** This box's boot project is `workspace`; every cezar
+  deploy park lives in the registered `cezar` project. The sweep could never have reached them.
+- **A parked worktree could not resolve the deployed sha**, which is the hazard item 3 of the
+  Problem section predicted and armed. The repair went into the probe, and a parked run runs the
+  probe copy in its OWN worktree, so the repair could not reach the runs it was written for.
+
+Both fixed in `.ai/specs/2026-08-29-resolve-button-red-recheck.md`. Steps 4 to 7 then passed on the
+next activation (`17637629`): both parks cleared with no Resolve press, each logging `every deploy
+target now probes green after the restart` and `manual deploy detected after restart`.
+
 Until 4-7 have been executed this ships as **QA Needed**, not Done.

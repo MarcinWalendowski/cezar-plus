@@ -24,6 +24,7 @@ import { resolvePoolForProvider } from './agent-route-select.ts';
 
 const HOME = { dir: '' };
 const REPO = '/repo/example';
+const LIMIT_UNTIL = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
 /** Two claude logins (`default` + `secondary`) and codex, as the cockpit writes them. */
 function writeAccounts(defaults: Record<string, string>, selections: Record<string, Record<string, string>> = {}): void {
@@ -64,7 +65,7 @@ describe('a step-pinned provider resolves its own account', () => {
     writeUsage((s) => {
       recordLimited(s, accountUsageKey('claude'), {
         source: 'usage-limit',
-        until: '2026-08-26T23:00:00.000Z',
+        until: LIMIT_UNTIL(),
       });
     });
 
@@ -81,7 +82,7 @@ describe('a step-pinned provider resolves its own account', () => {
     writeAccounts({ claude: 'pool:*', codex: 'pool:*' });
     writeUsage((s) => {
       for (const key of [accountUsageKey('claude'), accountUsageKey('claude', 'secondary')]) {
-        recordLimited(s, key, { source: 'usage-limit', until: '2026-08-26T23:00:00.000Z' });
+        recordLimited(s, key, { source: 'usage-limit', until: LIMIT_UNTIL() });
       }
     });
 

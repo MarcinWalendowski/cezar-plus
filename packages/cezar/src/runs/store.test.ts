@@ -2033,3 +2033,239 @@ describe('RunStore — spec-review side log (spec 2026-08-29-spec-tab-review-fee
     expect(reopened?.getRun(run.id)?.specReview).toBeUndefined();
   });
 });
+
+// spec 2026-08-29-step-retry-timing — `updateStep` accumulates `StepState.attempts`.
+describe('RunStore — step attempt accumulation (spec 2026-08-29-step-retry-timing)', () => {
+  let dataDir: string;
+  const FIXED = '2026-08-29T12:00:00.000Z';
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-attempts-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  function freshStep(store: RunStore) {
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'retrying task',
+      workflow: 'quick-task',
+      task: 'retrying task',
+      steps: [{ id: 'step-1', name: 'Do the thing', kind: 'agent' }],
+    });
+    return run;
+  }
+
+  function writeFixture(steps: Array<Record<string, unknown>>, runId = 'fixture-1') {
+    writeFileSync(
+      join(dataDir, 'runs.json'),
+      JSON.stringify([
+        {
+          id: runId,
+          title: 'fixture run',
+          workflow: 'quick-task',
+          task: 'fixture run',
+          status: 'running',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          tokensUsed: 0,
+          archived: false,
+          steps,
+        },
+      ]),
+      'utf8',
+    );
+  }
+
+  describe('minting and closing', () => {
+    it('mints the first attempt on a fresh step', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1' }]);
+    });
+
+    it('closes the open attempt on an explicit finishedAt', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { status: 'done', finishedAt: 'T2' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1', finishedAt: 'T2' }]);
+    });
+
+    it('appends a second attempt without touching the first', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { status: 'done', finishedAt: 'T2' });
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 2, startedAt: 'T3' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([
+        { startedAt: 'T1', finishedAt: 'T2' },
+        { startedAt: 'T3' },
+      ]);
+    });
+
+    it('addStep creates a step with attempts absent, not []', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.addStep(run.id, { id: 'continue-1', name: 'Continue', kind: 'agent' });
+      const step = store.getRun(run.id)?.steps.find((s) => s.id === 'continue-1');
+      expect(step).not.toHaveProperty('attempts');
+    });
+  });
+
+  describe('attempt identity is the iteration transition, never a startedAt comparison', () => {
+    it('two patches with the identical startedAt but iterations 1 then 2 create two attempts', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'SAME' });
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 2, startedAt: 'SAME' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([
+        { startedAt: 'SAME', finishedAt: 'SAME' },
+        { startedAt: 'SAME' },
+      ]);
+    });
+
+    it('replaying the same patch (same iterations, same startedAt) creates none', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1' }]);
+    });
+
+    it('a patch with startedAt and no iterations key creates none', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { startedAt: 'T9' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1' }]);
+    });
+
+    it('an iterations increment with no startedAt creates none and does not corrupt the array', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { iterations: 2 });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1' }]);
+    });
+  });
+
+  describe('closing on the status exit (D3 rule 2)', () => {
+    it('pending with no re-entry closes the attempt at the injected clock', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { status: 'pending' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1', finishedAt: FIXED }]);
+    });
+
+    it('cancellation from running closes the open attempt at the clock', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { status: 'cancelled' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1', finishedAt: FIXED }]);
+    });
+
+    it('the literal requeueHandoff patch closes on the status exit, not on the finishedAt key', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'waiting', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { status: 'pending', error: undefined, finishedAt: undefined });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1', finishedAt: FIXED }]);
+    });
+
+    it('waiting -> review does not close anything: both are active', () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'waiting', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { status: 'review' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1' }]);
+    });
+
+    it("finishStep's shape closes on the explicit timestamp, never the clock", () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { status: 'done', finishedAt: 'T2' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1', finishedAt: 'T2' }]);
+    });
+
+    it("loopBackTo's {status:'pending'} on a step whose attempts are already closed is a no-op", () => {
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { status: 'done', finishedAt: 'T2' });
+      store.updateStep(run.id, 'step-1', { status: 'pending' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([{ startedAt: 'T1', finishedAt: 'T2' }]);
+    });
+
+    it('the fallback: a start patch arriving while an attempt is still open closes it at the new startedAt', () => {
+      // Simulates a record whose status transition the store never saw (e.g. restored from a
+      // file written by an older build) — the attempt is still 'open' in the array even though
+      // no rule (2) close ever fired for it.
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      const run = freshStep(store);
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      store.updateStep(run.id, 'step-1', { status: 'running', iterations: 2, startedAt: 'T3' });
+      expect(store.getRun(run.id)?.steps[0]?.attempts).toEqual([
+        { startedAt: 'T1', finishedAt: 'T3' },
+        { startedAt: 'T3' },
+      ]);
+    });
+  });
+
+  describe('the upgrade boundary', () => {
+    it('an old started step never gains attempts, across further retries', () => {
+      writeFixture([
+        {
+          id: 'step-1',
+          name: 'Do the thing',
+          kind: 'agent',
+          status: 'pending',
+          iterations: 4,
+          tokensUsed: 0,
+          startedAt: 'OLD-START',
+          finishedAt: 'OLD-END',
+        },
+      ]);
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      store.updateStep('fixture-1', 'step-1', { status: 'running', iterations: 5, startedAt: 'T5' });
+      expect(store.getRun('fixture-1')?.steps[0]?.attempts).toBeUndefined();
+      store.updateStep('fixture-1', 'step-1', { status: 'pending' });
+      store.updateStep('fixture-1', 'step-1', { status: 'running', iterations: 6, startedAt: 'T6' });
+      expect(store.getRun('fixture-1')?.steps[0]?.attempts).toBeUndefined();
+    });
+
+    it('an old never-started pending step behaves like a fresh step from attempt 1', () => {
+      writeFixture([
+        { id: 'step-1', name: 'Do the thing', kind: 'agent', status: 'pending', iterations: 0, tokensUsed: 0 },
+      ]);
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      store.updateStep('fixture-1', 'step-1', { status: 'running', iterations: 1, startedAt: 'T1' });
+      expect(store.getRun('fixture-1')?.steps[0]?.attempts).toEqual([{ startedAt: 'T1' }]);
+    });
+
+    it('a step that already has attempts keeps accumulating normally', () => {
+      writeFixture([
+        {
+          id: 'step-1',
+          name: 'Do the thing',
+          kind: 'agent',
+          status: 'pending',
+          iterations: 1,
+          tokensUsed: 0,
+          attempts: [{ startedAt: 'T1', finishedAt: 'T2' }],
+        },
+      ]);
+      const store = RunStore.open(dataDir, { now: () => FIXED });
+      store.updateStep('fixture-1', 'step-1', { status: 'running', iterations: 2, startedAt: 'T3' });
+      expect(store.getRun('fixture-1')?.steps[0]?.attempts).toEqual([
+        { startedAt: 'T1', finishedAt: 'T2' },
+        { startedAt: 'T3' },
+      ]);
+    });
+  });
+});

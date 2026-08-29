@@ -37,6 +37,26 @@ if (process.env.CEZ_MOCK_ARGS_FILE) {
   }
 }
 
+// Testability hook: MOCK_CLAUDE_VERDICT_FILE=<path> is a QUEUE of `CEZ:REVIEW` verdicts, one per
+// line, popped once per SPAWN — so a chain whose reviewer must say `revise` and then `pass` is
+// scriptable without teaching the mock anything about step ids
+// (`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`, Verification).
+//
+// Popped at process start, not per turn, because a spawn IS a session here: the engine starts one
+// process per step attempt, so "nth spawn" is the only ordering a test can predict. An empty line
+// means "this session declares no verdict", which is what every non-reviewer step needs.
+function popScriptedVerdict() {
+  if (!process.env.MOCK_CLAUDE_VERDICT_FILE) return '';
+  try {
+    const queue = readFileSync(process.env.MOCK_CLAUDE_VERDICT_FILE, 'utf8').split('\n');
+    const next = (queue.shift() ?? '').trim();
+    writeFileSync(process.env.MOCK_CLAUDE_VERDICT_FILE, queue.join('\n'), 'utf8');
+    return next;
+  } catch {
+    return ''; // best effort — an unreadable queue leaves every session verdict-free
+  }
+}
+
 emit({ type: 'system', subtype: 'init' });
 
 let turn = 0;
@@ -275,6 +295,31 @@ async function respond(userText, imageCount) {
       is_error: true,
       result: `Claude AI usage limit reached|${Math.floor(Date.now() / 1000) + seconds}`,
       usage: { input_tokens: 0, output_tokens: 0 },
+      total_cost_usd: 0,
+    });
+    return;
+  }
+
+  // A scripted `CEZ:REVIEW` verdict (see MOCK_CLAUDE_VERDICT_FILE above) answers the session's
+  // FIRST turn and nothing later: the marker is read off the end of a turn's text, so emitting it
+  // again on a follow-up would re-declare a verdict the engine already acted on.
+  //
+  // Popped HERE rather than at process start, and never for a `[cez-classify]` turn. The task
+  // classifier (`core/task-classifier.ts`) spawns this same mock once per run before the chain
+  // begins, so a start-of-process pop puts every later entry one step out of phase — which is
+  // exactly what it did, silently, by handing `spec` the reviewer's verdict.
+  const scriptedVerdict = turn === 1 && !userText.includes('[cez-classify]') ? popScriptedVerdict() : '';
+  if (scriptedVerdict) {
+    const text = `Reviewed.\n\nCEZ:REVIEW=${scriptedVerdict}`;
+    emit({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input_tokens: 10, output_tokens: 10 } },
+    });
+    emit({
+      type: 'result',
+      subtype: 'success',
+      result: text,
+      usage: { input_tokens: 10, output_tokens: 10 },
       total_cost_usd: 0,
     });
     return;

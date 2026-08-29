@@ -101,15 +101,19 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
   const canPush = (allowlist: string[] | undefined) =>
     (allowlist ?? []).some((entry) => 'git push'.startsWith(entry.trim()));
 
-  it('is the nine-step context → spec → review → implement → tests → push → merge → document → deploy chain', () => {
+  it('is the ten-step context → spec → two reviews → implement → tests → push → merge → document → deploy chain', () => {
     expect(SPEC_TO_DEPLOY_WORKFLOW.name).toBe('spec-to-deploy');
     expect(SPEC_TO_DEPLOY_WORKFLOW.source).toBe('built-in');
     // Grew from six to eight on 2026-08-20 (spec
     // `.ai/specs/2026-08-20-split-steps-spec-review-and-approval-gate.md`): `context` split out of
     // the combined read+write step, and `review-spec` added before anything acts on the spec.
+    // Nine to ten on 2026-08-29 (`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`, D2):
+    // `review-spec-local` runs the same-provider pass BEFORE the cross-provider one, so the
+    // expensive reviewer sees a spec that already survived a round.
     expect(SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => s.id)).toEqual([
       'context',
       'spec',
+      'review-spec-local',
       'review-spec',
       'implement',
       'run-tests',
@@ -147,7 +151,9 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(review?.allowedTools).not.toContain('Edit');
     expect(canPush(review?.bashAllowlist)).toBe(false);
     // Bounded, and backwards — `stepsIssue` enforces the direction, this pins the target.
-    expect(review?.onFail).toEqual({ retry: 'spec', max: 2 });
+    // `resume: true` (spec 2026-08-29, D1) — the rework re-enters `spec`'s own session rather
+    // than starting cold. Asserted as a whole object so a dropped key cannot pass.
+    expect(review?.onFail).toEqual({ retry: 'spec', max: 2, resume: true });
     expect(review?.requiresApproval).toBe(true);
     // Both verdicts have to be spelled out, or the reviewer cannot know what to emit.
     expect(review?.prompt).toContain('CEZ:REVIEW=pass');
@@ -161,6 +167,40 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
    * "judge the spec, not its prose" discipline must survive, and both verdict markers must still
    * be present so `parseReviewVerdict` keeps working.
    */
+  /**
+   * `.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`, D2. The cheap pass exists to take
+   * defects off the expensive one — which is only defensible because it is a REAL review, not a
+   * lighter one: same read-only construction, same verdict vocabulary, same loop-back target.
+   */
+  it('review-spec-local is a real review — same provider as the writer, read-only, one warm revision', () => {
+    const local = stepById('review-spec-local');
+    expect(local).toBeDefined();
+    // It sits BETWEEN the writer and the external reviewer. Order is the whole mechanism: after
+    // `review-spec` it would absorb nothing, and before `spec` it would have nothing to read.
+    const ids = SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => s.id);
+    expect(ids.indexOf('review-spec-local')).toBe(ids.indexOf('spec') + 1);
+    expect(ids.indexOf('review-spec')).toBe(ids.indexOf('review-spec-local') + 1);
+    // Same runner AND model as the writer — that pairing is what lets its loop-back resume
+    // `spec` at all (`loopBackResumeDecision`'s `backend-changed` guard).
+    expect(local?.runner).toBe(stepById('spec')?.runner);
+    expect(local?.model).toBe(stepById('spec')?.model);
+    // Read-only by construction, exactly as `review-spec` is.
+    expect(local?.allowedTools).not.toContain('Write');
+    expect(local?.allowedTools).not.toContain('Edit');
+    expect(canPush(local?.bashAllowlist)).toBe(false);
+    // ONE warm revision, and its own budget — `retriesUsed` is keyed by step id, so this does not
+    // spend `review-spec`'s two.
+    expect(local?.onFail).toEqual({ retry: 'spec', max: 1, resume: true });
+    // The human gate stays on exactly one step.
+    expect(local?.requiresApproval).toBeUndefined();
+    // Same vocabulary, or `parseReviewVerdict` cannot read it.
+    expect(local?.prompt).toContain('CEZ:REVIEW=pass');
+    expect(local?.prompt).toContain('CEZ:REVIEW=revise');
+    expect(local?.prompt).toContain('FILE:');
+    expect(local?.prompt).toContain('SECTION:');
+    expect(local?.prompt).toContain('CHANGE:');
+  });
+
   it('review-spec is required to write its `revise` verdict as a FILE/SECTION/CHANGE list', () => {
     const review = stepById('review-spec');
     expect(review?.prompt).toContain('FILE:');
@@ -193,6 +233,7 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(models).toEqual([
       ['context', 'sonnet'],
       ['spec', 'opus'],
+      ['review-spec-local', 'opus'],
       ['review-spec', 'gpt-5.6-sol'],
       ['implement', 'sonnet'],
       ['run-tests', 'sonnet'],
@@ -203,7 +244,10 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     ]);
     // The asymmetry itself, stated from the other side: opus is on exactly the two judgement
     // steps, and no step is left unpinned to fall through to the composer's pick.
-    expect(models.filter(([, m]) => m === 'opus').map(([id]) => id)).toEqual(['spec']);
+    // TWO opus steps since 2026-08-29: the writer and the same-provider reviewer in front of the
+    // cross-provider one. The count is the point — `review-spec`'s effort came DOWN to `high` in
+    // the same change, and it is only defensible because this second opus pass exists.
+    expect(models.filter(([, m]) => m === 'opus').map(([id]) => id)).toEqual(['spec', 'review-spec-local']);
     expect(models.filter(([, m]) => !m)).toEqual([]);
   });
 
@@ -222,6 +266,7 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     const runners = SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => [s.id, s.runner] as const);
     expect(runners.filter(([, r]) => r !== undefined)).toEqual([
       ['spec', 'claude'],
+      ['review-spec-local', 'claude'],
       ['review-spec', 'codex'],
     ]);
     // Count-anchored, so a renamed or dropped step list cannot make this vacuous.
@@ -263,12 +308,13 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
    * would be capped on reasoning depth with no reviewer having decided that, the same vacuous-
    * failure shape the model-policy test above guards against.
    */
-  it('caps run-tests to medium effort and leaves every other step unset', () => {
+  it('caps run-tests to medium effort, sets both review passes to high, and leaves every other step unset', () => {
     const efforts = SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => [s.id, s.effort] as const);
     expect(efforts).toEqual([
       ['context', undefined],
       ['spec', undefined],
-      ['review-spec', 'xhigh'],
+      ['review-spec-local', 'high'],
+      ['review-spec', 'high'],
       ['implement', undefined],
       ['run-tests', 'medium'],
       ['commit-push', undefined],
@@ -302,7 +348,7 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     }
     // Floor: a loop over an emptied or renamed step list would otherwise assert nothing at all.
     expect(checked).toEqual(SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => s.id));
-    expect(checked.length).toBe(9);
+    expect(checked.length).toBe(10);
   });
 
   it('the record-reading step cannot reach a shell beyond kb + read-only git', () => {
@@ -862,8 +908,8 @@ describe('per-step model and effort, per runner', () => {
 
   describe('the spec-to-deploy table (D2)', () => {
     it('names a codex model and effort on every step that does not pin the claude runner', () => {
-      // Asserted as a WHOLE rather than step by step, so a ninth step added later without a codex
-      // pin reddens this instead of silently inheriting codex's default.
+      // Asserted as a WHOLE rather than step by step, so a further step added later without a
+      // codex pin reddens this instead of silently inheriting codex's default.
       const table = Object.fromEntries(
         SPEC_TO_DEPLOY_WORKFLOW.steps.map((step) => [step.id, resolveStepModel(step, 'codex')]),
       );
@@ -873,7 +919,12 @@ describe('per-step model and effort, per runner', () => {
         // all — owner instruction 2026-08-22, "writing spec + spec review should be by opus
         // always". They keep the Claude pair even when asked about codex.
         spec: { model: 'gpt-5.6-sol', effort: 'medium' },
-        'review-spec': { model: 'gpt-5.6-sol', effort: 'xhigh' },
+        // `review-spec-local` pins the claude runner like `spec` does, and names `CODEX_REVIEW`
+        // as its codex fallback — so on codex the two review passes resolve to the same row. That
+        // is deliberate: the cheap pass is cheap because of WHERE it sits, not because it is a
+        // weaker model, and a codex-only run has no second provider to be cheap against.
+        'review-spec-local': { model: 'gpt-5.6-sol', effort: 'high' },
+        'review-spec': { model: 'gpt-5.6-sol', effort: 'high' },
         implement: { model: 'gpt-5.6-luna', effort: 'xhigh' },
         'run-tests': { model: 'gpt-5.6-luna', effort: 'medium' },
         'commit-push': { model: 'gpt-5.6-luna', effort: 'medium' },
@@ -1174,7 +1225,8 @@ describe('pinWorkflowRunner / spec-to-deploy-codex (V1, V2)', () => {
     const expected: Record<string, { model: string; effort: string | undefined }> = {
       context: { model: 'gpt-5.6-terra', effort: 'medium' },
       spec: { model: 'gpt-5.6-sol', effort: 'medium' },
-      'review-spec': { model: 'gpt-5.6-sol', effort: 'xhigh' },
+      'review-spec-local': { model: 'gpt-5.6-sol', effort: 'high' },
+      'review-spec': { model: 'gpt-5.6-sol', effort: 'high' },
       implement: { model: 'gpt-5.6-luna', effort: 'xhigh' },
       'run-tests': { model: 'gpt-5.6-luna', effort: 'medium' },
       'commit-push': { model: 'gpt-5.6-luna', effort: 'medium' },

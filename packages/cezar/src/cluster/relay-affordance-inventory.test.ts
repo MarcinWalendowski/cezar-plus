@@ -724,11 +724,30 @@ const FIELD_CLASSIFICATION: Record<string, Verdict> = {
     why: 'a provider name (RunnerId) a step ran on instead, from the same `run.step.runner_downgraded` event as `plannedRunner`',
   },
   attempt: { verdict: 'safe', why: 'a retry counter number' },
+  target: {
+    verdict: 'safe',
+    why:
+      'the step id a loop-back is returning to, from `run.step.looped_back` ' +
+      '(`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`) — same shape and same ' +
+      'reasoning as `stepId` above: an id scoped to this run\'s own event stream, not a ' +
+      'filesystem or session coordinate. Notably it is NOT a session id: the metric reports ' +
+      'WHETHER a session was reused (`resumed`), never which one.',
+  },
+  resumed: {
+    verdict: 'safe',
+    why:
+      'a boolean on `run.step.looped_back` — did the loop-back re-enter the target step\'s own ' +
+      'session, or start it cold. The resumable handle itself (`sessionId`) is deliberately not ' +
+      'on this event.',
+  },
   command: { verdict: 'safe', why: 'a shell command string; free-text regex coverage applies' },
   exitCode: { verdict: 'safe', why: 'a number' },
   elapsedMs: { verdict: 'safe', why: 'a number' },
   tokensUsed: { verdict: 'safe', why: 'a number' },
-  reason: { verdict: 'safe', why: 'small closed enum (AgentStopReason / StopReason)' },
+  reason: {
+    verdict: 'safe',
+    why: 'small closed enum (AgentStopReason / StopReason / LoopBackResumeReason)',
+  },
   error: { verdict: 'safe', why: 'free text; regex coverage applies' },
   stopReason: { verdict: 'safe', why: 'small closed enum (StopReason)' },
   id: { verdict: 'safe', why: 'an item/tool-call id scoped to the run\'s own stream' },
