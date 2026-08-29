@@ -150,8 +150,11 @@ import {
 } from './types.ts';
 import {
   activationArgv,
+  activationEnv,
   activationInFlight,
+  activationLogPath,
   defaultActivationHost,
+  ensureActivationLogDir,
   markActivationLaunched,
   readActivationCommands,
   type ActivationHost,
@@ -7009,10 +7012,35 @@ export class RunManager {
     }
     const user = !this.activationHost.isRoot();
     const systemdRun = this.activationHost.systemdRunAvailable();
+    ensureActivationLogDir(dataDir);
+    const env = activationEnv(process.env, user && systemdRun);
+    const launched: string[] = [];
+    const failures: string[] = [];
     for (const { name, command } of commands) {
       const unitId = `activate-${runId.slice(0, 8)}-${name.replace(/[^A-Za-z0-9_-]+/g, '-')}`.slice(0, 60);
-      this.activationHost.spawnDetached(activationArgv({ unitId, command, cwd, user, systemdRun }), process.env, cwd);
-      emit({ type: 'note', stepId, message: `manual deployment launched for ${name}: ${command}` });
+      const logPath = activationLogPath(dataDir, unitId);
+      const argv = activationArgv({ unitId, command, cwd, user, systemdRun, logPath });
+      if (systemdRun) {
+        const outcome = this.activationHost.registerUnit(argv, env, cwd);
+        if (!outcome.ok) {
+          failures.push(`${name}: ${outcome.error ?? 'the transient unit did not start'}`);
+          emit({ type: 'note', stepId, message: `manual deployment FAILED TO START for ${name}: ${outcome.error ?? 'unknown'}` });
+          continue;
+        }
+      } else {
+        this.activationHost.spawnDetached(argv, env, cwd);
+      }
+      launched.push(name);
+      emit({ type: 'note', stepId, message: `manual deployment launched for ${name}: ${command} (log: ${logPath})` });
+    }
+    // The lock is taken ONLY for something that really started. Taking it regardless is what turned
+    // a silent launch failure into a 15-minute block over nothing running — measured on the first
+    // production press, 2026-08-29.
+    if (launched.length === 0) {
+      return {
+        launched: false,
+        message: `the deployment did not start — ${failures.join('; ') || 'no command could be launched'}`,
+      };
     }
     markActivationLaunched(dataDir, now);
     // One deployment settles EVERY run waiting on it, so say so — otherwise the other parked runs
@@ -7020,9 +7048,10 @@ export class RunManager {
     const also = others > 0
       ? ` ${others} other run${others === 1 ? '' : 's'} waiting on this deployment ${others === 1 ? 'is' : 'are'} re-checked automatically too.`
       : '';
+    const partial = failures.length > 0 ? ` (${failures.length} did NOT start: ${failures.join('; ')})` : '';
     return {
       launched: true,
-      message: `deploying ${commands.map((c) => c.name).join(', ')} now. This restarts the server, so the cockpit will drop for a moment — the run resumes by itself once the new build is live.${also}`,
+      message: `deploying ${launched.join(', ')} now. This restarts the server, so the cockpit will drop for a moment — the run resumes by itself once the new build is live.${also}${partial}`,
     };
   }
 

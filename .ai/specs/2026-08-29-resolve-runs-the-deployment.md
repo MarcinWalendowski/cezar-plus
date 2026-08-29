@@ -66,6 +66,28 @@ narrow name. With no `systemd-run` present it degrades to `bash -lc`: there, no 
 going to kill it, so the escape buys nothing and refusing would make the feature untestable off the
 production host.
 
+**S3a — the launch is VERIFIED, and the lock is taken only for something that started.**
+*Added after the first production press failed, 2026-08-29.* `systemd-run` returns as soon as the
+unit is queued, so registering it can be synchronous without blocking the click — and being
+synchronous is the point. The first version spawned it detached with `stdio: 'ignore'` and took the
+lock regardless, so a launch that failed was indistinguishable from one that worked. It failed for
+**two** independent reasons, both documented in the code it reused and neither carried over:
+
+1. **No bus coordinates.** `cezar.service`'s own `/proc/<pid>/environ` has neither
+   `XDG_RUNTIME_DIR` nor `DBUS_SESSION_BUS_ADDRESS`, so `systemd-run --user` died with *"Failed to
+   connect to user scope bus via local transport"*. An **ssh session has them**, which is exactly
+   why this is invisible until it runs from inside the service.
+2. **An unwritable log target.** `buildSystemdRunArgv` hardcoded `append:/var/log/cezar/…`, and the
+   `cezar` uid cannot create that directory (`mkdir: Permission denied`). systemd refuses to start
+   a unit whose `append:` target is unwritable, so this alone would have failed every launch.
+
+Net effect: the operator was blocked for 15 minutes by a lock guarding **nothing running**, and a
+second press correctly told them to wait for a deploy that did not exist. *A guard that fires for
+an action that never happened is worse than no guard.* `activationEnv()` now supplies the bus
+coordinates, `activationLogPath()` puts the log in the project's own data dir, `buildSystemdRunArgv`
+takes an optional `logPath` (defaulted, so `server-deploy` is unchanged), and the lock is taken only
+after a launch reports success — with the failure text returned to the card.
+
 **S4 — a file lock, not a flag.** `activation.lock` in the project's data dir, 15-minute TTL. It has
 to be a file precisely because the thing it guards restarts this process: an in-memory flag is
 cleared by the very event it exists to survive.
@@ -141,6 +163,25 @@ Executed 2026-08-29.
    guard (1); no sibling sweep (1); deploying before the re-probe (1); a lock refusal reported as
    `activating` (1); per-target dispatch without dedup (1).
 6. Full gates: `npm run typecheck` clean; `npm test` green; `test:unit`, `test:package`, `build`.
-7. **Production E2E — pending.** Acceptance: a parked run on `prod-host`, one Resolve press,
-   the card reading "deploying … now", a new release under `/opt/cezar-releases/`, and every park
-   clearing on the restart with no second press.
+7. **Production E2E, round 1 — FAILED, 2026-08-29, and is why S3a exists.** The press launched
+   nothing and locked the operator out. Found by the button, not by the 14 tests that shipped with
+   it: every one of them stubbed the host, so none could observe that the real launcher's argv could
+   not start on the real box.
+8. **The fixed launch shape, proven on `prod-host` with a control.** From a deliberately
+   non-login environment (`env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS`, what the service
+   has): the shipped shape → *"Failed to connect to user scope bus"*; the fixed shape → *"Running as
+   unit: cez-fix-….service"*, and the unit executed, writing `PROBE_OK from
+   /var/lib/cezar/loki-labs/cezar` to a project-owned log. The control is what makes this evidence
+   rather than a hopeful re-run. ✅
+9. **Production E2E, round 2 — pending.** Acceptance unchanged: one press, the card reading
+   "deploying … now", a new release under `/opt/cezar-releases/`, every park clearing on the restart
+   with no second press.
+
+### Known gap, recorded not fixed
+
+`server-deploy`'s OWN re-exec path (`release-deploy.ts`) still defaults to `/var/log/cezar` and does
+not add the bus env, so `cezar server-deploy` run from **inside a task** on this box would hit
+defect 2 the same way. It is not hit today because every activation so far has been run from ssh,
+where `decideReExec` reports *"not inside cezar.service's cgroup"* and never detaches. Left alone
+deliberately: fixing it means changing the shared deploy path, which deserves its own change rather
+than riding along with this one.

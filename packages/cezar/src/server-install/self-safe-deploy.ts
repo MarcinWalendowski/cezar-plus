@@ -160,6 +160,14 @@ export interface SystemdRunOptions {
    * is the only property the escape actually needs.
    */
   user?: boolean;
+  /**
+   * Where the unit appends its output. Defaults to `deployLogPath(releaseId)` under
+   * `/var/log/cezar`, which only a deployer that can create that directory may use — on a rootless
+   * box the `cezar` uid cannot (`mkdir: Permission denied`, measured 2026-08-29), and systemd
+   * refuses to START a unit whose `append:` target is unwritable. A caller running as the service
+   * account passes a path it owns.
+   */
+  logPath?: string;
 }
 
 /**
@@ -181,8 +189,8 @@ export function buildSystemdRunArgv(opts: SystemdRunOptions): string[] {
     '--property=Type=oneshot',
     '--property=RemainAfterExit=no',
     '--property=KillMode=process',
-    `--property=StandardOutput=append:${deployLogPath(opts.releaseId)}`,
-    `--property=StandardError=append:${deployLogPath(opts.releaseId)}`,
+    `--property=StandardOutput=append:${opts.logPath ?? deployLogPath(opts.releaseId)}`,
+    `--property=StandardError=append:${opts.logPath ?? deployLogPath(opts.releaseId)}`,
     `--setenv=${DETACHED_ENV}=1`,
   ];
   if (opts.cwd) argv.push(`--working-directory=${opts.cwd}`);

@@ -11,7 +11,9 @@ import type { PostconditionResult } from './postconditions.ts';
 import {
   ACTIVATION_LOCK_TTL_MS,
   activationArgv,
+  activationEnv,
   activationInFlight,
+  activationLogPath,
   markActivationLaunched,
   readActivationCommands,
   type ActivationHost,
@@ -89,7 +91,12 @@ describe('readActivationCommands — which manual deployments a click may run', 
 });
 
 describe('activationArgv — the command has to outlive the restart it causes', () => {
-  const base = { unitId: 'activate-abc12345-backend', command: 'scripts/activate-main.sh', cwd: '/srv/app' };
+  const base = {
+    unitId: 'activate-abc12345-backend',
+    command: 'scripts/activate-main.sh',
+    cwd: '/srv/app',
+    logPath: '/srv/app/.ai/cezar/activations/activate-abc12345-backend.log',
+  };
 
   it('hands the command to a transient USER unit when systemd-run is there', () => {
     const argv = activationArgv({ ...base, user: true, systemdRun: true });
@@ -101,6 +108,29 @@ describe('activationArgv — the command has to outlive the restart it causes', 
     // restart this command performs, potentially with the symlink already flipped.
     expect(argv).toContain('--property=KillMode=process');
     expect(argv.slice(-3)).toEqual(['bash', '-lc', 'scripts/activate-main.sh']);
+    // NOT /var/log/cezar. The service account cannot create that directory (`mkdir: Permission
+    // denied`, measured on prod-host), and systemd refuses to START a unit whose `append:`
+    // target is unwritable — so the default log path alone is enough to make every launch fail.
+    expect(argv).toContain(`--property=StandardOutput=append:${base.logPath}`);
+    expect(argv.join(' ')).not.toContain('/var/log/cezar');
+  });
+
+  it('carries the user bus coordinates, which cezar.service does not have', () => {
+    // MEASURED 2026-08-29, the first production press: `systemd-run --user` failed with "Failed to
+    // connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and
+    // $XDG_RUNTIME_DIR not defined". The service's own /proc/<pid>/environ has NEITHER. An ssh
+    // session HAS them, which is precisely why this is invisible until it runs inside the service.
+    const env = activationEnv({ PATH: '/usr/bin' }, true);
+    expect(env.XDG_RUNTIME_DIR).toMatch(/^\/run\/user\/\d+$/);
+    expect(env.DBUS_SESSION_BUS_ADDRESS).toContain('/bus');
+    expect(env.PATH).toBe('/usr/bin'); // the caller's environment is kept, not replaced
+    // Root uses the SYSTEM manager, which needs no session bus.
+    expect(activationEnv({ PATH: '/usr/bin' }, false)).toEqual({ PATH: '/usr/bin' });
+  });
+
+  it('puts the log inside the project, where the service account can actually write', () => {
+    expect(activationLogPath('/var/lib/x/.ai/cezar', 'activate-1-backend'))
+      .toBe('/var/lib/x/.ai/cezar/activations/activate-1-backend.log');
   });
 
   it('asks the SYSTEM manager only when it is already root', () => {
@@ -166,7 +196,13 @@ describe('a Resolve press runs the manual deployment', () => {
     manager.activationHost = {
       systemdRunAvailable: () => false,
       isRoot: () => false,
-      spawnDetached: (argv, _env, cwd) => spawned.push({ argv, cwd }),
+      registerUnit: (argv, _env, cwd) => {
+        spawned.push({ argv, cwd });
+        return { ok: true };
+      },
+      spawnDetached: (argv, _env, cwd) => {
+        spawned.push({ argv, cwd });
+      },
     } satisfies ActivationHost;
   });
 
@@ -262,6 +298,48 @@ describe('a Resolve press runs the manual deployment', () => {
     expect(result.activating).toBeUndefined();
     // …and it still reports the probe's own concise verdict, exactly as before.
     expect(result.verdict).toContain('NOT serving this HEAD');
+  });
+
+  /**
+   * MEASURED on the FIRST production press, 2026-08-29 — the defect this whole feature shipped
+   * with, found by the E2E and not by any of the 14 tests that preceded it.
+   *
+   * `systemd-run --user` failed (no bus coordinates inside `cezar.service`, and an `append:` target
+   * under `/var/log/cezar` the service account cannot create). The launcher spawned it detached
+   * with `stdio: 'ignore'`, so the failure was invisible, and took the 15-minute lock anyway. The
+   * operator was left blocked, with nothing running, and a second press correctly told them to wait
+   * for a deploy that did not exist.
+   *
+   * A guard that fires for an action that never happened is worse than no guard.
+   */
+  it('takes NO lock when the launch itself fails, and says what failed', async () => {
+    targetsFile(repoRoot, [{ name: 'backend', probe: 'false', manual: true, activate: 'scripts/activate-main.sh' }]);
+    let attempts = 0;
+    manager.activationHost = {
+      systemdRunAvailable: () => true,
+      isRoot: () => false,
+      registerUnit: () => {
+        attempts += 1;
+        return { ok: false, error: 'Failed to connect to user scope bus via local transport' };
+      },
+      spawnDetached: () => {
+        throw new Error('must not fall back to a detached spawn when systemd-run is available');
+      },
+    } satisfies ActivationHost;
+    const id = park();
+    await new Promise<void>((r) => setImmediate(r));
+
+    const first = await manager.resolveHandoff(id, 'ada');
+
+    expect(first.activating).toBeUndefined();
+    expect(first.verdict).toContain('did not start');
+    expect(first.verdict).toContain('user scope bus');
+
+    // The decisive assertion: a SECOND press tries again rather than being told to wait for a
+    // deployment that never started.
+    const second = await manager.resolveHandoff(id, 'ada');
+    expect(attempts).toBe(2);
+    expect(second.verdict).not.toContain('still running');
   });
 
   it('refuses a second launch while the first is still presumed running', async () => {

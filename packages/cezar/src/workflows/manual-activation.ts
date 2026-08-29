@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildSystemdRunArgv, userBusEnv } from '../server-install/self-safe-deploy.ts';
 import { DEPLOY_TARGETS_FILE, deployTargetsSchema } from './postconditions.ts';
@@ -86,10 +86,39 @@ export function activationArgv(opts: {
   cwd: string;
   user: boolean;
   systemdRun: boolean;
+  logPath: string;
 }): string[] {
   const inner = ['bash', '-lc', opts.command];
   if (!opts.systemdRun) return inner;
-  return buildSystemdRunArgv({ releaseId: opts.unitId, command: inner, cwd: opts.cwd, user: opts.user });
+  return buildSystemdRunArgv({
+    releaseId: opts.unitId,
+    command: inner,
+    cwd: opts.cwd,
+    user: opts.user,
+    // NOT the default `/var/log/cezar` — the service account cannot create it, and systemd refuses
+    // to start a unit whose `append:` target is unwritable. This directory is the project's own.
+    logPath: opts.logPath,
+  });
+}
+
+/** Where one activation's output is appended. Inside the project's data dir, which the service
+ *  account owns by construction — unlike `/var/log/cezar`. */
+export function activationLogPath(dataDir: string, unitId: string): string {
+  return join(dataDir, 'activations', `${unitId}.log`);
+}
+
+/**
+ * The environment a launched activation needs on top of the caller's.
+ *
+ * `systemd-run --user` needs bus coordinates that `cezar.service` does not have: measured on
+ * prod-host, the service's `/proc/<pid>/environ` carries NEITHER `XDG_RUNTIME_DIR` nor
+ * `DBUS_SESSION_BUS_ADDRESS`, so the launch fails with "Failed to connect to user scope bus via
+ * local transport". An ssh session HAS them, which is exactly how this stays invisible until it
+ * runs from inside the service — the same trap `userBusEnv`'s own doc comment records, and the
+ * one this function exists to stop repeating.
+ */
+export function activationEnv(base: NodeJS.ProcessEnv, user: boolean): NodeJS.ProcessEnv {
+  return user ? { ...base, ...userBusEnv() } : { ...base };
 }
 
 /** Is an activation launched from this project still presumed in flight? */
@@ -103,6 +132,16 @@ export function activationInFlight(dataDir: string, now: number, ttlMs = ACTIVAT
 
 /** Record that an activation was launched now. Best-effort: an unwritable lock must not block a
  *  deployment a person explicitly asked for. */
+/** Make the activation log directory, best-effort. Returns whether it is usable. */
+export function ensureActivationLogDir(dataDir: string): boolean {
+  try {
+    mkdirSync(join(dataDir, 'activations'), { recursive: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function markActivationLaunched(dataDir: string, now: number): void {
   try {
     writeFileSync(join(dataDir, ACTIVATION_LOCK), String(now), 'utf8');
@@ -114,12 +153,30 @@ export function markActivationLaunched(dataDir: string, now: number): void {
 export interface ActivationHost {
   systemdRunAvailable(): boolean;
   isRoot(): boolean;
+  /**
+   * Register the transient unit and REPORT whether registration succeeded.
+   *
+   * `systemd-run` returns as soon as the unit is queued — it does not wait for the command — so
+   * this can be synchronous and still not block the click. Being synchronous is the point: the
+   * first version spawned this detached with `stdio: 'ignore'` and took the lock regardless, so a
+   * launch that failed for either reason above was INDISTINGUISHABLE from one that worked, and
+   * left a 15-minute lock over nothing running. Measured on the first production press.
+   */
+  registerUnit(argv: string[], env: NodeJS.ProcessEnv, cwd: string): { ok: boolean; error?: string };
+  /** The no-systemd fallback, which genuinely cannot be waited on. */
   spawnDetached(argv: string[], env: NodeJS.ProcessEnv, cwd: string): void;
 }
 
 export const defaultActivationHost: ActivationHost = {
   systemdRunAvailable: () => spawnSync('sh', ['-c', 'command -v systemd-run'], { encoding: 'utf8' }).status === 0,
   isRoot: () => (process.getuid?.() ?? 0) === 0,
+  registerUnit: (argv, env, cwd) => {
+    const [bin, ...rest] = argv;
+    const done = spawnSync(bin as string, rest, { cwd, env, encoding: 'utf8' });
+    if (done.status === 0) return { ok: true };
+    const detail = (done.stderr || done.stdout || '').trim().split('\n').slice(0, 3).join(' ');
+    return { ok: false, error: detail || done.error?.message || `exit ${done.status ?? 'unknown'}` };
+  },
   spawnDetached: (argv, env, cwd) => {
     const [bin, ...rest] = argv;
     const child = spawn(bin as string, rest, { detached: true, stdio: 'ignore', env, cwd });
