@@ -173,15 +173,42 @@ Executed 2026-08-29.
    unit: cez-fix-….service"*, and the unit executed, writing `PROBE_OK from
    /var/lib/cezar/loki-labs/cezar` to a project-owned log. The control is what makes this evidence
    rather than a hopeful re-run. ✅
-9. **Production E2E, round 2 — pending.** Acceptance unchanged: one press, the card reading
+9. **S7**: a re-exec whose `systemd-run` fails reports `ok: false` naming the reason and hands back
+   **no** `detachedUnit`, having staged and restarted nothing; the log directory prefers
+   `/var/log/cezar` when creatable (the negative control), falls through when not, and never fails a
+   deploy over a log. **Mutation-checked**: ignoring the handoff result → red; never falling through
+   → 3 red; ignoring the resolved directory → red.
+10. **S8**: with the ref declaring `activate` and **both** working trees stale, the launch still
+    happens — and each working-tree read is asserted empty in the same test, so the pass can only
+    have come from the ref. **Mutation-checked**: dropping the ref read → red.
+11. **Production E2E, round 2 — pending.** Acceptance unchanged: one press, the card reading
    "deploying … now", a new release under `/opt/cezar-releases/`, every park clearing on the restart
    with no second press.
 
-### Known gap, recorded not fixed
+**S7 — `server-deploy`'s own re-exec, fixed too** *(2026-08-29, on the owner's instruction; it was
+first recorded here as a known gap).* The shared deploy path had the same unwritable-log defect and
+a worse reporting one:
 
-`server-deploy`'s OWN re-exec path (`release-deploy.ts`) still defaults to `/var/log/cezar` and does
-not add the bus env, so `cezar server-deploy` run from **inside a task** on this box would hit
-defect 2 the same way. It is not hit today because every activation so far has been run from ssh,
-where `decideReExec` reports *"not inside cezar.service's cgroup"* and never detaches. Left alone
-deliberately: fixing it means changing the shared deploy path, which deserves its own change rather
-than riding along with this one.
+- `deployLogPath` hardcoded `/var/log/cezar`. It is now resolved: `pickDeployLogDir` takes the first
+  candidate the deployer can create (`/var/log/cezar`, then `~/.cezar/deploy-logs`, then the temp
+  dir), memoized per process since the answer depends only on the uid. `readDeployLog` tries **every**
+  candidate, because a log written by a root deployer and one written by the service account land in
+  different directories and `--follow` on the wrong one reports an empty deploy.
+- `ReleaseDeployHost.spawnDetached` returned `void`, so `runReleaseDeploy` answered
+  `{ ok: true, detachedUnit }` whether or not a unit existed. It now returns `{ ok, error? }` —
+  implemented with `spawnSync` for `systemd-run`, which returns once the unit is registered — and a
+  failed handoff is reported as a failure. Nothing has been staged or flipped at that point, so
+  failing there is both safe and honest; the previous behaviour turned "the unit never started" into
+  something indistinguishable from a hung deploy.
+
+**S8 — the fallback declaration is read from a REF, not the project root's working tree** *(same
+instruction).* S2a's fallback was weak on the one box it was written for: the project root there is
+the shared checkout task worktrees fork from, and nothing pulls it — `activate-main.sh` refuses to
+`reset --hard` it by design, and agents fetch without pulling. Measured 2026-08-29: **22 commits
+behind `origin/main` with 4 dirty files.** The lookup is now worktree → `git show origin/<base>:…`
+→ project-root working tree. The ref is current the moment anything fetched and is unaffected by
+dirty files, and it matches how worktrees already choose their base (`resolveBaseRef` prefers
+`origin/<base>` when the local branch is behind), rather than inventing a third answer.
+
+Note what did **not** need fixing: new task worktrees were never affected by the stale checkout,
+because `resolveBaseRef` already forks from `origin/<base>`.

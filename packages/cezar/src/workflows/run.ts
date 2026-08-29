@@ -157,6 +157,7 @@ import {
   ensureActivationLogDir,
   markActivationLaunched,
   readActivationCommands,
+  readActivationCommandsFromRef,
   type ActivationHost,
 } from './manual-activation.ts';
 import { classifyTask } from '../task-classifier.ts';
@@ -6990,7 +6991,14 @@ export class RunManager {
     const commands = ((): ReturnType<typeof readActivationCommands> => {
       const own = readActivationCommands(cwd, failing);
       if (own.length > 0 || cwd === this.repoRoot) return own;
-      return readActivationCommands(this.repoRoot, failing);
+      // The base REF before the project root's working tree. On this box the project root is the
+      // shared checkout worktrees fork from, which nothing pulls — 22 commits behind with 4 dirty
+      // files when measured — so its working tree is the least current copy of the three. The ref
+      // is current the moment anything fetched. The working-tree read stays last, for a repo with
+      // no remote at all, where the ref does not resolve.
+      const base = this.store.getRun(runId)?.baseBranch ?? 'main';
+      const fromRef = readActivationCommandsFromRef(this.repoRoot, `origin/${base}`, failing);
+      return fromRef.length > 0 ? fromRef : readActivationCommands(this.repoRoot, failing);
     })();
     if (commands.length === 0) return undefined;
     const dataDir = join(this.repoRoot, '.ai', 'cezar');

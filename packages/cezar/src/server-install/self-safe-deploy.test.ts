@@ -1,16 +1,7 @@
+import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 
-import {
-  DETACHED_ENV,
-  buildSystemdRunArgv,
-  decideReExec,
-  deployLogPath,
-  isInsideUnitCgroup,
-  readKillMode,
-  readSelfCgroup,
-  transientUnitName,
-  userBusEnv,
-} from './self-safe-deploy.ts';
+import { DETACHED_ENV, buildSystemdRunArgv, decideReExec, deployLogPath, isInsideUnitCgroup, pickDeployLogDir, readKillMode, readSelfCgroup, transientUnitName, userBusEnv } from './self-safe-deploy.ts';
 
 /**
  * P2 of `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`.
@@ -218,5 +209,55 @@ describe('--user transient unit (fix 1)', () => {
       XDG_RUNTIME_DIR: '/run/user/999',
       DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/999/bus',
     });
+  });
+});
+
+/**
+ * Where a detached deploy may write, and why the answer is not a constant.
+ *
+ * MEASURED on prod-host, 2026-08-29: `/var/log/cezar` cannot be created by the `cezar` uid
+ * (`mkdir: Permission denied`), and systemd refuses to START a unit whose `append:` target is
+ * unwritable. A hardcoded log path is therefore not a cosmetic default — on a rootless box it
+ * fails every detached deploy, silently, because the unit never runs to report anything.
+ */
+describe('deploy log directory — resolved, not assumed', () => {
+  it('prefers /var/log/cezar when the deployer can actually create it', () => {
+    // The negative control for the test below: without it, "falls back" would pass even if the
+    // resolver had stopped preferring the system location entirely.
+    const tried: string[] = [];
+    const dir = pickDeployLogDir(['/var/log/cezar', '/home/u/.cezar/deploy-logs'], (d) => {
+      tried.push(d);
+    });
+    expect(dir).toBe('/var/log/cezar');
+    expect(tried).toEqual(['/var/log/cezar']);
+  });
+
+  it('falls through to the next candidate the deployer owns', () => {
+    const dir = pickDeployLogDir(['/var/log/cezar', '/home/u/.cezar/deploy-logs'], (d) => {
+      if (d === '/var/log/cezar') throw new Error('EACCES: permission denied');
+    });
+    expect(dir).toBe('/home/u/.cezar/deploy-logs');
+  });
+
+  it('never fails the deploy over a log — an unusable set still yields a writable path', () => {
+    const dir = pickDeployLogDir(['/var/log/cezar'], () => {
+      throw new Error('EACCES');
+    });
+    expect(dir).toBe(tmpdir());
+  });
+
+  it('puts the release id in the file name, under whichever directory won', () => {
+    expect(deployLogPath('20260829T170143Z-d66a25ee', '/somewhere'))
+      .toBe('/somewhere/deploy-20260829T170143Z-d66a25ee.log');
+  });
+
+  it('honours an explicit logPath in the unit argv, overriding the resolved default', () => {
+    const argv = buildSystemdRunArgv({
+      releaseId: 'r1',
+      command: ['bash', '-lc', 'true'],
+      logPath: '/var/lib/cezar/x/.ai/cezar/activations/r1.log',
+    });
+    expect(argv).toContain('--property=StandardOutput=append:/var/lib/cezar/x/.ai/cezar/activations/r1.log');
+    expect(argv.join(' ')).not.toContain('/var/log/cezar');
   });
 });
