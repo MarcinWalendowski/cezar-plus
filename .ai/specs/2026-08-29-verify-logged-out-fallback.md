@@ -1,9 +1,10 @@
 # Verify the Logged-Out Fallback
 
-- **Status:** Written 2026-08-29 for run `55e9d5df-a9da-4d04-a1d1-ef107cea4842`
-  (`spec-to-deploy`), step 2 of 9; **revised twice on 2026-08-29, after two reviews**. **Nothing here has been
-  executed.** No gate, no E2E, no deploy and no record edit has been performed by this step; every
-  number below is a measurement, and every command below is a proposal.
+- **Status:** Executed 2026-08-29 for run `55e9d5df-a9da-4d04-a1d1-ef107cea4842`.
+  The verified merged tree is `87ad92bb`; V7 and the full repository gates passed. V6 was executed
+  with isolated shims but remains incomplete because the live provider baseline returned HTTP 401 and
+  the full event and browser assertions did not complete. The feature remains QA Needed. Production
+  activation is manual by repository policy.
 - **Revision 2026-08-29 (second review).** Nine more findings, all against current `origin/main`,
   all applied and each marked `CORRECTED 2026-08-29 (second review)` where it landed. Two were
   blocking execution mismatches: the per-account status route answers `{status: {…}}`, so P2's
