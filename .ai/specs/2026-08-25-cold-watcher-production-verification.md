@@ -1,9 +1,11 @@
 # Cold Watcher Production Verification
 
-> **Status:** Specified. The runtime fix this task describes is already merged to
-> `origin/main`; what remains is closing three verification gaps, a manual deployment,
-> and two production canaries. QA Needed until both cold paths pass on the running
-> production service.
+> **Status:** EXECUTED and VERIFIED 2026-08-29. Both production cold-project canaries
+> passed against the live service (`deploy.sha = 17637629`, which contains the fix
+> `809c8220`), so no manual deployment was needed to close criterion 5: production had
+> already moved past the fix by the time this ran. The three verification gaps are closed,
+> with one correction to this spec's own plan (see the Execution Record at the end, S4
+> control 3).
 >
 > **Task:** `abfcdb9c-e63b-4c0c-95c3-d331a86e39f7`. Board todo
 > `f09bf585-f4fa-416f-a979-5bbd0dac22ed` carries this task's exact summary and is
@@ -495,3 +497,124 @@ both canary projects are now resident and the untouched cold projects still are 
 This spec remains QA Needed if either canary was resident before its intent was written,
 if only one of the twin paths was exercised, if the positive control ever read zero, or
 if cleanup is incomplete.
+
+## Execution Record (2026-08-29)
+
+Run `abfcdb9c-e63b-4c0c-95c3-d331a86e39f7`, step `continue-1`. Four days elapsed between
+this spec being written and executed, so every load-bearing measurement in Problem was
+re-taken rather than inherited.
+
+### What changed since the spec was written
+
+Production is no longer behind the fix. `GET /api/v1/ready` reports
+`sha = 176376293522fc5be915fe60713c9ea5cd7df3c3`, activated `2026-08-29T11:15:27.770Z`, and
+`git merge-base --is-ancestor 809c8220 17637629` answers yes. **P5's manual-deploy park
+therefore never applied**: the canaries' precondition (a running server carrying the fix)
+was already true, and they were run directly. `origin/main` is one docs commit
+(`5530b113`) ahead of what is live; nothing in that commit touches this mechanism.
+
+### P1: rebase (done)
+
+Merged `origin/main` into `cez/abfcdb9c` as `7a3a7879`, clean.
+`git merge-base --is-ancestor 809c8220 HEAD` now answers yes and
+`packages/cezar/src/server/lazy-project-intents.ts` is present.
+
+### P2: probe correction (done)
+
+Applied to `.ai/specs/2026-08-25-lazy-project-watchers.md` with a bolded
+`CORRECTED 2026-08-29` lead-in and the original block preserved below it. Proven on the
+live server before being written down, in one invocation: positive control `cezar` = 1 and
+`chat` = 1, against `0` for `loki-labs`, `mw-site`, `anymail-mcp`, `aside`,
+`bubble-trade`, `career`, `career-kit`, `homebrew-tap`, `brand`, `lokie-chatbox`.
+
+**One addition the spec did not anticipate.** Globbing `/proc/$pid/fdinfo/*` into a single
+`awk` invocation is itself unsafe against a live server: a descriptor closed mid-scan makes
+`awk` exit fatally, printing an empty `matches=` that reads exactly like a cold project.
+This was hit once during the close-out probe (`fdinfo/38` vanished). The corrected block now
+tells the operator to `cat` each file in a loop instead.
+
+### P3: test rigor (done, with one correction to this spec)
+
+S3 removed the self-arming `stopTargetWatch = watch…({…})` line from both stubs, so the only
+path from a woken context to a live watcher is `createApp`'s `onContextBuilt`. Teardown now
+tears down by re-subscribe (the modules keep at most one subscription per `dataDir`, so
+re-subscribing stops what `onContextBuilt` armed, and stopping the replacement leaves none).
+Baseline after the edit: 2 files, 51 tests, green.
+
+S4 controls, each applied and reverted with the tree verified clean afterwards:
+
+| Removal | Result |
+| --- | --- |
+| `server.ts:1950` `contexts.onContextBuilt((ctx) => watchTodoAutostart(…))` | `todo-autostart.test.ts` cold test FAILS (1 failed / 38 passed) |
+| `server.ts:1966` `contexts.onContextBuilt((ctx) => watchReopenRequests(…))` | `reopen-watch.test.ts` cold test FAILS (1 failed / 11 passed) |
+| `startServer`'s `void lazyProjectIntentDiscovery.refresh()` | **BOTH STILL PASS: this spec's predicted control is wrong** |
+| `lazy-project-intents.ts:296` `await deps.contexts.context(row.id)` | BOTH cold tests FAIL (2 failed / 49 passed) |
+
+**CORRECTION to this spec's Verification table.** It asserted that removing
+`void lazyProjectIntentDiscovery.refresh()` must break both cold tests on `builds === 1`.
+It does not, and the reason is not a mis-cut: `refresh()` only performs the *immediate*
+first discovery pass, while the service also arms `watchFile(…, { interval: intervalMs })`
+on each intent path. The tests set `lazyProjectIntentIntervalMs: 10`, so the interval poll
+reaches the same pending file within milliseconds and the wake still happens. `refresh()` is
+a latency optimization at boot, not the load-bearing line. The load-bearing line is
+`lazy-project-intents.ts:296`, and cutting *that* fails both tests as intended. The
+"discovery is what wakes the context" property is therefore established, by a control that
+actually holds.
+
+Each failure is a behavioural one (the test times out waiting for `builds`/`started` to
+move), not an import, module or type error, which is the distinction this spec required.
+
+### P4: gates
+
+| Gate | Result |
+| --- | --- |
+| `npm run typecheck` | exit 0 |
+| `npm run build` | exit 0 (`check:pack ok — 1257 files`) |
+| `npm run test:unit` | 47/47 pass |
+| `npm run test:package` | 25/25 pass |
+| `npx vitest run` on the twin files | 51/51 pass |
+
+There is no root `lint` script, so no lint claim is made.
+
+### P5: production canaries (both PASSED)
+
+Live `pid = 4077888`, inotify baseline 3222 watches on `fdinfo/25`.
+
+**Autostart canary, `mw-site`.** Measured cold (`matches=0`) immediately before, with
+`runs.json` absent. `cez todo add` (filesystem-only, never HTTP; confirmed from
+`todo-cli.ts`'s own docblock, so filing cannot itself wake the context) then
+`cez todo start c2231b8c… --project mw-site`, which set `autostart: true` and nothing else.
+**4 seconds later**: `startedTaskId = dc24830f-6045-4d69-871c-6da692fc5448`, `autostart`
+cleared, exactly one matching run in `mw-site`'s `runs.json`. `mw-site` went
+`matches=0 → 1`; inotify 3222 → 3223.
+
+**Reopen canary, `loki-labs`.** Measured cold (`matches=0`), `reopen-requests.json` absent,
+one finished run `b3e36341…` with 1 step. `cezar runs reopen` wrote the inert request.
+**6 seconds later**: `startedAt = 2026-08-29T12:37:45.659Z`, exactly one continuation step
+appended (`task:done`, `continue-1:pending`), run queued under that project's own manager,
+exactly one request and no duplicate continuation. `loki-labs` went `matches=0 → 1`;
+inotify 3223 → 3224.
+
+The two canaries used different projects, so neither invalidated the other.
+
+**Non-creation control.** The eight untouched cold projects (`aside`, `career-kit`, `brand`,
+`homebrew-tap`, `bubble-trade`, `career`, `anymail-mcp`, `lokie-chatbox`) each still report
+`matches=0` and gained no file newer than the canary start. Discovery created no directory
+and took no watch on a project with no pending intent. Close-out inotify total 3226, i.e.
++4 over baseline across both woken projects.
+
+`find /var/lib/cezar -not -user cezar | wc -l` = 0.
+
+### Open item: cleanup needs one human action
+
+The autostart canary is inherently a run-creating probe, and cezar has **no headless cancel**:
+`POST /runs/:id/cancel` answers `401 unauthenticated` (correctly: the API sits behind the
+principal perimeter and a session cookie cannot be minted from a shell), and the CLI has no
+cancel verb. So run `dc24830f-6045-4d69-871c-6da692fc5448` in `mw-site` is parked `queued`
+with all 9 steps pending and no worktree taken. **Cancel it from the cockpit and tombstone
+todo `c2231b8c-85af-4869-8439-eea9f6442fb1`.** The reopen canary needs no such cleanup: it
+continued an existing finished run, which terminates on its own.
+
+A future revision of the autostart canary should either prefer a project whose workflow is a
+single read-only step, or the runtime should grow a headless cancel, because "file a
+disposable todo and cancel the run" is not actually executable end to end by an agent today.
