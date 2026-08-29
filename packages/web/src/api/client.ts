@@ -164,6 +164,7 @@ import type {
   BackupRestoreResponse,
   BackupVerifyResponse,
   BackupGcResponse,
+  AnalyticsEvent,
 } from '@loki-labs/better-cezar-api-client'
 import { parseProviderStatusResponse } from '@/lib/provider-status'
 import {
@@ -2701,6 +2702,18 @@ export async function getWorkspaceRuns(
  */
 export async function getWorkspaceTodos(opts?: ReadOptions): Promise<WorkspaceTodosResponse> {
   return unwrap(await cez.api.v1.workspace.todos.$get({}, init(opts)), '/workspace/todos')
+}
+
+/**
+ * `POST /workspace/analytics/events` — the typed wrapper `.ai/specs/2026-08-26-filed-task-detail-
+ * page.md:507-509` specified and nobody wrote until spec 2026-08-29-step-retry-timing. Spelled
+ * like `updateWorkspaceTodo` above, but deliberately **without** `unwrap`: this is the one call
+ * site in the cockpit that must not throw on a non-2xx. `@/lib/analytics`'s `track()` is the
+ * fire-and-forget façade that calls this and swallows the rejection — the split keeps "what the
+ * route is" (here) separate from "failure is not the caller's problem" (there).
+ */
+export async function postAnalyticsEvents(events: AnalyticsEvent[]): Promise<void> {
+  await cez.api.v1.workspace.analytics.events.$post({ json: { events } })
 }
 
 /** `GET /backup` (`.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`) — the backup

@@ -60,6 +60,18 @@ export type StepStatus = z.infer<typeof stepStatusSchema>;
 
 const usageCounterSchema = z.number().finite().nonnegative();
 
+/** One ATTEMPT at a workflow step — the timing half of `iterations` (spec
+ *  2026-08-29-step-retry-timing). Written only by `RunStore.updateStep`, which is the one
+ *  function that sees every `startedAt`/`finishedAt` patch a step ever gets. */
+export const stepAttemptSchema = z.object({
+  /** ISO instant this attempt was entered — the `startedAt` that used to be overwritten. */
+  startedAt: z.string(),
+  /** ISO instant it ended. Absent while the attempt is in flight; also absent, briefly, for an
+   *  attempt a crash interrupted before the next one opened (risk R2). */
+  finishedAt: z.string().optional(),
+});
+export type StepAttempt = z.infer<typeof stepAttemptSchema>;
+
 /** One step of a run's chain. */
 export const stepStateSchema = z.object({
   id: z.string(),
@@ -87,6 +99,20 @@ export const stepStateSchema = z.object({
   usageInvocationEpoch: usageCounterSchema.optional(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
+  /** Every attempt at this step, oldest first — `startedAt`/`finishedAt` above hold only the
+   *  LATEST one, which is why a retried step's clock used to read attempt N rather than the sum
+   *  (spec 2026-08-20-step-and-tool-call-durations risk R3). `attempts.length` equals
+   *  `iterations` for every step whose FIRST `startedAt` was written under spec
+   *  2026-08-29-step-retry-timing. ABSENT, and PERMANENTLY absent, otherwise: a record written
+   *  before that spec, and a step that was already mid-flight (`iterations > 0`) when it landed,
+   *  both keep this field unset for life, because a partial array would read as authoritative
+   *  and silently omit every earlier attempt. The cockpit reads absent as "fall back to the
+   *  single startedAt/finishedAt pair", never as zero attempts. There is no backfill: the
+   *  timestamps one would need were overwritten and are gone. Written only by
+   *  `RunStore.updateStep`, keyed on the ITERATION increment — never on a `startedAt` comparison,
+   *  since two attempts can share a millisecond. Starts are nondecreasing, not strictly
+   *  increasing. */
+  attempts: z.array(stepAttemptSchema).optional(),
   error: z.string().optional(),
   /** Latest agent session id — `claude --resume <id>` and friends. */
   sessionId: z.string().optional(),
