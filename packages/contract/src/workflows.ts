@@ -71,6 +71,22 @@ export const workflowStepDefSchema = z
       .object({
         retry: z.string().min(1),
         max: z.number().int().positive().default(2),
+        /**
+         * Re-enter the target step's own session on this loop-back rather than starting it cold.
+         * Mirrors `resume` in `src/workflows/types.ts`
+         * (`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`, D1); absent = cold, which
+         * is what every pre-existing workflow does.
+         *
+         * Mirrored BY HAND, for the reason `heavy` below already records:
+         * `contract-parity.workflows.test.ts` compares the two shapes with a MUTUAL assignability
+         * check, and an added OPTIONAL property stays assignable in both directions — so a key
+         * added on the server side alone typechecks green and the guard says nothing. `GET
+         * /workflows` serves the server's `WorkflowDef` verbatim, so the flag is on the wire
+         * already; a consumer rebuilding a step field-by-field from THIS type would drop it on
+         * the way back through `POST /workflows`, and the loop-back would go cold again with
+         * nothing red.
+         */
+        resume: z.boolean().optional(),
       })
       .optional(),
     /**

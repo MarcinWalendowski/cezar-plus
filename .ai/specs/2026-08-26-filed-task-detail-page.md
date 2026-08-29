@@ -10,13 +10,24 @@
   extraction, no `todos/:todoId` route, no `FiledTaskDetailRoute`, and no Archived-view link
   change in `global-tasks.tsx`: every filed row, Done/archived included, still opens
   `FiledDetailDialog`. The task's own acceptance criterion ("clicking a Done filed-task title
-  navigates to a dedicated full-detail URL") is **unmet**. The shipped sink also has no caller
-  yet, so `todo.detail_opened` is never emitted in production. Phase 5 (e2e) and the
+  navigates to a dedicated full-detail URL") is **unmet**. **CORRECTED 2026-08-29 by
+  `.ai/specs/2026-08-29-step-retry-timing.md`: the next two sentences no longer hold.** ~~The
+  shipped sink also has no caller yet, so `todo.detail_opened` is never emitted in production.~~
+  The sink has a caller now — `postAnalyticsEvents` (`packages/web/src/api/client.ts`) and
+  `track()` (`packages/web/src/lib/analytics.ts`), first exercised by that spec's
+  `step.attempts_expanded` event on the step rail's `×N` disclosure. `todo.detail_opened` itself
+  still has no emitter: **Phases 1-3 of this spec are still genuinely unshipped** (unchanged, see
+  below), and it is those phases' own UI that was meant to fire it. ~~Phase 5 (e2e) and the
   `CEZ_ANALYTICS` doc surfaces (`.env.example`, README env table, `BACKWARD_COMPATIBILITY.md`
   §1/§2) required by Phase 4 also did not land, a real gap against `AGENTS.md:31` ("adding a
-  `CEZ_*` env var MUST update `.env.example` in the same commit"). Do **not** treat
+  `CEZ_*` env var MUST update `.env.example` in the same commit").~~ The `CEZ_ANALYTICS` doc debt
+  is now paid, on all three surfaces named — `.env.example`, the README env table, and
+  `BACKWARD_COMPATIBILITY.md` §1 (§2 already had the route, from `a04cda25` the same day). Phase 5
+  (e2e) of THIS spec is unaffected and still did not land. Do **not** treat
   `notion-7bb302edff13` below as superseded: the dialog-only behaviour it records is still
-  exactly what ships today. Follow-up filed; see the KB note this correction points to.
+  exactly what ships today. **Follow-up filed 2026-08-29 by the step-retry-timing document
+  step: todo `23eecf5e-646b-4e07-87cb-dcddc2f518ca`** (Phases 1-3, the actual feature, still
+  unshipped) — the prior version of this sentence promised a follow-up without ever filing one.
 - **Date:** 2026-08-26
 - **Owner instruction:** "Open archived tasks as full pages". Clicking an archived Done filed
   task should navigate to a full-detail page instead of opening the existing modal.

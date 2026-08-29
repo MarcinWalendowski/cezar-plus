@@ -60,6 +60,7 @@ import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.ts';
 import { LEASE_HEARTBEAT_MS, removeWorktreeLeases, touchWorktreeLeases, writeWorktreeLease } from '../workspace/worktree-lease.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
+import { readWorktreePath } from '../server/git-changes.ts';
 import { loadWorkflows } from './load.ts';
 import { deriveBaseBranch, evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
 import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/store.ts';
@@ -73,6 +74,7 @@ import {
 } from '../runs/agent-tmpdir.ts';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.ts';
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
+import { appendSpecReviewEntry, readSpecReviewEntries, SPEC_SNAPSHOT_CAP, summariseSpecReview } from '../runs/spec-review-log.ts';
 import {
   autoNamingActive,
   generateRunName,
@@ -337,6 +339,17 @@ interface ActiveRun {
   reviewVerdict?: ReviewVerdict;
   /** The reviewing turn's full report — what a `revise` verdict hands to the retried step. */
   reviewReport?: string;
+  /**
+   * The spec path the CURRENT step's finished turn declared via `CEZ:SPEC_PATH=` (spec
+   * `.ai/specs/2026-08-29-spec-tab-review-feed.md`, P1) — set in the turn-end handler beside
+   * `reviewVerdict`, read and cleared by the step loop just before the review block, which
+   * snapshots the file into the spec-review side log. Read from the turn text directly rather than
+   * `RunRecord.declaredSpecPath`, because that field's own doc comment records it as NOT
+   * guaranteed to be set on the persistence path (`recordTurnEnd` is fire-and-forget), while this
+   * capture is synchronous and not gated on `interactive` — exactly the property a mid-chain
+   * `spec` step needs.
+   */
+  stepSpecPath?: string;
   /** Resolver for a run parked on a human approval gate (spec 2026-08-20, P3). Present ONLY
    *  while parked; `approve`/`requestChanges` call it, `cancel` aborts it. */
   approvalWaiter?: (outcome: ApprovalOutcome) => void;
@@ -858,6 +871,102 @@ function continuedStepName(sessionStepName: string): string {
  * not. The instruction that matters is "land what you have", because the same bound is armed
  * again for the retry and a second stop ends the run.
  */
+/**
+ * Why a loop-back did or did not re-enter the target step's own session — the `reason` field of
+ * the `run.step.looped_back` metric (`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`).
+ *
+ * `resumed` is the only success value; every other member names a guard that fired and sent the
+ * step back COLD. They are distinguished rather than collapsed into one falsy value because they
+ * call for different actions: `disabled` is a workflow that never asked, `no-session` is a target
+ * that never got far enough to have one, `backend-changed` is a quota downgrade having moved the
+ * step off its pinned runner, and `not-agent` is a workflow pointing `onFail.retry` at a check
+ * step. Only the middle two are ever surprising.
+ */
+export type LoopBackResumeReason =
+  | 'resumed'
+  | 'disabled'
+  | 'not-agent'
+  | 'no-session'
+  | 'backend-changed';
+
+/** The handle `runAgentStep` consumes as `resumeFrom`, minus the fields only a restart carries. */
+export interface LoopBackResumeHandle {
+  sessionId: string;
+  profileId?: string;
+  prompt: string;
+  verifyTranscript: true;
+}
+
+/**
+ * Should this loop-back re-enter the target step's OWN session, and if not, why not
+ * (`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`, D1)?
+ *
+ * Pure and exported so the guards can be tested one at a time. Inline in `loopBackTo` they were
+ * reachable only by driving a whole chain to a `revise` verdict per case, which is the shape that
+ * gets a branch written and never exercised — and a guard that never fires is indistinguishable
+ * from a guard that is wrong.
+ *
+ * Every branch except `resumed` returns NO handle, which means a cold session: this is an
+ * optimization, and an optimization that can fail a run is not one.
+ */
+export function loopBackResumeDecision(args: {
+  /** `step.onFail?.resume === true` — the workflow asked for this at all. */
+  enabled: boolean;
+  target: WorkflowStepDef | undefined;
+  /** The target's row in the run record, read BEFORE the loop-back resets it to `pending`. */
+  targetRecord: { sessionId?: string; profileId?: string; backend?: RunnerId } | undefined;
+  /** The run's own backend, i.e. what an unpinned step runs on. */
+  taskBackend: RunnerId;
+}): { reason: LoopBackResumeReason; resume?: LoopBackResumeHandle } {
+  const { enabled, target, targetRecord, taskBackend } = args;
+  if (!enabled || !target) return { reason: 'disabled' };
+  if (stepKind(target) !== 'agent') return { reason: 'not-agent' };
+  if (!targetRecord?.sessionId) return { reason: 'no-session' };
+  // Where the target WOULD run now, against where it actually ran. They differ when a pinned
+  // runner was downgraded for quota (`downgradePinnedRunner`, `2026-08-23-never-block-a-task.md`),
+  // and handing one provider's conversation id to another is not a resume, it is an error the
+  // reactive fallback would then have to clean up.
+  //
+  // `?? would` on the recorded side deliberately: `runAgentStep` stamps `backend` before it
+  // spawns, so a record with a session but no backend is a hand-edited or pre-#547 file rather
+  // than a real mismatch — widen the READ, per this repo's own precedent, instead of refusing it.
+  const would = target.runner ?? taskBackend;
+  if ((targetRecord.backend ?? would) !== would) return { reason: 'backend-changed' };
+  return {
+    reason: 'resumed',
+    resume: {
+      sessionId: targetRecord.sessionId,
+      // `sessionId` and `profileId` are a PAIR — see `chainResumeAt`.
+      ...(targetRecord.profileId ? { profileId: targetRecord.profileId } : {}),
+      prompt: loopBackContinuationPrompt(target.name ?? target.id),
+      // A Claude session whose transcript never landed must not be handed to `--resume`.
+      verifyTranscript: true,
+    },
+  };
+}
+
+/**
+ * The prompt a RESUMED loop-back opens with (`.ai/specs/2026-08-29-step-resume-and-two-stage-
+ * review.md`, D1). It replaces the step's templated prompt — `runAgentStep` reads
+ * `resumeFrom?.prompt ?? applyTemplate(...)` — and the review itself still arrives right after
+ * it through `checkFailure`, unchanged.
+ *
+ * It has one job beyond politeness: a resumed session already believes it FINISHED this step, and
+ * re-sending the original "write ONE spec file" prompt to a window that already contains the
+ * written spec is how a resumed step re-emits a file it should have been editing. So the text
+ * says what changed (a reviewer objected) and what to do with it (apply the list to what is
+ * already on disk), and never restates the step's original instructions.
+ */
+export function loopBackContinuationPrompt(stepName: string): string {
+  return (
+    `A reviewer has asked for changes to your work on "${stepName}". This is the SAME session you ` +
+    'just finished it in — everything you read and wrote is still here, and the files are still ' +
+    'on disk, so do not start over and do not re-read what you already have. Apply the change ' +
+    'list below to what exists, leave everything it does not name alone, and end the turn the ' +
+    'same way you ended it last time.'
+  );
+}
+
 export function stoppedContinuationPrompt(_reason: AgentStopReason): string {
   return (
     'Your previous turn did not end on its own — cezar stopped the session because it had ' +
@@ -5664,6 +5773,15 @@ export class RunManager {
     const canLoopBack = (from: WorkflowStepDef): boolean =>
       Boolean(from.onFail) && (retriesUsed.get(from.id) ?? 0) < (from.onFail?.max ?? 0);
 
+    /** The resume handle a warm loop-back (`onFail.resume`) hands to the step it re-runs.
+     *  Declared HERE rather than beside `stopResume` because `loopBackTo` below writes it, and a
+     *  closure assigning an outer binding declared further down reads as a hazard even where it
+     *  is legal. Consumed exactly once, by the next step the loop runs — same one-shot contract
+     *  as `stopResume`, which is why they are cleared together. */
+    let loopBackResume:
+      | { sessionId: string; profileId?: string; prompt: string; verifyTranscript?: true }
+      | undefined;
+
     /**
      * Send the chain BACK to `step.onFail.retry`, carrying `feedback` into that step's prompt.
      *
@@ -5677,10 +5795,49 @@ export class RunManager {
      * Returns the index to continue from. Callers check `canLoopBack` first.
      */
     const loopBackTo = (from: number, step: WorkflowStepDef, feedback: string, message: string): number => {
-      retriesUsed.set(step.id, (retriesUsed.get(step.id) ?? 0) + 1);
+      const attempt = (retriesUsed.get(step.id) ?? 0) + 1;
+      retriesUsed.set(step.id, attempt);
       checkFailure = feedback;
       const retryIdx = workflow.steps.findIndex((candidate) => candidate.id === step.onFail?.retry);
       emit({ type: 'note', stepId: step.id, message });
+      // Read the target's record BEFORE the reset below: `updateStep(... 'pending')` is what the
+      // rail needs, and it runs over a slice that INCLUDES the target, so reading after it would
+      // still see `sessionId` today but only because that particular write happens not to clear
+      // it. Reading first makes the ordering irrelevant instead of load-bearing.
+      const target = retryIdx >= 0 ? (workflow.steps[retryIdx] as WorkflowStepDef | undefined) : undefined;
+      const targetRecord = target
+        ? this.store.getRun(runId)?.steps.find((s) => s.id === target.id)
+        : undefined;
+      // ---- warm loop-back (spec 2026-08-29, D1) -------------------------------------------
+      // Every branch falls back to a COLD session and names its reason. A `resume: true` that
+      // silently never fires is the exact shape this feature exists to remove, so the reason is a
+      // metric field rather than a comment.
+      const decision = loopBackResumeDecision({
+        enabled: step.onFail?.resume === true,
+        target,
+        targetRecord,
+        taskBackend,
+      });
+      const resumeReason = decision.reason;
+      if (decision.resume) {
+        loopBackResume = decision.resume;
+        emit({
+          type: 'note',
+          stepId: step.id,
+          message: `resuming "${target?.id}" in its own session — the rework keeps what it already read`,
+        });
+      }
+      emit({
+        type: 'metric',
+        stepId: step.id,
+        name: 'run.step.looped_back',
+        runId,
+        workflow: workflow.name,
+        target: step.onFail?.retry,
+        attempt,
+        resumed: resumeReason === 'resumed',
+        reason: resumeReason,
+      });
       for (const between of workflow.steps.slice(retryIdx, from + 1)) {
         this.store.updateStep(runId, between.id, { status: 'pending' });
       }
@@ -5777,8 +5934,12 @@ export class RunManager {
         const interactive = i === lastAgentIdx && i === workflow.steps.length - 1;
         // A stop re-entry's handle wins: it is for THIS iteration of THIS step, whereas
         // `resumeFrom` belongs to the restart that opened the loop and is spent on `resumeIdx`.
-        const stepResume = stopResume ?? (i === resumeIdx ? resumeFrom : undefined);
+        // Precedence: a STOP re-entry's handle is for this exact iteration of this exact step and
+        // wins; a loop-back handle belongs to the step the loop-back targeted, which is the step
+        // running now; `resumeFrom` belongs to the restart that opened the loop.
+        const stepResume = stopResume ?? loopBackResume ?? (i === resumeIdx ? resumeFrom : undefined);
         stopResume = undefined;
+        loopBackResume = undefined;
         resumeFrom = undefined;
         state.stepStopped = undefined;
         state.brokerNeverAnswered = undefined;
@@ -5969,6 +6130,12 @@ export class RunManager {
           break;
         }
 
+        // The spec/review feed's snapshot (spec 2026-08-29-spec-tab-review-feed, P1): a step that
+        // declared `CEZ:SPEC_PATH=` on this attempt gets its file captured into the side log NOW,
+        // before either gate below runs — so a review of THIS attempt is always recorded after its
+        // own draft, never before it.
+        await this.recordSpecSnapshot(runId, state, step.id);
+
         // ---- the spec reviewer's verdict (spec 2026-08-20, P2) -------------------------------
         // Read and CLEAR: the verdict belongs to the step that just ran, and leaving it set would
         // let one reviewer's `revise` re-trigger on a later step that never declared anything.
@@ -5976,6 +6143,13 @@ export class RunManager {
         const report = state.reviewReport;
         state.reviewVerdict = undefined;
         state.reviewReport = undefined;
+        // Recorded for BOTH verdicts (spec 2026-08-29-spec-tab-review-feed, P1) — a clean `pass`
+        // is what lets the feed end honestly rather than simply stopping, and a `pass` immediately
+        // followed by a human `revise` (both gates can fire on one revision) is a real event the
+        // log must not throw away, even though the display suppresses the provisional card.
+        if (reviewVerdict) {
+          this.recordSpecReview(runId, step.id, 'agent', reviewVerdict, report ?? '');
+        }
         if (reviewVerdict === 'revise' && step.onFail) {
           const used = retriesUsed.get(step.id) ?? 0;
           if (canLoopBack(step)) {
@@ -6013,6 +6187,10 @@ export class RunManager {
           const outcome = await this.awaitApproval(runId, state, step, emit, config);
           if (outcome.kind === 'cancelled') break;
           if (outcome.kind === 'changes') {
+            // Spec 2026-08-29-spec-tab-review-feed, P1: recorded at the moment of the human's
+            // decision, whether or not a revision slot remains below — the request happened
+            // either way, and the terminal "no revisions left" branch is a real objection too.
+            this.recordSpecReview(runId, step.id, 'human', 'revise', outcome.notes);
             const used = retriesUsed.get(step.id) ?? 0;
             if (canLoopBack(step)) {
               this.finishStep(runId, step.id, 'done', undefined, emit);
@@ -6765,6 +6943,10 @@ export class RunManager {
     }
     let changesFeedback: string | undefined;
     if (outcome.kind === 'changes') {
+      // Spec 2026-08-29-spec-tab-review-feed, P1: the restart-recovery twin of the step loop's own
+      // write (there is no live `execute()` here — that path returned above, through
+      // `approvalWaiter`, which is what the step loop's own instrumentation already covers).
+      this.recordSpecReview(runId, pending.stepId, 'human', 'revise', outcome.notes);
       const def = await this.reviveWorkflow(run);
       const target = def?.steps.find((s) => s.id === pending.stepId);
       changesFeedback =
@@ -6962,6 +7144,13 @@ export class RunManager {
           // (capped like any other fed-back output) rather than reduced to the verdict word.
           state.reviewReport = turnText.trimEnd().slice(-CHECK_OUTPUT_CAP);
         }
+        // The spec/review feed's snapshot trigger (spec 2026-08-29-spec-tab-review-feed, P1):
+        // parsed here, beside the verdict above, for the same reason — synchronous and NOT gated
+        // on `interactive`, unlike `RunRecord.declaredSpecPath`'s own write path
+        // (`applyTurnMarkers`, reached through the fire-and-forget `recordTurnEnd` above). Declared
+        // path wins on the LAST turn that names one, same rule as the verdict.
+        const declaredSpecPath = parseTaskMarkers(turnText).specPath;
+        if (declaredSpecPath) state.stepSpecPath = declaredSpecPath;
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
         // `CEZ:ASK` → the user is blocked; wins over `CEZ:MONITORING`, loses to
         // `CEZ:DONE` (#473).
@@ -8303,6 +8492,123 @@ export class RunManager {
       runId,
       `step "${stepId}" complete — status=${status}${stopReason ? ' (stopped, not failed)' : ''}`,
     );
+  }
+
+  // ---- spec/review feed (spec 2026-08-29-spec-tab-review-feed, P1) ---------------------------
+  //
+  // Three write sites feed the same side log: the step loop snapshots a finished `spec` step
+  // (`recordSpecSnapshot`), the agent verdict block and both human "changes requested" branches
+  // record a review (`recordSpecReview`). Every one of them is fail-open by construction — this is
+  // a display feature bolted onto a workflow that ships code, and it must never be able to fail a
+  // run or reject a human's decision.
+
+  /**
+   * Redacted note for a spec-review write failure — errno/error name ONLY, never the thrown
+   * error's message or any path, since both can carry file text or host layout. Best-effort on top
+   * of best-effort: `store.appendEvent` throws for an unknown run, which this swallows too.
+   */
+  private noteSpecReviewFailure(runId: string, stepId: string | undefined, err: unknown): void {
+    const code =
+      err && typeof err === 'object' && 'code' in err && typeof (err as { code?: unknown }).code === 'string'
+        ? (err as { code: string }).code
+        : err instanceof Error
+          ? err.name
+          : 'unknown';
+    try {
+      this.store.appendEvent(runId, { type: 'note', stepId, message: `spec-review log unavailable (${code})` });
+    } catch {
+      // the run may already be gone from the store's map — nothing more to do
+    }
+  }
+
+  /** Recompute and persist `RunRecord.specReview` from the side log — called after every append.
+   *  Its own try/catch is deliberately SEPARATE from the append's: a summary-write failure (P1
+   *  test 10e) must not read as "the append failed" and must not stop the caller either. */
+  private updateSpecReviewSummary(runId: string, stepId: string | undefined): void {
+    try {
+      const entries = readSpecReviewEntries(this.dataDir, runId);
+      this.store.updateRun(runId, { specReview: summariseSpecReview(entries) });
+    } catch (err) {
+      this.noteSpecReviewFailure(runId, stepId, err);
+    }
+  }
+
+  /**
+   * Snapshot the file a just-finished step declared via `CEZ:SPEC_PATH=` into the run's
+   * spec-review side log. Called once per attempt, in the step loop, AFTER the step's own
+   * post-condition passed and BEFORE the review verdict is consulted — so the draft always
+   * precedes its verdict in the log, which is what lets `appendSpecReviewEntry` associate a
+   * review with "the latest spec entry already in the log" with no extra bookkeeping.
+   *
+   * The read is untrusted input (the path came from an agent's own turn text) and is bounded and
+   * containment-checked by `readWorktreePath` — reused rather than re-implemented, see that
+   * function's own doc comment for the checks (traversal, `.git` internals, a symlinked final
+   * component, an intermediate symlinked directory). A refused or unresolved path still gets an
+   * entry, with `missing`/`rejected` set and no `text` — "the step said it wrote a spec and there
+   * is no file there" is a fact worth surfacing, not skipping silently.
+   */
+  private async recordSpecSnapshot(
+    runId: string,
+    state: ActiveRun,
+    stepId: string,
+  ): Promise<void> {
+    const specPath = state.stepSpecPath;
+    // Spent regardless of outcome: a failed attempt must not make the NEXT attempt re-snapshot a
+    // path that may no longer describe what is on disk.
+    state.stepSpecPath = undefined;
+    if (!specPath) return;
+    try {
+      const result = await readWorktreePath(state.cwd, specPath, SPEC_SNAPSHOT_CAP);
+      const entry =
+        result.kind === 'file' && result.content !== undefined
+          ? { kind: 'spec' as const, stepId, specPath, source: 'recorded' as const, text: result.content }
+          : result.kind === 'invalid'
+            ? {
+                kind: 'spec' as const,
+                stepId,
+                specPath,
+                source: 'recorded' as const,
+                missing: true as const,
+                rejected: true as const,
+                error: result.error,
+              }
+            : result.kind === 'missing'
+              ? { kind: 'spec' as const, stepId, specPath, source: 'recorded' as const, missing: true as const, error: result.error }
+              : {
+                  kind: 'spec' as const,
+                  stepId,
+                  specPath,
+                  source: 'recorded' as const,
+                  missing: true as const,
+                  error:
+                    result.kind === 'file'
+                      ? result.binary
+                        ? `binary file, not snapshotted: ${specPath}`
+                        : `file too large to snapshot (${result.size} bytes): ${specPath}`
+                      : `declared path is a directory, not a file: ${specPath}`,
+                };
+      appendSpecReviewEntry(this.dataDir, runId, entry);
+      this.updateSpecReviewSummary(runId, stepId);
+    } catch (err) {
+      this.noteSpecReviewFailure(runId, stepId, err);
+    }
+  }
+
+  /** Append a `review` entry — `actor: 'agent'` for the `review-spec` step's own verdict (both
+   *  `pass` and `revise`), `actor: 'human'` for a person's decision at the approval gate. */
+  private recordSpecReview(
+    runId: string,
+    stepId: string,
+    actor: 'agent' | 'human',
+    verdict: ReviewVerdict,
+    report: string,
+  ): void {
+    try {
+      appendSpecReviewEntry(this.dataDir, runId, { kind: 'review', stepId, actor, verdict, report });
+      this.updateSpecReviewSummary(runId, stepId);
+    } catch (err) {
+      this.noteSpecReviewFailure(runId, stepId, err);
+    }
   }
 }
 
