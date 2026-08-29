@@ -153,6 +153,13 @@ describe('bounded cold broker retry', () => {
     store.updateRun(original.id, { status: 'done' });
     fake.outcomes.push('cold', 'success');
 
+    // V7a (spec 2026-08-29-per-retry-step-timing): capture every `updateStep` patch for the
+    // continuation step so the STATUS SEQUENCE it actually drove is asserted, not merely the
+    // final record — a strict `endedAt < startedAt` gap would flake here (this run continues
+    // in place, `worktree: false`, so `autosaveCommit` is skipped and nothing separates the
+    // abandonment from the next open).
+    const updateStepSpy = vi.spyOn(store, 'updateStep');
+
     await manager.continueRun(original.id, { text: 'follow up' });
     // The run's status starts at 'done' (set above) and `continueRun` returns before
     // synchronously changing it — `settled()` alone would resolve instantly against that
@@ -170,6 +177,74 @@ describe('bounded cold broker retry', () => {
     expect(events(original.id)).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: 'metric', name: 'run.step.retried_cold_broker', attempt: 2 }),
     ]));
+
+    // V7a — the store's attempt bookkeeping, observed end to end through the real retry seam.
+    const continue1Statuses = updateStepSpy.mock.calls
+      .filter(([, stepId, patch]) => stepId === 'continue-1' && patch.status !== undefined)
+      .map(([, , patch]) => patch.status);
+    expect(continue1Statuses).toEqual(['running', 'pending', 'running', 'done']);
+
+    const continue1 = store.getRun(original.id)!.steps.find((s) => s.id === 'continue-1')!;
+    expect(continue1.attempts).toHaveLength(2);
+    expect(continue1.iterations).toBe(2); // not the literal `1` the code writes
+    const [attempt1, attempt2] = continue1.attempts!;
+    expect(attempt1!.endedAt).toBeDefined();
+    expect(attempt1!.endedAt! <= attempt2!.startedAt).toBe(true); // inclusive: same-ms is expected here
+    expect(attempt2!.endedAt).toBe(continue1.finishedAt);
+    const interval = (a: { startedAt: string; endedAt?: string }) =>
+      Date.parse(a.endedAt ?? a.startedAt) - Date.parse(a.startedAt);
+    const sum = interval(attempt1!) + interval(attempt2!);
+    const span = Date.parse(attempt2!.endedAt!) - Date.parse(attempt1!.startedAt);
+    expect(sum).toBeLessThanOrEqual(span); // no overlap double-counted
+
+    // V7a.2 — the `step-start` EVENT stream reads `[1, 2]`, not `[1, 1]`: the record and the
+    // NDJSON must agree about which attempt just started (§API contracts, change 1).
+    const stepStarts = events(original.id).filter(
+      (event) => event.type === 'step-start' && event.stepId === 'continue-1',
+    );
+    expect(stepStarts.map((event) => event.iteration)).toEqual([1, 2]);
+  });
+
+  it('V7c — a fresh continue-N step is NOT a retry, and an earlier one is untouched', async () => {
+    const original = store.createRun({
+      title: 'existing task',
+      workflow: 'quick-task',
+      task: 'existing task',
+      author: localCliAuthor(),
+      runner: 'claude',
+      steps: [{ id: 'work', name: 'Work', kind: 'agent' }],
+    });
+    store.updateStep(original.id, 'work', { status: 'done', sessionId: 'existing-session' });
+    store.updateRun(original.id, { status: 'done' });
+
+    fake.outcomes.push('success');
+    await manager.continueRun(original.id, { text: 'follow up one' });
+    await vi.waitFor(() => {
+      const step = store.getRun(original.id)?.steps.find((s) => s.id === 'continue-1');
+      expect(step && ['done', 'failed', 'cancelled'].includes(step.status)).toBe(true);
+    }, { timeout: 5_000 });
+    await settled(original.id);
+    const continue1Before = store.getRun(original.id)!.steps.find((s) => s.id === 'continue-1')!;
+    expect(continue1Before.attempts).toHaveLength(1);
+    expect(continue1Before.iterations).toBe(1);
+
+    fake.outcomes.push('success');
+    await manager.continueRun(original.id, { text: 'follow up two' });
+    await vi.waitFor(() => {
+      const step = store.getRun(original.id)?.steps.find((s) => s.id === 'continue-2');
+      expect(step && ['done', 'failed', 'cancelled'].includes(step.status)).toBe(true);
+    }, { timeout: 5_000 });
+    await settled(original.id);
+
+    const record = store.getRun(original.id)!;
+    const continue2 = record.steps.find((s) => s.id === 'continue-2')!;
+    expect(continue2.attempts).toHaveLength(1);
+    expect(continue2.iterations).toBe(1);
+    // continue-1's own attempts are untouched by opening continue-2's — a store that closed and
+    // reopened on every `iterations: 1` patch regardless of whether an attempt was open would
+    // pass V7a and fail here.
+    const continue1After = record.steps.find((s) => s.id === 'continue-1')!;
+    expect(continue1After.attempts).toEqual(continue1Before.attempts);
   });
 
   it('is bounded: a second cold broker on the same step is not retried again', async () => {

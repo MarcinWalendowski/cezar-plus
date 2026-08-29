@@ -170,6 +170,26 @@ selector. PowerShell resolves it with
 `[IO.Path]::GetFullPath($ScreenshotPath)`, creates the parent directory, then
 checks `Test-Path` and a non-zero file length.
 
+### record
+
+Video capture (WebM), added spec 2026-08-29-per-retry-step-timing. Start it
+AFTER the page has actually loaded — `open` alone starts no browser session
+capable of recording, so a `record start` issued before the first real
+navigation has nothing to capture. Stop it before `close`, in `finally`, and
+gate on a non-empty file the same way `screenshot` does.
+
+```bash
+"$AGENT_BROWSER_BIN" --session "$BROWSER_SESSION" record start "$ABS_RECORDING_PATH" --json
+# … drive the page …
+"$AGENT_BROWSER_BIN" --session "$BROWSER_SESSION" record stop --json
+test -s "$ABS_RECORDING_PATH"
+```
+
+Not verified headless on every box this descriptor runs on. If `record`
+produces no file (or an empty one) here, say so in the run's own gate notes
+and keep the retained screenshots as the visual evidence — never report a
+video pass that did not happen.
+
 ### close
 
 ```bash

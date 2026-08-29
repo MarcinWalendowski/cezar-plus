@@ -62,6 +62,18 @@ const storedRunnerSchema = z
   .enum([...RUNNER_IDS, 'claude-cli'])
   .transform((id) => (id === 'claude-cli' ? ('claude' as const) : id));
 
+/** One attempt at a step — mirrored verbatim from the contract's `stepAttemptSchema`
+ *  (`@loki-labs/better-cezar-contract`'s `runs.ts`); see that copy's doc comment for the full
+ *  rationale (spec 2026-08-29-per-retry-step-timing). Kept local, like the rest of this file's
+ *  schema, and held in step with the contract by `contract-parity.runs.test.ts` rather than by an
+ *  import. */
+const stepAttemptSchema = z.object({
+  n: z.number().int().positive(),
+  startedAt: z.string(),
+  endedAt: z.string().optional(),
+});
+export type StepAttempt = z.infer<typeof stepAttemptSchema>;
+
 const stepStateSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -87,6 +99,13 @@ const stepStateSchema = z.object({
   usageInvocationEpoch: usageCounterSchema.optional(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
+  /** Every attempt at this step, in order — mirrors the contract's `stepStateSchema.attempts`
+   *  (spec 2026-08-29-per-retry-step-timing). ADDITIVE and optional: absent on every record
+   *  written before it shipped, and on a step that never ran. Maintained by `trackAttempt`, called
+   *  from `updateStep` below, off the status transition — never by the retry sites. PRESENT OR
+   *  ABSENT, NEVER PARTIAL: the store starts tracking a step only on its first opening patch
+   *  (`iterations === 0` pre-merge) and never adopts one already in flight. */
+  attempts: z.array(stepAttemptSchema).optional(),
   error: z.string().optional(),
   /** Latest backend-owned session id, used for same-backend Continue. */
   sessionId: z.string().optional(),
@@ -771,6 +790,66 @@ export function reconcileLoadedRun(run: RunRecord, opts?: { keepLive?: boolean }
 }
 
 /**
+ * Maintains `StepState.attempts` off the status transition a `patch` describes, called from
+ * `updateStep` BEFORE the `Object.assign` merge so it can see the pre-merge `step` (spec
+ * 2026-08-29-per-retry-step-timing). One seam, structurally un-missable: every retry path in the
+ * engine already funnels through `updateStep`, so this covers all of them by construction,
+ * including any site added later. The one exception, a live broker re-attach, is suppressed at
+ * the `run.ts` step-loop head before its patch ever reaches here.
+ *
+ * Mutates `step.attempts` and `patch` in place; returns nothing. `patch.iterations` is corrected
+ * to `attempts.length` on an open, which is the only way `attempts.length === iterations` stays an
+ * invariant the cockpit can rely on rather than a hope.
+ */
+function trackAttempt(step: StepState, patch: Partial<Omit<StepState, 'id'>>, nowIso: string): void {
+  // Eligibility, checked first: track a step iff it is already tracked, or this is its very first
+  // opening patch (`iterations === 0` pre-merge, so attempt 1 really is attempt 1). A step already
+  // mid-retry when this shipped keeps `attempts` absent and keeps the engine's own `iterations`
+  // forever — adopting it here would rewrite a true count down to 1 the next time it retried.
+  const eligible = step.attempts !== undefined || (step.attempts === undefined && step.iterations === 0);
+  if (!eligible) return;
+
+  const opening = patch.status === 'running' && patch.startedAt !== undefined;
+  const closing =
+    patch.status !== undefined && patch.status !== 'running' && patch.status !== 'waiting' && patch.status !== 'review';
+
+  if (opening) {
+    const startedAt = patch.startedAt as string;
+    const attempts = step.attempts ? [...step.attempts] : [];
+    const open = attempts.length > 0 ? attempts[attempts.length - 1] : undefined;
+    if (open && open.endedAt === undefined) {
+      // A same-step re-entry whose previous attempt was never closed — defensive only after Phase
+      // 1 closes the continuation retries at their own abandonment, kept for a site added later.
+      // Stamped at `patch.startedAt`, NOT `nowIso`: `nowIso` is read inside `updateStep`, which
+      // runs after the incoming `startedAt` was minted at the call site, so it can be strictly
+      // later than the instant the next attempt actually began. `patch.startedAt` makes
+      // back-to-back attempts abut exactly, with no overlap for the aggregate to double-count.
+      attempts[attempts.length - 1] = { ...open, endedAt: startedAt };
+    }
+    attempts.push({ n: attempts.length + 1, startedAt });
+    step.attempts = attempts;
+    patch.attempts = attempts;
+    // Corrected, not trusted: `runContinuation` writes a literal `iterations: 1` on every
+    // invocation, including its own retries, so the counter and the array can never disagree once
+    // the store owns both.
+    patch.iterations = attempts.length;
+  } else if (closing) {
+    const attempts = step.attempts;
+    if (!attempts || attempts.length === 0) return;
+    const last = attempts[attempts.length - 1];
+    // Idempotence guard: closing when there is no open attempt is a no-op. This is the common case
+    // for `loopBackTo`'s collateral `pending` patches across a reset slice, not an edge — every
+    // step in it that already ran has a closed attempt, and the steps ahead of the failing one
+    // never ran at all.
+    if (!last || last.endedAt !== undefined) return;
+    const updated = [...attempts];
+    updated[updated.length - 1] = { ...last, endedAt: patch.finishedAt ?? nowIso };
+    step.attempts = updated;
+    patch.attempts = updated;
+  }
+}
+
+/**
  * File-backed run store: `runs.json` index (atomic tmp+rename writes, the
  * pattern from @cezar/core's IssueStore) plus one append-only NDJSON event
  * file per run. Also the in-process event bus the SSE endpoints subscribe to:
@@ -990,6 +1069,9 @@ export class RunStore extends EventEmitter {
     // patch counts as a report (spec 2026-08-22-context-window-denominator-per-step).
     const reportedWindow = patch.contextWindow;
     const touchesContext = 'contextTokens' in patch || 'contextWindow' in patch;
+    // Also reads `step` pre-merge, for the same reason: it needs to see the transition the patch
+    // describes, not the result (spec 2026-08-29-per-retry-step-timing).
+    trackAttempt(step, patch, new Date().toISOString());
     Object.assign(step, this.redactStepPatch(patch));
     if (touchesContext) {
       step.contextWindow = resolveContextWindow({

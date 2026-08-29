@@ -4782,14 +4782,29 @@ export class RunManager {
       waitingReason: undefined,
       waitingQuestion: undefined,
     });
+    // Derived from the record rather than a literal `1`: this same function re-invokes itself for
+    // the SAME `stepId` on a cold-broker or missing-session retry (below), over a step whose
+    // attempt count the engine must not reset (spec 2026-08-29-per-retry-step-timing).
+    const iteration = (this.store.getRun(runId)?.steps.find((s) => s.id === stepId)?.iterations ?? 0) + 1;
     this.store.updateStep(runId, stepId, {
       status: 'running',
-      iterations: 1,
+      iterations: iteration,
       startedAt: new Date().toISOString(),
       sessionId,
       backend: continueBackend,
     });
-    this.store.appendEvent(runId, { type: 'step-start', stepId, name, kind: 'agent', iteration: 1 });
+    // Re-read rather than trust `iteration`: `RunStore.updateStep`'s attempt tracking may have
+    // corrected `iterations` from the attempts array, or left it untouched for a step that predates
+    // this feature — only the post-patch record knows which, and the event must agree with it.
+    const settledIteration =
+      this.store.getRun(runId)?.steps.find((s) => s.id === stepId)?.iterations ?? iteration;
+    this.store.appendEvent(runId, {
+      type: 'step-start',
+      stepId,
+      name,
+      kind: 'agent',
+      iteration: settledIteration,
+    });
     // Attachments pasted into the follow-up composer, on the same terms as a live-session
     // message (#357): persisted to the run's own image store so the thread renders the bubble's
     // images rather than a bare count, and handed to the agent BOTH as base64 blocks (so it can
@@ -5255,6 +5270,11 @@ export class RunManager {
           spoolDir: err.spoolDir,
           attempt: 2,
         });
+        // Close this attempt HERE, at the instant the failure was decided — not at the next
+        // `runContinuation` re-invocation in `finally`, which runs only after `autosaveCommit` and
+        // the rest of teardown. Closing at the next open would charge all of that to the attempt
+        // that already failed (spec 2026-08-29-per-retry-step-timing).
+        this.store.updateStep(runId, stepId, { status: 'pending', error: undefined });
       // Reactive fallback (spec 2026-08-22-resume-fresh-session-fallback, Phase 3) — the
       // continuation-path twin of the chain loop's Phase 2 branch, and what
       // `recover-session-failure.test.ts` exercises. `sessionId !== undefined` means this attempt
@@ -5273,6 +5293,9 @@ export class RunManager {
           runId,
           backend: continueBackend,
         });
+        // Same reasoning as the cold-broker branch above: close at the abandonment, not at the
+        // next open (spec 2026-08-29-per-retry-step-timing).
+        this.store.updateStep(runId, stepId, { status: 'pending', error: undefined });
       } else {
         sink.sessionEnded('error', message);
         this.store.updateStep(runId, stepId, { status: 'failed', error: message, finishedAt: finishedAt() });
@@ -5320,9 +5343,10 @@ export class RunManager {
         // Same shape as `handBack` below: re-invoke only after this run has left the live
         // registries, so a concurrent `pump()` cannot race the new `ActiveRun` this creates.
         // Re-entering `runContinuation` itself (rather than the chain loop) re-sets `status:
-        // 'running'`, `iterations: 1` and re-appends `step-start`/`user-message` unconditionally
-        // (above), so the record ends up looking like a step that took two iterations — the same
-        // shape the chain-loop fallback produces.
+        // 'running'` and re-appends `step-start`/`user-message` unconditionally (above), with
+        // `iterations` derived from the record rather than a literal `1`, so the record really does
+        // look like a step that took two iterations — the same shape the chain-loop fallback
+        // produces (spec 2026-08-29-per-retry-step-timing).
         void this.runContinuation(
           runId,
           stepId,
@@ -5754,16 +5778,25 @@ export class RunManager {
       const step = workflow.steps[i] as WorkflowStepDef;
       const kind = stepKind(step);
       const record = this.store.getRun(runId)?.steps.find((s) => s.id === step.id);
-      const iteration = (record?.iterations ?? 0) + 1;
+      // A live broker re-attach re-enters this step while its agent is still working: the step
+      // never stopped `running`, so bumping `iterations`/`startedAt` and re-emitting `step-start`
+      // here would fabricate a second attempt for a turn that never restarted. Read non-destructively
+      // — `takeReattach` below is the CONSUMING read, called later from the agent-step path — because
+      // by the time that read happens this loop head has already written the patch it exists to
+      // suppress (spec 2026-08-29-per-retry-step-timing).
+      const isLiveReattach = this.pendingReattach.get(runId)?.stepId === step.id;
 
       this.store.updateRun(runId, { currentStepId: step.id });
-      this.store.updateStep(runId, step.id, {
-        status: 'running',
-        iterations: iteration,
-        startedAt: new Date().toISOString(),
-        error: undefined,
-      });
-      emit({ type: 'step-start', stepId: step.id, name: step.name ?? step.id, kind, iteration });
+      if (!isLiveReattach) {
+        const iteration = (record?.iterations ?? 0) + 1;
+        this.store.updateStep(runId, step.id, {
+          status: 'running',
+          iterations: iteration,
+          startedAt: new Date().toISOString(),
+          error: undefined,
+        });
+        emit({ type: 'step-start', stepId: step.id, name: step.name ?? step.id, kind, iteration });
+      }
 
       const runFault = process.env.CEZ_RUN_FAULT;
       const [faultName, faultStepId] = runFault?.split(':', 2) ?? [];

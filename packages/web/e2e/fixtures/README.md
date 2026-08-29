@@ -71,3 +71,26 @@ untouched.
 To regenerate: build, boot `CEZ_DRY_RUN=1 node dist/index.js serve --repo <tmp-git-repo>`,
 start a task whose text is `mock:subagents`, wait for it to settle, then copy
 `<tmp>/.ai/cezar/runs/<id>.ndjson` here and normalize the timestamps.
+
+## Retry attempt timing (spec 2026-08-29-per-retry-step-timing, §Verification V5b)
+
+`retry-timing-run.record.json` is the `gate`/`work` run V5 step 1 produces — no transcript, only
+a `runs.json` entry, since `retry-step-timing.e2e.ts` asserts the step rail's tree and its
+aggregate clock, not a transcript. `gate` has `onFail: { retry: 'work', max: 2 }` and takes
+1s/2s/3s on its three attempts (told apart on sight); `work` sleeps a flat 2s on each of its
+three. Lifted out of that run's real `runs.json` with exactly two documented edits, the same
+discipline `thread-run.record.json` follows for its own two: a terminal `done` run status (the
+captured run really does finish this way; named here only because every fixture in this
+directory states its status edits explicitly), and the `attempts` stamps normalized to exact
+millisecond intervals — 1000/2000/3000ms on `gate`, 2000ms on each `work` attempt — so the
+rendered strings (`0:01`, `0:02`, `0:03`, and a `gate` total of `0:06`) are pinned by arithmetic
+instead of by how loaded the box was when the fixture run executed. Capturing rather than
+hand-writing the shape is the point: a hand-written record proves the renderer reads a shape
+someone imagined, while a captured one proves `RunStore.updateStep`'s attempt tracking really
+writes it.
+
+To regenerate: run the two `cezar run` fixture invocations in spec
+`2026-08-29-per-retry-step-timing.md` §Verification V5 step 1 (`retry-timing-fixture` workflow,
+a real git repo with one empty commit, `CEZ_DRY_RUN=1`), then copy the `retry-timing-fixture` run's
+entry out of `<repo>/.ai/cezar/runs.json` here and normalize its `attempts` timestamps to the
+millisecond intervals above.

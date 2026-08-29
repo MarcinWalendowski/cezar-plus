@@ -71,6 +71,27 @@
 
 ## ✨ Added
 
+- 🔁 **A retried step's rail shows every attempt, and its clock shows the total** (spec
+  `.ai/specs/2026-08-29-per-retry-step-timing.md`). A step that was retried used to wear a bare
+  `×N` badge next to a clock that measured only the LATEST attempt — the earlier attempts' timing
+  did not exist anywhere the cockpit could reach. `StepState` now carries an additive, optional
+  `attempts: { n, startedAt, endedAt? }[]`, maintained by `RunStore.updateStep` off the status
+  transition, and the expanded rail renders an indented `attempt N · <duration>` row per attempt
+  while `StepClock` shows the **sum** across attempts — on both the expanded row and the collapsed
+  summary line, since that is the clock most users see by default. A step with one attempt, or a
+  step retried before this shipped, renders exactly as it did before. No `outcome` field: the
+  array records *when* each attempt ran, not *why* it ended, because that cannot be derived
+  honestly from a status transition alone (crash recovery, an approval decision and a human
+  resolving a handoff all write the same patch shape a real retry does).
+
+  **Four behaviour changes ride along, all on the continuation path** (`runContinuation`'s
+  cold-broker and missing-session retries): a continuation that retried its broker or its session
+  now reports `iterations` equal to its real attempt count instead of a fixed `1`, so the `×N`
+  badge appears where none did before; its second `step-start` frame now carries `iteration: 2`
+  rather than a second `iteration: 1` (which also makes the CLI print `(attempt 2)`); that same
+  step now passes briefly through `pending` between attempts, as the chain-loop retry path already
+  does; and a live broker re-attach (a cezar restart that finds a still-running agent) no longer
+  emits a duplicate `step-start` frame for a turn that never restarted.
 - 🧵 **`input-to-tasks`, the workflow a workspace run uses** — three steps: gather context
   across the whole workspace, file the tasks it implies, and (optionally) start them. No step has
   `Edit` or `Write`, so "it does not touch your files" is structural rather than a request in a

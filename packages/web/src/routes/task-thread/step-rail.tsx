@@ -6,7 +6,7 @@ import {
   CircleXIcon,
   LoaderCircleIcon,
 } from 'lucide-react'
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 
 import type { Runner, StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
 import { LiveDuration } from '@/components/live-duration'
@@ -15,7 +15,14 @@ import { formatDuration } from '@/lib/format'
 import { modelConflictsWithRunner } from '@/routes/new-task-form'
 import { cn } from '@/lib/utils'
 
-import { ACTIVE_STEP_STATUSES, TERMINAL_STEP_STATUSES, stepElapsed } from './step-timing'
+import {
+  ACTIVE_STEP_STATUSES,
+  TERMINAL_STEP_STATUSES,
+  liveStepTotal,
+  stepAttempts,
+  stepElapsed,
+  stepTotalElapsed,
+} from './step-timing'
 
 /**
  * The WORKFLOW step rail (spec §"Task thread" — steps ≠ plan: these are the run's own
@@ -87,32 +94,68 @@ export function StepRail({
   const pct = railProgress(steps) * 100
   return (
     <div data-slot="step-rail" className="flex min-w-0 flex-col gap-1">
-      {steps.map((step, index) => (
-        <div
-          key={step.id}
-          data-slot="step-row"
-          data-visual={railVisual(step)}
-          className="flex min-h-[22px] min-w-0 items-center gap-2 text-[13px] text-muted-foreground"
-        >
-          <RailIcon visual={railVisual(step)} />
-          <span className="min-w-0 truncate font-medium text-foreground">{step.name}</span>
-          {step.stopReason ? (
-            <span data-slot="step-stop-reason" className="shrink-0 text-xs text-pending-strong">
-              stopped — no output
-            </span>
-          ) : null}
-          {step.iterations > 1 ? (
-            <span data-slot="step-iterations" className="shrink-0 text-xs text-soft-foreground tabular-nums">
-              ×{step.iterations}
-            </span>
-          ) : null}
-          <StepModel step={step} planned={planned} runRunner={runRunner} />
-          <span className="ml-auto shrink-0 pl-2 text-[11.5px] text-soft-foreground tabular-nums">
-            {step.kind} · step {index + 1} of {steps.length}
-          </span>
-          <StepClock step={step} />
-        </div>
-      ))}
+      {steps.map((step, index) => {
+        // Complete AND more than one entry: the same predicate `StepClock`'s `total` branch uses,
+        // deliberately, so the tree and the aggregate clock appear and disappear together (spec
+        // 2026-08-29-per-retry-step-timing).
+        const now = Date.now()
+        const attempts = stepAttempts(step, now)
+        const tree = attempts && attempts.length > 1 ? attempts : undefined
+        const treeTotalMs = tree ? stepTotalElapsed(step, now)?.ms : undefined
+        return (
+          <Fragment key={step.id}>
+            <div
+              data-slot="step-row"
+              data-visual={railVisual(step)}
+              className="flex min-h-[22px] min-w-0 items-center gap-2 text-[13px] text-muted-foreground"
+            >
+              <RailIcon visual={railVisual(step)} />
+              <span className="min-w-0 truncate font-medium text-foreground">{step.name}</span>
+              {step.stopReason ? (
+                <span data-slot="step-stop-reason" className="shrink-0 text-xs text-pending-strong">
+                  stopped — no output
+                </span>
+              ) : null}
+              {step.iterations > 1 ? (
+                <span
+                  data-slot="step-iterations"
+                  title={tree && treeTotalMs !== undefined ? `${tree.length} attempts — ${formatDuration(treeTotalMs)} total` : undefined}
+                  className="shrink-0 text-xs text-soft-foreground tabular-nums"
+                >
+                  ×{step.iterations}
+                </span>
+              ) : null}
+              <StepModel step={step} planned={planned} runRunner={runRunner} />
+              <span className="ml-auto shrink-0 pl-2 text-[11.5px] text-soft-foreground tabular-nums">
+                {step.kind} · step {index + 1} of {steps.length}
+              </span>
+              <StepClock step={step} total />
+            </div>
+            {tree
+              ? tree.map((attempt) => (
+                  <div
+                    key={`${step.id}-attempt-${attempt.n}`}
+                    data-slot="step-attempt-row"
+                    className="ml-[19px] flex min-h-[18px] min-w-0 items-center gap-2 text-[12px] text-soft-foreground"
+                  >
+                    <span className="min-w-0 truncate">attempt {attempt.n} · </span>
+                    {attempt.live ? (
+                      <LiveDuration
+                        since={attempt.startedAt}
+                        label={`Attempt ${attempt.n} running for`}
+                        className="tabular-nums"
+                      />
+                    ) : (
+                      <time data-slot="step-attempt-duration" className="tabular-nums">
+                        {formatDuration(attempt.ms)}
+                      </time>
+                    )}
+                  </div>
+                ))
+              : null}
+          </Fragment>
+        )
+      })}
       <div data-slot="step-progress" className="mt-1 h-0.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-pending" style={{ width: `${pct}%` }} />
       </div>
@@ -248,6 +291,10 @@ function StepModel({
  *  and a step parked on an ask keeps counting because it is still the live step (risk R4). */
 const STEP_CLOCK_TITLE = 'Elapsed since this step started (the current attempt).'
 
+/** The aggregate branch's hover text (spec 2026-08-29-per-retry-step-timing) — rendered instead of
+ *  `STEP_CLOCK_TITLE` once a step has more than one COMPLETE attempt, on both call sites. */
+const STEP_CLOCK_TOTAL_TITLE = 'Total elapsed across every attempt of this step.'
+
 /**
  * How long this step has been going, or how long it took — right-aligned at the end of the row
  * (spec 2026-08-20-step-and-tool-call-durations §Phase 1).
@@ -259,11 +306,39 @@ const STEP_CLOCK_TITLE = 'Elapsed since this step started (the current attempt).
  * The live case delegates to `<LiveDuration/>` so the 1s tick stays inside one `<time>`; owning
  * a `useNow` here would re-render all six rows every second (spec risk R2, pinned by the design
  * guardian's `no-tick-in-thread-containers` rule).
+ *
+ * `total` (spec 2026-08-29-per-retry-step-timing) asks for the AGGREGATE across every attempt
+ * instead of the current one — used only when `stepAttempts` returns a covering list of more than
+ * one entry, the identical predicate the attempt rows in `StepRail` use, so a step can never show a
+ * tree with a last-attempt headline or an aggregate headline with no tree. Every other case,
+ * including `total` on a single-attempt or legacy step, falls through to today's `stepElapsed`
+ * path unchanged.
  */
-function StepClock({ step, className }: { step: StepState; className?: string }) {
-  const elapsed = stepElapsed(step, Date.now())
-  if (elapsed === undefined) return null
+function StepClock({ step, className, total }: { step: StepState; className?: string; total?: boolean }) {
   const tone = cn('shrink-0 text-[11.5px] text-soft-foreground tabular-nums', className)
+  const now = Date.now()
+  const attempts = total ? stepAttempts(step, now) : undefined
+  if (attempts && attempts.length > 1) {
+    const aggregate = stepTotalElapsed(step, now)!
+    if (aggregate.live) {
+      return (
+        <LiveDuration
+          since={aggregate.openStartedAt}
+          label="Running for"
+          title={STEP_CLOCK_TOTAL_TITLE}
+          format={liveStepTotal(aggregate.closedMs)}
+          className={tone}
+        />
+      )
+    }
+    return (
+      <time data-slot="step-duration" dateTime={step.finishedAt} title={STEP_CLOCK_TOTAL_TITLE} className={tone}>
+        {formatDuration(aggregate.ms)}
+      </time>
+    )
+  }
+  const elapsed = stepElapsed(step, now)
+  if (elapsed === undefined) return null
   if (elapsed.live) {
     return <LiveDuration since={step.startedAt} label="Running for" title={STEP_CLOCK_TITLE} className={tone} />
   }
@@ -390,7 +465,7 @@ export function WorkflowSteps({
             this running on, and for how long" without an expand. Current step only — one chip per
             dot would drown the summary line the dots exist to keep terse. */}
         <StepModel step={current} planned={planned} runRunner={runRunner} />
-        <StepClock step={current} />
+        <StepClock step={current} total />
         <span data-slot="step-summary-progress" className="h-0.5 min-w-[36px] flex-1 overflow-hidden rounded-full bg-muted">
           <span className="block h-full rounded-full bg-pending" style={{ width: `${pct}%` }} />
         </span>

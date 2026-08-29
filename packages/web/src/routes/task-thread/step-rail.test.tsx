@@ -1,11 +1,12 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
+import type { StepAttempt, StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
 
 import { activeStepIndex, railProgress, railVisual, StepRail, WorkflowSteps, type RailVisual } from './step-rail'
 
 afterEach(cleanup)
+afterEach(() => vi.useRealTimers())
 
 /** A store-shaped step (`RunRecord.steps` entry) with sensible defaults. */
 const step = (id: string, status: StepStatus, extra: Partial<StepState> = {}): StepState => ({
@@ -404,6 +405,210 @@ describe('step clocks', () => {
       />,
     )
     expect(document.querySelector('[data-slot="step-duration"]')?.getAttribute('title')).toMatch(/current attempt/i)
+  })
+})
+
+// spec 2026-08-29-per-retry-step-timing, §Verification V3.
+const attempt = (n: number, startedAt: string, endedAt?: string): StepAttempt =>
+  endedAt === undefined ? { n, startedAt } : { n, startedAt, endedAt }
+
+const rowText = (el: Element) => el.textContent!.trim().replace(/\s+/g, ' ')
+
+describe('the retry tree — attempt rows (V3a-c)', () => {
+  it('V3a — three covering attempts render three ordered rows, no outcome word', () => {
+    render(
+      <StepRail
+        steps={[
+          step('gate', 'done', {
+            iterations: 3,
+            startedAt: '2026-08-20T14:00:03.000Z',
+            finishedAt: '2026-08-20T14:00:06.000Z',
+            attempts: [
+              attempt(1, '2026-08-20T14:00:00.000Z', '2026-08-20T14:00:01.000Z'),
+              attempt(2, '2026-08-20T14:00:01.000Z', '2026-08-20T14:00:03.000Z'),
+              attempt(3, '2026-08-20T14:00:03.000Z', '2026-08-20T14:00:06.000Z'),
+            ],
+          }),
+        ]}
+      />,
+    )
+    const rows = document.querySelectorAll('[data-slot="step-attempt-row"]')
+    expect(rows).toHaveLength(3)
+    expect(Array.from(rows).map(rowText)).toEqual(['attempt 1 · 0:01', 'attempt 2 · 0:02', 'attempt 3 · 0:03'])
+    for (const row of rows) expect(row.textContent).not.toMatch(/retried|outcome/i)
+  })
+
+  it('V3b — a single-attempt step renders no attempt rows and no ×N badge', () => {
+    render(<StepRail steps={[step('a', 'done', { iterations: 1, startedAt: '2026-08-20T14:00:00.000Z', finishedAt: '2026-08-20T14:00:01.000Z' })]} />)
+    expect(document.querySelectorAll('[data-slot="step-attempt-row"]')).toHaveLength(0)
+    expect(document.querySelector('[data-slot="step-iterations"]')).toBeNull()
+  })
+
+  it('V3c (R5) — a historical `×3` step with no `attempts` renders the flat row, unchanged', () => {
+    render(
+      <StepRail
+        steps={[
+          step('gate', 'done', {
+            iterations: 3,
+            startedAt: '2026-08-20T14:24:46.939Z',
+            finishedAt: '2026-08-20T14:28:58.939Z',
+          }),
+        ]}
+      />,
+    )
+    expect(document.querySelectorAll('[data-slot="step-attempt-row"]')).toHaveLength(0)
+    expect(document.querySelector('[data-slot="step-iterations"]')?.textContent).toBe('×3')
+    expect(document.querySelector('[data-slot="step-duration"]')?.textContent).toBe('4:12')
+  })
+})
+
+describe('V3d — the collapsed and expanded headline clocks agree', () => {
+  const RETRIED_ATTEMPTS: StepAttempt[] = [
+    attempt(1, '2026-08-20T14:00:00.000Z', '2026-08-20T14:00:01.000Z'),
+    attempt(2, '2026-08-20T14:00:01.000Z', '2026-08-20T14:00:03.000Z'),
+    attempt(3, '2026-08-20T14:00:03.000Z', '2026-08-20T14:00:06.000Z'),
+  ]
+
+  function readClocks(runId: string, current: StepState) {
+    const { unmount: unmountCollapsed } = render(<WorkflowSteps runId={runId} steps={[current]} />)
+    const collapsed = document.querySelector('[data-slot="workflow-steps"] > button [data-slot="step-duration"], [data-slot="workflow-steps"] > button [data-slot="live-duration"]')?.textContent
+    unmountCollapsed()
+    const { unmount: unmountExpanded } = render(<StepRail steps={[current]} />)
+    const expanded = document.querySelector('[data-slot="step-row"] [data-slot="step-duration"], [data-slot="step-row"] [data-slot="live-duration"]')?.textContent
+    unmountExpanded()
+    return { collapsed, expanded }
+  }
+
+  it('a retried step reads the SUM, identically, on both surfaces', () => {
+    const current = step('gate', 'done', {
+      iterations: 3,
+      startedAt: '2026-08-20T14:00:03.000Z',
+      finishedAt: '2026-08-20T14:00:06.000Z',
+      attempts: RETRIED_ATTEMPTS,
+    })
+    const { collapsed, expanded } = readClocks('run-retried', current)
+    expect(collapsed).toBe('0:06')
+    expect(expanded).toBe('0:06')
+  })
+
+  it('control: a single-attempt current step shows stepElapsed\'s number in both places', () => {
+    const current = step('a', 'done', { iterations: 1, startedAt: '2026-08-20T14:00:00.000Z', finishedAt: '2026-08-20T14:00:05.000Z' })
+    const { collapsed, expanded } = readClocks('run-single', current)
+    expect(collapsed).toBe('0:05')
+    expect(expanded).toBe('0:05')
+  })
+
+  it("control: a legacy (`×3`, no attempts) current step shows today's number in both places", () => {
+    const current = step('gate', 'done', {
+      iterations: 3,
+      startedAt: '2026-08-20T14:24:46.939Z',
+      finishedAt: '2026-08-20T14:28:58.939Z',
+    })
+    const { collapsed, expanded } = readClocks('run-legacy', current)
+    expect(collapsed).toBe('4:12')
+    expect(expanded).toBe('4:12')
+  })
+})
+
+describe('V3e (R4) — the tick stays inside <LiveDuration/>, never a useNow in step-rail.tsx', () => {
+  // The executable guard is `design-guardian.test.ts`'s own `no-tick-in-thread-containers` rule,
+  // which already runs under `npm test` — these two assertions pin the two ways this feature
+  // could quietly defeat it: removing step-rail.tsx from the rule's fixed file list, or adding a
+  // `useNow` to the file the rule protects. Reading source rather than re-importing the guardian
+  // test file, which would re-register (and re-run) its own suite a second time.
+  it('the guardian rule still lists step-rail.tsx in its `applies` set', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const here = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = fs.readFileSync(path.join(here, '../../design-guardian.test.ts'), 'utf8')
+    const rule = src.slice(src.indexOf("name: 'no-tick-in-thread-containers'"))
+    expect(rule).toContain('src/routes/task-thread/step-rail.tsx')
+  })
+
+  it('step-rail.tsx contains no `useNow` CALL (the guardian blanks comments before matching; a prose mention of the name, like the one two paragraphs above `StepClock`, is not a violation)', async () => {
+    const fs = await import('node:fs')
+    const path = await import('node:path')
+    const url = await import('node:url')
+    const here = path.dirname(url.fileURLToPath(import.meta.url))
+    const src = fs.readFileSync(path.join(here, './step-rail.tsx'), 'utf8')
+    expect(src).not.toMatch(/\buseNow\s*\(/)
+    expect(src).not.toMatch(/import\s*\{[^}]*\buseNow\b/)
+  })
+})
+
+describe('V3f — an ACTIVE multi-attempt step: closed rows hold still, the open row and both totals advance', () => {
+  const T0 = Date.parse('2026-08-20T14:00:10.000Z')
+
+  function activeFixture(openStartedAt: string) {
+    return step('gate', 'running', {
+      iterations: 3,
+      startedAt: openStartedAt,
+      attempts: [
+        attempt(1, '2026-08-20T14:00:00.000Z', '2026-08-20T14:00:02.000Z'), // 0:02
+        attempt(2, '2026-08-20T14:00:02.000Z', '2026-08-20T14:00:04.000Z'), // 0:02 — closedMs = 4000
+        attempt(3, openStartedAt), // open
+      ],
+    })
+  }
+
+  function totals() {
+    const rows = Array.from(document.querySelectorAll('[data-slot="step-attempt-row"]')).map(rowText)
+    const expandedClock = document.querySelector('[data-slot="step-row"] [data-slot="step-duration"], [data-slot="step-row"] [data-slot="live-duration"]')?.textContent
+    const collapsedClock = document.querySelector('[data-slot="workflow-steps"] > button [data-slot="step-duration"], [data-slot="workflow-steps"] > button [data-slot="live-duration"]')?.textContent
+    return { rows, expandedClock, collapsedClock }
+  }
+
+  it('advances both totals by the open row\'s own elapsed while closed rows stay frozen', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+    const current = activeFixture('2026-08-20T14:00:10.000Z')
+    render(
+      <>
+        <WorkflowSteps runId="run-active" steps={[current]} />
+        <StepRail steps={[current]} />
+      </>,
+    )
+
+    let snap = totals()
+    expect(snap.rows).toEqual(['attempt 1 · 0:02', 'attempt 2 · 0:02', 'attempt 3 · 0:00'])
+    expect(snap.expandedClock).toBe('0:04')
+    expect(snap.collapsedClock).toBe('0:04')
+
+    act(() => vi.advanceTimersByTime(3000))
+    snap = totals()
+    expect(snap.rows[0]).toBe('attempt 1 · 0:02')
+    expect(snap.rows[1]).toBe('attempt 2 · 0:02')
+    expect(snap.rows[2]).toBe('attempt 3 · 0:03')
+    expect(snap.expandedClock).toBe('0:07')
+    expect(snap.collapsedClock).toBe('0:07')
+  })
+
+  it('a future-dated open attempt clamps the total at closedMs, never below it', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0)
+    // The open attempt started 5s AHEAD of the clock — a browser trailing the server.
+    const skewed = activeFixture('2026-08-20T14:00:15.000Z')
+    render(
+      <>
+        <WorkflowSteps runId="run-skewed" steps={[skewed]} />
+        <StepRail steps={[skewed]} />
+      </>,
+    )
+
+    let snap = totals()
+    expect(snap.rows[0]).toBe('attempt 1 · 0:02')
+    expect(snap.rows[1]).toBe('attempt 2 · 0:02')
+    expect(snap.expandedClock).toBe('0:04')
+    expect(snap.collapsedClock).toBe('0:04')
+    const firstExpanded = snap.expandedClock
+
+    act(() => vi.advanceTimersByTime(6000))
+    // The open interval is now a real +1s past its (skewed) start.
+    snap = totals()
+    expect(snap.expandedClock).toBe('0:05')
+    expect(snap.collapsedClock).toBe('0:05')
+    expect(snap.expandedClock! >= firstExpanded!).toBe(true)
   })
 })
 

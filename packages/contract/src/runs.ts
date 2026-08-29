@@ -60,6 +60,43 @@ export type StepStatus = z.infer<typeof stepStatusSchema>;
 
 const usageCounterSchema = z.number().finite().nonnegative();
 
+/** One attempt at a step, and WHEN it ran, not why it ended
+ *  (spec 2026-08-29-per-retry-step-timing). The engine overwrites `StepState.startedAt` on every
+ *  re-entry (run.ts:5795, and run.ts:4792 on the continuation path) and only ever stamps
+ *  `finishedAt` on a TERMINAL end (`finishStep`, run.ts:8316), so before this existed a retried step's earlier
+ *  attempts left no interval behind at all.
+ *
+ *  Written by `RunStore.updateStep` off the status transition, never by the retry sites, which is
+ *  why EVERY qualifying status transition through this method is covered for free, however many
+ *  call sites `run.ts` grows or loses. Deliberately not a number: `run.ts` held nineteen such sites
+ *  when this was written and the same spec's Phase 1 adds two more, so a count baked in here is
+ *  false the day it lands. The one thing the store CANNOT see is a live broker re-attach
+ *  (`reattachBrokeredRun`), which re-enters `execute` on a still-running step; `run.ts`'s loop head
+ *  suppresses that patch, and its `step-start` event, before either gets here.
+ *
+ *  PRESENT OR ABSENT, NEVER PARTIAL. The store starts tracking a step only on its FIRST opening
+ *  patch (`iterations === 0` pre-merge) and never adopts one already in flight, so a step that was
+ *  mid-retry when this shipped keeps `attempts` absent and keeps its own `iterations`, rather than
+ *  gaining a one-entry array that would rewrite a true count of 2 down to 1.
+ *
+ *  DELIBERATELY no `outcome` field. The obvious mapping (a `pending` patch over an open attempt
+ *  means "retried") is not derivable from the status: `reenterChain` (run.ts:2979, :2939) and
+ *  `requeueHandoff` (:6664) write the same patch for crash recovery, an approval decision and a
+ *  human resolving a handoff. An approval requesting changes even takes `loopBackTo` or
+ *  `reenterChain` depending only on whether an `execute()` loop happens to be live, so the same
+ *  user action would carry two different labels across a restart. Adding an outcome means each
+ *  SITE declaring its own reason on the patch; that is a later spec, not this one. */
+export const stepAttemptSchema = z.object({
+  /** 1-based and contiguous: attempt k is at index k-1. The cockpit checks this rather than
+   *  trusting it (`stepAttempts`), because a gap would make the total a silent floor. */
+  n: z.number().int().positive(),
+  startedAt: z.string(),
+  /** Absent while the attempt is open. At most the LAST entry may be open, and only while the
+   *  step itself is active. */
+  endedAt: z.string().optional(),
+});
+export type StepAttempt = z.infer<typeof stepAttemptSchema>;
+
 /** One step of a run's chain. */
 export const stepStateSchema = z.object({
   id: z.string(),
@@ -87,6 +124,32 @@ export const stepStateSchema = z.object({
   usageInvocationEpoch: usageCounterSchema.optional(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
+  /** Every attempt at this step, in order (spec 2026-08-29-per-retry-step-timing). ADDITIVE and
+   *  optional: absent on every record written before it shipped, and on a step that never ran.
+   *  `startedAt`/`finishedAt` above are unchanged in BEHAVIOUR, but they are NOT a matched pair and
+   *  must not be read as one. `startedAt` is overwritten on every re-entry, so it describes the
+   *  LATEST attempt. `finishedAt` is stamped only on a TERMINAL end (`finishStep`, run.ts:8316),
+   *  and the step-loop head that reopens a step rewrites `status`, `iterations`, `startedAt` and
+   *  `error` but NOT `finishedAt` (run.ts:5790-5797), so while a retry is in flight `finishedAt` is
+   *  a leftover from the PREVIOUS terminal attempt and is older than `startedAt`. Some abandonment
+   *  sites do clear it (`reenterChain` at run.ts:2979/:2985 and `requeueHandoff` at :6664 write
+   *  `finishedAt: undefined`); the ordinary retry loop does not, which is why the skew cannot be
+   *  assumed away. That skew is pre-existing and this spec neither introduces nor repairs it:
+   *  `stepElapsed` already ignores `finishedAt` on an active step for exactly this reason
+   *  (`2026-08-20-step-and-tool-call-durations` risk R5). **`attempts` is the authoritative record
+   *  of per-attempt timing**: it is the only place the earlier attempts exist at all, and the only
+   *  place both ends of any attempt other than the latest can be read.
+   *  Invariant the store MAINTAINS rather than assumes:
+   *  `attempts.length === iterations` for any step whose FIRST attempt opened under a cezar new
+   *  enough to write it, which is why `trackAttempt` rewrites `patch.iterations` from the array
+   *  rather than taking the caller's word for it — belt-and-braces now that `runContinuation`
+   *  derives its own `iterations` from the record instead of a literal `1` (this same spec's
+   *  Phase 1), and the guard that matters for a site added later — and why it declines to track a
+   *  step that was already past attempt 1 when it shipped, where rewriting the counter would LOSE
+   *  a real count rather than correct a wrong one. The cockpit uses exactly that equality, plus the
+   *  contiguity and closed-interval checks in `stepAttempts`, to tell a covered record from a
+   *  partial or malformed one. */
+  attempts: z.array(stepAttemptSchema).optional(),
   error: z.string().optional(),
   /** Latest agent session id — `claude --resume <id>` and friends. */
   sessionId: z.string().optional(),

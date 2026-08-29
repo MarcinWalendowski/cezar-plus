@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { RunManager } from './run.ts';
 import { localCliAuthor } from '../runs/task-author.ts';
@@ -69,6 +69,11 @@ describe('recover() contains backend session failures (#562)', () => {
     store.updateRun(record.id, { status: 'running', currentStepId: 'work' });
 
     const firstManager = new RunManager(store, repoRoot);
+    // V7b (spec 2026-08-29-per-retry-step-timing): capture the continuation step's status
+    // sequence, same method V7a uses in broker-retry.test.ts — the two retry branches
+    // (`run.ts:5240-5241` cold broker, `:5261-5262` missing session) are separate code, and a
+    // fix applied to one only is exactly what this catches.
+    const updateStepSpy = vi.spyOn(store, 'updateStep');
     await firstManager.recover();
     // The retried attempt mints a fresh session and spawns `thread/start` (never gated by
     // MOCK_CODEX_REJECT_RESUME, which only rejects `thread/resume`) — it succeeds, the turn
@@ -101,6 +106,28 @@ describe('recover() contains backend session failures (#562)', () => {
           ),
       ),
     ).toBe(true);
+
+    // V7b — the retry parked the run at `waiting` with its backend process still alive, so
+    // attempt 2 is still OPEN: this is not all of V7a, and copying that case's "closed with the
+    // step's own finishedAt" over would be wrong here.
+    expect(continuation?.attempts).toHaveLength(2);
+    const [attempt1, attempt2] = continuation!.attempts!;
+    expect(attempt1!.endedAt).toBeDefined(); // attempt 1 is CLOSED
+    expect(attempt2!.startedAt).toBeDefined();
+    expect(attempt2!.endedAt).toBeUndefined(); // attempt 2 is OPEN — the run is `waiting`, not done
+    expect(continuation?.finishedAt).toBeUndefined();
+    expect(continuation?.iterations).toBe(2); // not the literal `1` the code writes
+    expect(attempt1!.endedAt! <= attempt2!.startedAt).toBe(true);
+
+    const continue1Statuses = updateStepSpy.mock.calls
+      .filter(([, stepId, patch]) => stepId === 'continue-1' && patch.status !== undefined)
+      .map(([, , patch]) => patch.status);
+    expect(continue1Statuses).toEqual(['running', 'pending', 'running', 'waiting']);
+
+    const stepStarts = store
+      .readEvents(record.id)
+      .filter((e) => e.type === 'step-start' && (e as { stepId?: string }).stepId === 'continue-1');
+    expect(stepStarts.map((e) => (e as { iteration?: number }).iteration)).toEqual([1, 2]);
 
     // The retried session parked `waiting` with its backend process still alive (the codex mock's
     // default scripted turn never emits a completion marker) — cancel it so nothing leaks past

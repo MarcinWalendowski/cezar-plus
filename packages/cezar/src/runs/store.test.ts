@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runStatusSchema as contractRunStatusSchema } from '@loki-labs/better-cezar-contract';
 import { RunStore, runRecordSchema } from './store.ts';
 import { localCliAuthor } from './task-author.ts';
@@ -1928,5 +1928,226 @@ describe('RunStore — legacy workspaceWorktrees survive the writer being remove
       Record<string, unknown>
     >;
     expect(onDisk.find((r) => r.id === run.id)).not.toHaveProperty('autoStart');
+  });
+});
+
+// spec 2026-08-29-per-retry-step-timing, §Verification V1: `trackAttempt` is exercised entirely
+// through `updateStep`, no workflow boot required. `BASE` + an offset in ms gives every instant in
+// a case a name, so the ordering asserted below is the ordering actually driven.
+describe('RunStore — per-retry attempt timing (spec 2026-08-29-per-retry-step-timing)', () => {
+  let dataDir: string;
+  const BASE = Date.parse('2026-08-29T00:00:00.000Z');
+  const T = (ms: number) => new Date(BASE + ms).toISOString();
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-attempts-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+    vi.useRealTimers();
+  });
+
+  function freshStore(): RunStore {
+    return RunStore.open(dataDir);
+  }
+
+  function newRun(store: RunStore, stepId = 'work') {
+    return store.createRun({
+      author: localCliAuthor(),
+      title: 'retry timing fixture',
+      workflow: 'quick-task',
+      task: 'retry timing fixture',
+      steps: [{ id: stepId, name: 'Work', kind: 'agent' }],
+    });
+  }
+
+  /** Close-to-`pending` with no explicit `finishedAt`: `trackAttempt` stamps `endedAt` from
+   *  `nowIso`, so the system clock must be pinned to the instant the case names. */
+  function closeAtPending(store: RunStore, runId: string, stepId: string, at: number) {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(at));
+    try {
+      store.updateStep(runId, stepId, { status: 'pending', error: undefined });
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it('V1a — a fresh step opens attempt 1 with no outcome field', () => {
+    const store = freshStore();
+    const run = newRun(store);
+    store.updateStep(run.id, 'work', { status: 'running', iterations: 1, startedAt: T(0) });
+    const step = store.getRun(run.id)!.steps[0]!;
+    expect(step.attempts).toEqual([{ n: 1, startedAt: T(0) }]);
+    expect(step.attempts![0]).not.toHaveProperty('endedAt');
+    expect(step.attempts![0]).not.toHaveProperty('outcome');
+  });
+
+  it('V1b — a terminal patch closes the open attempt at `finishedAt`', () => {
+    const store = freshStore();
+    const run = newRun(store);
+    store.updateStep(run.id, 'work', { status: 'running', iterations: 1, startedAt: T(0) });
+    store.updateStep(run.id, 'work', { status: 'done', finishedAt: T(1000) });
+    const step = store.getRun(run.id)!.steps[0]!;
+    expect(step.attempts).toEqual([{ n: 1, startedAt: T(0), endedAt: T(1000) }]);
+    expect(step.startedAt).toBe(T(0));
+    expect(step.finishedAt).toBe(T(1000));
+  });
+
+  it('V1c (R2) — an interleaved step is excluded from the total', () => {
+    const store = freshStore();
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'interleaved',
+      workflow: 'quick-task',
+      task: 'interleaved',
+      steps: [
+        { id: 'a', name: 'A', kind: 'agent' },
+        { id: 'b', name: 'B', kind: 'agent' },
+      ],
+    });
+    store.updateStep(run.id, 'a', { status: 'running', iterations: 1, startedAt: T(0) }); // tA1
+    closeAtPending(store, run.id, 'a', BASE + 1000); // tA1end
+    store.updateStep(run.id, 'b', { status: 'running', iterations: 1, startedAt: T(2000) }); // tB
+    store.updateStep(run.id, 'b', { status: 'done', finishedAt: T(3000) }); // tBend
+    store.updateStep(run.id, 'a', { status: 'running', iterations: 2, startedAt: T(4000) }); // tA2
+    store.updateStep(run.id, 'a', { status: 'done', finishedAt: T(5000) }); // tA2end
+
+    const a = store.getRun(run.id)!.steps.find((s) => s.id === 'a')!;
+    const b = store.getRun(run.id)!.steps.find((s) => s.id === 'b')!;
+    expect(a.attempts).toHaveLength(2);
+    expect(a.attempts![0]!.endedAt).toBe(T(1000));
+    expect(a.attempts![0]!.endedAt! <= b.attempts![0]!.startedAt).toBe(true);
+    expect(a.attempts![1]!.startedAt >= b.attempts![0]!.endedAt!).toBe(true);
+    const totalMs = a.attempts!.reduce((sum, attempt) => {
+      const end = attempt.endedAt ? Date.parse(attempt.endedAt) : Date.parse(attempt.startedAt);
+      return sum + (end - Date.parse(attempt.startedAt));
+    }, 0);
+    expect(totalMs).toBe(1000 + 1000); // (tA1end - tA1) + (tA2end - tA2); B's [tB, tBend] excluded
+  });
+
+  it('V1d (R6) — a continuation retry closes at the abandonment, not at the next open', () => {
+    const store = freshStore();
+    const run = newRun(store, 'continue-1');
+    store.updateStep(run.id, 'continue-1', { status: 'running', iterations: 1, startedAt: T(0) }); // t1
+    closeAtPending(store, run.id, 'continue-1', BASE + 1000); // t2
+    store.updateStep(run.id, 'continue-1', { status: 'running', iterations: 1, startedAt: T(5000) }); // t3
+
+    const step = store.getRun(run.id)!.steps[0]!;
+    expect(step.attempts).toHaveLength(2);
+    expect(step.attempts![0]!.endedAt).toBe(T(1000)); // the abandonment instant, NOT t3
+    expect(step.attempts![1]).toEqual({ n: 2, startedAt: T(5000) });
+    expect(step.iterations).toBe(2); // not the literal `1` the patch asked for
+  });
+
+  it("V1d′ — the defensive open-over-open branch stamps `patch.startedAt`, not `nowIso`", () => {
+    const store = freshStore();
+    const run = newRun(store);
+    store.updateStep(run.id, 'work', { status: 'running', iterations: 1, startedAt: T(0) });
+    // No intervening `pending` — the shape no live path produces after Phase 1. `nowIso` inside
+    // `updateStep` is pinned strictly LATER than t3, so a pass here cannot be `nowIso` in disguise.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(BASE + 999_000));
+    try {
+      store.updateStep(run.id, 'work', { status: 'running', iterations: 1, startedAt: T(3000) });
+    } finally {
+      vi.useRealTimers();
+    }
+    const step = store.getRun(run.id)!.steps[0]!;
+    expect(step.attempts).toHaveLength(2);
+    expect(step.attempts![0]!.endedAt).toBe(T(3000));
+    expect(step.attempts![0]!.endedAt).toBe(step.attempts![1]!.startedAt);
+  });
+
+  it('V1e (R1) — a five-attempt sequence closes every non-final attempt and the final one too', () => {
+    const store = freshStore();
+    const run = newRun(store);
+    for (let n = 1; n <= 4; n += 1) {
+      store.updateStep(run.id, 'work', { status: 'running', iterations: n, startedAt: T(n * 1000) });
+      closeAtPending(store, run.id, 'work', BASE + n * 1000 + 500);
+    }
+    store.updateStep(run.id, 'work', { status: 'running', iterations: 5, startedAt: T(5000) });
+    store.updateStep(run.id, 'work', { status: 'failed', finishedAt: T(5500) });
+
+    const step = store.getRun(run.id)!.steps[0]!;
+    expect(step.attempts).toHaveLength(5);
+    expect(step.attempts!.map((a) => a.n)).toEqual([1, 2, 3, 4, 5]);
+    expect(step.attempts!.every((a) => a.endedAt !== undefined)).toBe(true);
+  });
+
+  it('V1f — a `pending` patch with no open attempt is a no-op, not a phantom entry', () => {
+    const store = freshStore();
+    const run = newRun(store);
+    // No attempts at all yet.
+    store.updateStep(run.id, 'work', { status: 'pending', error: undefined });
+    expect(store.getRun(run.id)!.steps[0]!.attempts).toBeUndefined();
+
+    // An already-closed attempt.
+    store.updateStep(run.id, 'work', { status: 'running', iterations: 1, startedAt: T(0) });
+    store.updateStep(run.id, 'work', { status: 'done', finishedAt: T(1000) });
+    const before = store.getRun(run.id)!.steps[0]!.attempts;
+    store.updateStep(run.id, 'work', { status: 'pending', error: undefined }); // loopBackTo collateral
+    expect(store.getRun(run.id)!.steps[0]!.attempts).toEqual(before);
+  });
+
+  it('V1g — a statusless patch touches neither `attempts` nor `iterations`', () => {
+    const store = freshStore();
+    const run = newRun(store);
+    store.updateStep(run.id, 'work', { status: 'running', iterations: 1, startedAt: T(0) });
+    store.updateStep(run.id, 'work', { inputTokens: 10, outputTokens: 5 });
+    const step = store.getRun(run.id)!.steps[0]!;
+    expect(step.attempts).toEqual([{ n: 1, startedAt: T(0) }]);
+    expect(step.iterations).toBe(1);
+  });
+
+  it('V1h — a `running` patch with no `startedAt` opens nothing and closes nothing', () => {
+    const store = freshStore();
+    const run = newRun(store);
+    store.updateStep(run.id, 'work', { status: 'running', iterations: 1, startedAt: T(0) });
+    store.updateStep(run.id, 'work', { status: 'running' });
+    const step = store.getRun(run.id)!.steps[0]!;
+    expect(step.attempts).toEqual([{ n: 1, startedAt: T(0) }]);
+  });
+
+  it('V1i (R5/R6) — a legacy in-flight step is never adopted, and its counter is never rewritten', () => {
+    const legacyRun = {
+      id: 'legacy-retry-1',
+      title: 'a step already on attempt 2',
+      workflow: 'quick-task',
+      task: 'a step already on attempt 2',
+      status: 'running',
+      createdAt: T(0),
+      tokensUsed: 0,
+      archived: false,
+      steps: [
+        { id: 'work', name: 'Work', kind: 'agent', status: 'running', iterations: 2, tokensUsed: 0, startedAt: T(1000) },
+      ],
+    };
+    writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([legacyRun]), 'utf8');
+    const store = RunStore.open(dataDir, { keepLive: true });
+
+    closeAtPending(store, 'legacy-retry-1', 'work', BASE + 2000);
+    store.updateStep('legacy-retry-1', 'work', { status: 'running', iterations: 3, startedAt: T(3000) });
+
+    const step = store.getRun('legacy-retry-1')!.steps[0]!;
+    expect(step.attempts).toBeUndefined();
+    expect(step.iterations).toBe(3); // the engine's own value, not the corrupted `1`
+
+    // Control, in the same test: a step seeded at `iterations: 0` with no `attempts` IS tracked.
+    const control = newRun(store, 'fresh');
+    store.updateStep(control.id, 'fresh', { status: 'running', iterations: 1, startedAt: T(4000) });
+    expect(store.getRun(control.id)!.steps[0]!.attempts).toHaveLength(1);
+  });
+
+  it('V6c — `attempts` survives a reload through `runRecordSchema`', () => {
+    const store = freshStore();
+    const run = newRun(store);
+    store.updateStep(run.id, 'work', { status: 'running', iterations: 1, startedAt: T(0) });
+    store.updateStep(run.id, 'work', { status: 'done', finishedAt: T(1000) });
+    store.flush();
+
+    const reopened = RunStore.open(dataDir, { keepLive: true }).getRun(run.id);
+    expect(reopened?.steps[0]?.attempts).toEqual([{ n: 1, startedAt: T(0), endedAt: T(1000) }]);
   });
 });
