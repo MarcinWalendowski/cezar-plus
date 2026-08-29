@@ -2,7 +2,6 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
-  CheckIcon,
   EyeIcon,
   EyeOffIcon,
   LayersIcon,
@@ -13,9 +12,10 @@ import {
   XIcon,
 } from 'lucide-react'
 import * as React from 'react'
-import { Link, useSearchParams } from 'react-router'
+import { Link, useLocation, useSearchParams } from 'react-router'
 
-import { archiveProjectRun, setProjectRunRead, startWorkspaceTodo, updateWorkspaceTodo } from '@/api/client'
+import { archiveProjectRun, setProjectRunRead, startWorkspaceTodo } from '@/api/client'
+import { useStartFiledTask, useUpdateFiledTodo } from '@/api/filed-task-mutations'
 import {
   queryKeys,
   rememberReferenceStatuses,
@@ -29,19 +29,17 @@ import type {
   ProjectListEntry,
   RunIndexEntry,
   RunsIndexResponse,
-  UpdateTodoInput,
   WorkspaceTodoEntry,
-  WorkspaceTodosResponse,
 } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { FacetFilter, SegmentedControl, ToggleChip } from '@/components/facet-filter'
+import { FILED_PRIORITY_LABEL, FILED_STATUS_LABEL, FiledPriorityChip, FiledStatusPill } from '@/components/filed-task-detail'
 import { HostUsageStat } from '@/components/host-usage-stat'
 import { useListView } from '@/components/list-view'
 import { Pill } from '@/components/pill'
 import { ReferenceChip } from '@/components/reference-chip'
 import { ReferenceStatusProvider } from '@/components/reference-status'
-import { StatusDot, type StatusDotTone } from '@/components/status-dot'
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { StatusDot } from '@/components/status-dot'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
 import { AuthorCell, TaskLocationProvider } from '@/components/author-cell'
@@ -60,7 +58,6 @@ import {
   FILED_ROW_PAGE_SIZE,
   FILED_STATUS_VALUES,
   NO_FILED_FILTERS,
-  applyFiledPatch,
   filedFacetCounts,
   filedSelectionState,
   filedStatus,
@@ -72,9 +69,7 @@ import {
   sortFiledTasks,
   toggleFiledSelection,
   type FiledFacetId,
-  type FiledPriority,
   type FiledSort,
-  type FiledStatus,
   type FiledTaskFilters,
 } from '@/lib/filed-tasks'
 import { shortAge } from '@/lib/format'
@@ -115,11 +110,10 @@ import {
   type GlobalTasksUrlState,
   type GroupBy,
 } from '@/lib/global-tasks'
-import { scopeTo, useNavigate } from '@/lib/project-router'
+import { scopeTo } from '@/lib/project-router'
 import { allProjectTags } from '@/lib/project-tags'
 import { canBeUnread, isReadDoneItem, isUnread } from '@/lib/read-state'
 import { runTitle, type ListView } from '@/lib/task-groups'
-import { Markdown } from '@/routes/task-thread/markdown'
 import { usageMetricVisibility } from '@/lib/token-metrics'
 import { useIsDesktop } from '@/lib/use-desktop'
 import { useNow } from '@/lib/use-now'
@@ -283,6 +277,11 @@ export function GlobalTasksRoute() {
   // source of truth means a refresh, a pasted link and the Back button all land on the same
   // filtered view, with no effect syncing two copies that can disagree.
   const [searchParams, setSearchParams] = useSearchParams()
+  // The board's own `location.search` — a Filed row's title link carries it forward so the
+  // detail page's back link restores the exact filtered view a click came from (Risk 1,
+  // `.ai/specs/2026-08-29-filed-task-detail-page.md`), rather than always bouncing to a bare
+  // `/tasks` that drops every URL-backed filter.
+  const location = useLocation()
   const { filters, groupBy, view, filedFilters, filedSort } = React.useMemo(
     () => urlStateFromSearchParams(searchParams),
     [searchParams],
@@ -552,6 +551,7 @@ export function GlobalTasksRoute() {
           query={filters.query}
           filedFilters={filedFilters}
           filedSort={filedSort}
+          search={location.search}
           onToggleFacet={(facet, value) =>
             setFiledFilters((current) => ({ ...current, [facet]: toggleFacetValue(current[facet], value) }))
           }
@@ -673,28 +673,10 @@ function RunningTasks({
   )
 }
 
-/** Human labels + dot tones for the closed status enum, kept beside the components that render
- *  them. `pending` reads as amber in this design system — `lib/attention.ts`'s own "waiting →
- *  amber/pending" note — the closest existing tone to "needs attention" for a blocked task,
- *  without inventing a new dot color for one status. */
-const FILED_STATUS_LABEL: Record<FiledStatus, string> = {
-  todo: 'To do',
-  'in-progress': 'In progress',
-  blocked: 'Blocked',
-  done: 'Done',
-}
-const FILED_STATUS_TONE: Record<FiledStatus, StatusDotTone> = {
-  todo: 'neutral',
-  'in-progress': 'violet',
-  blocked: 'pending',
-  done: 'success',
-}
-
-const FILED_PRIORITY_LABEL: Record<FiledPriority, string> = {
-  high: 'High',
-  medium: 'Medium',
-  low: 'Low',
-}
+// `FILED_STATUS_LABEL`/`FILED_PRIORITY_LABEL` and the `FiledStatusPill`/`FiledPriorityChip` that
+// paint them moved to `@/components/filed-task-detail` (`.ai/specs/2026-08-29-filed-task-detail-
+// page.md`, Phase 1): the standalone task detail page needs the same pill/chip the filter controls
+// below read labels from, so both live in the one shared module rather than drifting apart.
 
 const FILED_SORT_OPTIONS: readonly { value: FiledSort; label: string }[] = [
   { value: 'created-desc', label: 'Newest' },
@@ -703,8 +685,9 @@ const FILED_SORT_OPTIONS: readonly { value: FiledSort; label: string }[] = [
 
 /**
  * The "Filed" section: a real table now (2026-08-17-filed-tasks-table-statuses.md) of tasks that
- * exist on the board but have never run — status pill, title (opens the detail dialog), project,
- * priority, age, and Start/Archive per row.
+ * exist on the board but have never run — status pill, title (a link to the task's own detail
+ * page, `.ai/specs/2026-08-29-filed-task-detail-page.md`), project, priority, age, and
+ * Start/Archive per row.
  *
  * **Why it is here at all.** The composer's All / Auto submit writes todos across projects and
  * starts nothing (D5, `.ai/specs/2026-08-15-knowledge-grounded-task-fanout.md`). Before this,
@@ -729,6 +712,7 @@ function FiledTasks({
   query,
   filedFilters,
   filedSort,
+  search,
   onToggleFacet,
   onClearFacet,
   onSortChange,
@@ -738,6 +722,9 @@ function FiledTasks({
   query: string
   filedFilters: FiledTaskFilters
   filedSort: FiledSort
+  /** The board's own `location.search` — carried onto every title link's history state
+   *  (Risk 1), so the detail page's back link can restore this exact filtered view. */
+  search: string
   onToggleFacet: (facet: FiledFacetId, value: string) => void
   onClearFacet: (facet: FiledFacetId) => void
   onSortChange: (sort: FiledSort) => void
@@ -752,7 +739,6 @@ function FiledTasks({
   // fetch for the whole section — `nodeRoster.clusterOn` gates the Node column/cell everywhere
   // below, so a single-node cockpit never grows a column that is always empty.
   const nodeRoster = useTaskNodeRoster()
-  const [detail, setDetail] = React.useState<WorkspaceTodoEntry | null>(null)
   const [shown, setShown] = React.useState(FILED_ROW_PAGE_SIZE)
   const [selected, setSelected] = React.useState<ReadonlySet<string>>(() => new Set())
 
@@ -867,7 +853,7 @@ function FiledTasks({
               entry={entry}
               now={now}
               nodeRoster={nodeRoster}
-              onOpenDetail={() => setDetail(entry)}
+              search={search}
               onStart={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
               onArchive={(archived) => update.mutate({ entry, patch: { archived } })}
               selected={selected.has(filedTaskKey(entry))}
@@ -922,7 +908,7 @@ function FiledTasks({
                     entry={entry}
                     now={now}
                     nodeRoster={nodeRoster}
-                    onOpenDetail={() => setDetail(entry)}
+                    search={search}
                     onStart={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
                     onArchive={(archived) => update.mutate({ entry, patch: { archived } })}
                     selected={selected.has(filedTaskKey(entry))}
@@ -948,19 +934,6 @@ function FiledTasks({
           ) : null}
         </div>
       )}
-
-      <FiledDetailDialog
-        entry={detail}
-        nodeRoster={nodeRoster}
-        onClose={() => setDetail(null)}
-        onStart={(entry) => {
-          setDetail(null)
-          start.mutate({ projectId: entry.project, todoId: entry.todo.id })
-        }}
-        onArchive={(entry, archived) => update.mutate({ entry, patch: { archived } })}
-        startPending={start.isPending}
-        archivePending={update.isPending}
-      />
     </section>
   )
 }
@@ -1078,33 +1051,14 @@ function FiledRowCheckbox({
   )
 }
 
-/** A closed-enum status pill — `todo`/`in-progress`/`blocked`/`done` painted in the design
- *  system's dot grammar, same idiom `TaskRow`'s attention pill above uses. */
-function FiledStatusPill({ status }: { status: FiledStatus }) {
-  return <Pill dot={FILED_STATUS_TONE[status]}>{FILED_STATUS_LABEL[status]}</Pill>
-}
-
-/** A dim, quiet chip — priority is context for the row, not its status, so it does not compete
- *  with the status pill for attention. Absent priority renders `—` at the call site instead. */
-function FiledPriorityChip({ priority }: { priority: FiledPriority }) {
-  return (
-    <span
-      data-slot="filed-priority-chip"
-      className="inline-flex items-center rounded-full bg-muted px-1.5 py-px text-[10.5px] font-medium text-muted-foreground"
-    >
-      {FILED_PRIORITY_LABEL[priority]}
-    </span>
-  )
-}
-
-/** One filed row: status, a title BUTTON (not a link — there is no run yet to navigate to; it
- *  opens the detail dialog), project link, priority, age with a tooltip carrying the full date,
- *  and Start / Archive-or-Restore. */
+/** One filed row: status, a title LINK to the task's own detail page
+ *  (`.ai/specs/2026-08-29-filed-task-detail-page.md`), project link, priority, age with a
+ *  tooltip carrying the full date, and Start / Archive-or-Restore. */
 function FiledRow({
   entry,
   now,
   nodeRoster,
-  onOpenDetail,
+  search,
   onStart,
   onArchive,
   selected,
@@ -1115,7 +1069,7 @@ function FiledRow({
   entry: WorkspaceTodoEntry
   now: number
   nodeRoster: TaskNodeRoster
-  onOpenDetail: () => void
+  search: string
   onStart: () => void
   onArchive: (archived: boolean) => void
   selected: boolean
@@ -1144,15 +1098,15 @@ function FiledRow({
         <FiledStatusPill status={status} />
       </td>
       <td className={cn(TD_BASE, 'min-w-[320px] max-w-0')}>
-        <button
-          type="button"
+        <Link
+          to={scopeTo(entry.project, `/todos/${entry.todo.id}`)}
+          state={{ from: { pathname: '/tasks', search, surface: 'table' } }}
           data-slot="filed-task-title"
-          onClick={onOpenDetail}
           title={entry.todo.summary}
           className="min-w-0 max-w-full truncate text-left text-[13px] font-medium hover:underline"
         >
           {entry.todo.summary}
-        </button>
+        </Link>
       </td>
       <td className={cn(TD_BASE, 'text-[12.5px] text-muted-foreground')}>
         <Link to={scopeTo(entry.project, '/')} className="truncate hover:text-foreground">
@@ -1231,14 +1185,14 @@ function FiledRow({
 /**
  * One filed task as a card — the `<md` framing of `FiledRow`.
  *
- * Same detail-dialog title button and the same Start / Archive handlers, only reshaped for a
+ * Same detail-page title link and the same Start / Archive handlers, only reshaped for a
  * phone: a stacked card with ≥44px labelled actions where the row offers 28px icons.
  */
 function FiledCard({
   entry,
   now,
   nodeRoster,
-  onOpenDetail,
+  search,
   onStart,
   onArchive,
   selected,
@@ -1249,7 +1203,7 @@ function FiledCard({
   entry: WorkspaceTodoEntry
   now: number
   nodeRoster: TaskNodeRoster
-  onOpenDetail: () => void
+  search: string
   onStart: () => void
   onArchive: (archived: boolean) => void
   selected: boolean
@@ -1273,15 +1227,15 @@ function FiledCard({
         <span className="mt-px shrink-0">
           <FiledStatusPill status={status} />
         </span>
-        <button
-          type="button"
+        <Link
+          to={scopeTo(entry.project, `/todos/${entry.todo.id}`)}
+          state={{ from: { pathname: '/tasks', search, surface: 'card' } }}
           data-slot="filed-task-title"
-          onClick={onOpenDetail}
           title={entry.todo.summary}
           className="min-w-0 flex-1 text-left text-[13.5px] font-medium leading-[1.35] hover:underline"
         >
           {entry.todo.summary}
-        </button>
+        </Link>
         <span className="mt-0.5 shrink-0 text-[11.5px] text-soft-foreground tabular-nums">
           {entry.todo.ts ? shortAge(entry.todo.ts, now) : '—'}
         </span>
@@ -1337,188 +1291,9 @@ function FiledCard({
   )
 }
 
-/**
- * The detail dialog (spec: "I can't open task to see details" — the owner's own complaint this
- * whole feature answers). `context`/`whatToDo`/`acceptanceCriteria` render through the same
- * `Markdown` component the skill/thread surfaces use (`skill-detail.tsx`'s precedent); absent
- * fields render nothing at all, since most existing entries (and every legacy agent append) are
- * summary-only. `knowledgeRefs` link into the Knowledge tab that grounded the task.
- */
-function FiledDetailDialog({
-  entry,
-  nodeRoster,
-  onClose,
-  onStart,
-  onArchive,
-  startPending,
-  archivePending,
-}: {
-  entry: WorkspaceTodoEntry | null
-  nodeRoster: TaskNodeRoster
-  onClose: () => void
-  onStart: (entry: WorkspaceTodoEntry) => void
-  onArchive: (entry: WorkspaceTodoEntry, archived: boolean) => void
-  startPending: boolean
-  archivePending: boolean
-}) {
-  return (
-    <Dialog open={entry !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
-      <DialogContent data-slot="filed-task-detail" className="block max-h-[80dvh] overflow-y-auto sm:max-w-2xl">
-        {entry ? (
-          <FiledDetailBody
-            entry={entry}
-            nodeRoster={nodeRoster}
-            onStart={onStart}
-            onArchive={onArchive}
-            startPending={startPending}
-            archivePending={archivePending}
-          />
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function FiledDetailBody({
-  entry,
-  nodeRoster,
-  onStart,
-  onArchive,
-  startPending,
-  archivePending,
-}: {
-  entry: WorkspaceTodoEntry
-  nodeRoster: TaskNodeRoster
-  onStart: (entry: WorkspaceTodoEntry) => void
-  onArchive: (entry: WorkspaceTodoEntry, archived: boolean) => void
-  startPending: boolean
-  archivePending: boolean
-}) {
-  const { todo } = entry
-  const archived = todo.archivedAt !== undefined
-  return (
-    <div className="min-w-0">
-      {/* Visible title/description feed the dialog a11y contract — the `SkillPreviewDialog`
-          precedent (`skill-detail.tsx`) uses the same sr-only pairing over a custom heading. */}
-      <DialogTitle className="text-lg font-semibold break-words">{todo.summary}</DialogTitle>
-      <DialogDescription className="sr-only">Filed task detail</DialogDescription>
-
-      <div className="mt-1.5 flex flex-wrap items-center gap-2">
-        <FiledStatusPill status={filedStatus(entry)} />
-        {todo.priority ? <FiledPriorityChip priority={todo.priority} /> : null}
-        <Link
-          to={scopeTo(entry.project, '/')}
-          className="font-mono text-[11px] text-soft-foreground hover:text-foreground hover:underline"
-        >
-          {entry.project}
-        </Link>
-        {todo.ts ? (
-          <span className="text-[11px] text-soft-foreground">Filed {new Date(todo.ts).toLocaleString()}</span>
-        ) : null}
-        {nodeRoster.clusterOn ? <TaskNodeCell info={nodeRoster.resolve(todo)} /> : null}
-      </div>
-
-      {todo.context ? (
-        <section className="mt-4">
-          <h4 className="text-[11px] font-semibold tracking-[.04em] text-soft-foreground uppercase">Context</h4>
-          <div data-slot="filed-task-context" className="mt-1.5 text-sm">
-            <Markdown>{todo.context}</Markdown>
-          </div>
-        </section>
-      ) : null}
-
-      {todo.whatToDo ? (
-        <section className="mt-4">
-          <h4 className="text-[11px] font-semibold tracking-[.04em] text-soft-foreground uppercase">
-            What to do
-          </h4>
-          <div data-slot="filed-task-what-to-do" className="mt-1.5 text-sm">
-            <Markdown>{todo.whatToDo}</Markdown>
-          </div>
-        </section>
-      ) : null}
-
-      {todo.acceptanceCriteria && todo.acceptanceCriteria.length > 0 ? (
-        <section className="mt-4">
-          <h4 className="text-[11px] font-semibold tracking-[.04em] text-soft-foreground uppercase">
-            Acceptance criteria
-          </h4>
-          <ul data-slot="filed-task-acceptance-criteria" className="mt-1.5 flex flex-col gap-1">
-            {todo.acceptanceCriteria.map((item, index) => (
-              // Index keys are safe here: this list is never reordered or edited in place, only
-              // ever rendered whole from the entry the dialog was opened with.
-              // eslint-disable-next-line react/no-array-index-key
-              <li key={index} className="flex items-start gap-1.5 text-sm">
-                <CheckIcon className="mt-0.5 size-3.5 shrink-0 text-soft-foreground" aria-hidden="true" />
-                <span>{item}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
-
-      {todo.knowledgeRefs && todo.knowledgeRefs.length > 0 ? (
-        <section className="mt-4">
-          <h4 className="text-[11px] font-semibold tracking-[.04em] text-soft-foreground uppercase">
-            Grounded in
-          </h4>
-          <ul data-slot="filed-task-knowledge-refs" className="mt-1.5 flex flex-col gap-1">
-            {todo.knowledgeRefs.map((ref) => (
-              <li key={`${ref.project}/${ref.slug}`}>
-                <Link
-                  to={`/workspace/knowledge?project=${encodeURIComponent(ref.project)}&doc=${encodeURIComponent(ref.slug)}`}
-                  className="text-sm font-medium text-violet hover:underline"
-                >
-                  {ref.title}
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
-
-      <div className="mt-5 flex items-center gap-2">
-        <button
-          type="button"
-          data-action="filed-task-detail-start"
-          onClick={() => onStart(entry)}
-          disabled={startPending}
-          className="rounded-md border border-border px-2.5 py-1.5 text-[12.5px] font-medium transition-colors hover:bg-muted disabled:opacity-50"
-        >
-          Start
-        </button>
-        <button
-          type="button"
-          data-action={archived ? 'filed-task-detail-restore' : 'filed-task-detail-archive'}
-          onClick={() => onArchive(entry, !archived)}
-          disabled={archivePending}
-          className="rounded-md border border-border px-2.5 py-1.5 text-[12.5px] font-medium transition-colors hover:bg-muted disabled:opacity-50"
-        >
-          {archived ? 'Restore' : 'Archive'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-/** Start one filed task in its own project and follow it into the run — the `startTodo` mutation
- *  the Inbox card already uses, with the project named explicitly rather than taken from scope. */
-function useStartFiledTask() {
-  const queryClient = useQueryClient()
-  const navigate = useNavigate()
-  return useMutation({
-    mutationFn: ({ projectId, todoId }: { projectId: string; todoId: string }) =>
-      startWorkspaceTodo(projectId, todoId),
-    onSuccess: (result, { projectId }) => {
-      // The todo is now a run: it leaves this list and joins the table below it.
-      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
-      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.runsIndex })
-      void navigate(scopeTo(projectId, `/tasks/${result.run.id}`))
-    },
-    onError: (error) => toast(error.message, { tone: 'danger' }),
-  })
-}
-
+/** The Filed table's bulk-selection Start (2026-08-24-bulk-start-filed-tasks.md) — the ONE mutation
+ *  that stays here rather than moving to `api/filed-task-mutations.ts` with its single-task
+ *  sibling: nothing outside the board's own selection bar starts more than one task at a time. */
 function useStartFiledTasks() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -1548,48 +1323,10 @@ function useStartFiledTasks() {
   })
 }
 
-/**
- * The status/priority edit and Archive/Restore action for one filed row
- * (2026-08-17-filed-tasks-table-statuses.md) — the Filed table's twin of `useIndexedRunMutation`
- * above, but patching the WORKSPACE TODOS cache instead of the runs index.
- *
- * Optimistic, keyed by the `(project, id)` PAIR: two projects could only theoretically share a
- * uuid, but that pair is what the row key (`${entry.project}:${entry.todo.id}`) already uses, so
- * it is what the cache patch keys on too (the spec's own Risks note).
- */
-function useUpdateFiledTodo() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ entry, patch }: { entry: WorkspaceTodoEntry; patch: UpdateTodoInput }) =>
-      updateWorkspaceTodo(entry.project, entry.todo.id, patch),
-    onMutate: async ({ entry, patch }) => {
-      await queryClient.cancelQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
-      const previous = queryClient.getQueryData<WorkspaceTodosResponse>(workspaceQueryKeys.workspaceTodos)
-      queryClient.setQueryData<WorkspaceTodosResponse>(workspaceQueryKeys.workspaceTodos, (current) =>
-        current === undefined
-          ? current
-          : {
-              ...current,
-              todos: current.todos.map((row) =>
-                row.project === entry.project && row.todo.id === entry.todo.id
-                  ? { ...row, todo: applyFiledPatch(row.todo, patch) }
-                  : row,
-              ),
-            },
-      )
-      return { previous }
-    },
-    onError: (error: Error, _variables, context) => {
-      if (context?.previous) {
-        queryClient.setQueryData(workspaceQueryKeys.workspaceTodos, context.previous)
-      }
-      toast(error.message, { tone: 'danger' })
-    },
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
-    },
-  })
-}
+// `useStartFiledTask` and `useUpdateFiledTodo` moved to `@/api/filed-task-mutations`
+// (`.ai/specs/2026-08-29-filed-task-detail-page.md`, Phase 1): the standalone task detail page
+// needs both, and a route module importing another route module would be a cycle once the board
+// links straight to that page.
 
 function ViewTab({
   view,

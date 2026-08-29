@@ -1,6 +1,7 @@
 import type {
   AgentConfigFileContent,
   AgentAccountDetailsResponse,
+  AnalyticsEvent,
   AgentAccountStatusResponse,
   AgentProfileResponse,
   AgentProfileSelectionsResponse,
@@ -2701,6 +2702,20 @@ export async function getWorkspaceRuns(
  */
 export async function getWorkspaceTodos(opts?: ReadOptions): Promise<WorkspaceTodosResponse> {
   return unwrap(await cez.api.v1.workspace.todos.$get({}, init(opts)), '/workspace/todos')
+}
+
+/**
+ * `POST /workspace/analytics/events` — the filed-task detail page's `todo.detail_opened` delivery
+ * (`.ai/specs/2026-08-29-filed-task-detail-page.md`), and any future workspace-scoped event.
+ *
+ * **Deliberately NOT `unwrap`.** Every other wrapper in this file throws an `ApiError` on a
+ * non-2xx so a caller can react to it; this one has no caller that should. The route is fail-open
+ * by contract (a broken sink can never turn an accepted request into a failed one), and
+ * `lib/analytics.ts`'s `trackEvent` is fire-and-forget on top of it — an analytics delivery must
+ * never throw into, retry from, or block the render it describes.
+ */
+export async function postAnalyticsEvents(events: readonly AnalyticsEvent[]): Promise<void> {
+  await cez.api.v1.workspace.analytics.events.$post({ json: { events: [...events] } })
 }
 
 /** `GET /backup` (`.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`) — the backup

@@ -1,6 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter, useLocation } from 'react-router'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
@@ -15,6 +15,7 @@ import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { FILED_ROW_PAGE_SIZE } from '@/lib/filed-tasks'
 
 import { GlobalTasksRoute } from './global-tasks'
+import { FiledTaskDetailRoute } from './filed-task-detail'
 
 /**
  * The global Tasks page, wired to stubbed `/api/v1/projects` + `/api/v1/workspace/runs-index`.
@@ -282,12 +283,23 @@ function stubFetch({
   )
 }
 
+/**
+ * `/p/:projectId/todos/:todoId` is registered alongside `/tasks` here — not because this suite
+ * owns that page (`filed-task-detail.test.tsx` does), but because a Filed row's title is a real
+ * `<Link>` now (`.ai/specs/2026-08-29-filed-task-detail-page.md`): a bare `<GlobalTasksRoute/>`
+ * with no `<Routes>` around it would just sit there forever regardless of what the address bar
+ * says, which would let a broken `href` pass silently. Routing it for real is what makes "clicking
+ * it navigates and the page renders the same sections" an honest assertion.
+ */
 function renderPage(client = createQueryClient(), entry = '/tasks') {
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[entry]}>
         <ListViewProvider>
-          <GlobalTasksRoute />
+          <Routes>
+            <Route path="/tasks" element={<GlobalTasksRoute />} />
+            <Route path="/p/:projectId/todos/:todoId" element={<FiledTaskDetailRoute />} />
+          </Routes>
           <Toaster />
           <LocationProbe />
         </ListViewProvider>
@@ -1681,32 +1693,142 @@ describe('the Filed section', () => {
     await waitFor(() => expect(filedRowIds()).toEqual(['todo-2', 'todo-1']))
   })
 
-  it('opens the detail dialog and renders only the sections the entry actually carries', async () => {
-    const rich: WorkspaceTodoEntry[] = [
-      {
-        project: 'api',
-        todo: {
-          id: 'todo-1',
-          ts: '2026-07-14T09:00:00Z',
-          summary: 'Add a rate limit to /checkout',
-          context: 'Checkout is getting hammered by one client.',
-          whatToDo: 'Add a token-bucket limiter in front of /checkout.',
-        },
+  // `.ai/specs/2026-08-29-filed-task-detail-page.md`, Phase 3: every filed row's title is a real
+  // `<Link>` to `/p/:projectId/todos/:todoId` now — the old detail-dialog wrapper is deleted.
+  // These replace the old "opens the detail dialog" test above.
+  const RICH: WorkspaceTodoEntry[] = [
+    {
+      project: 'api',
+      todo: {
+        id: 'todo-1',
+        ts: '2026-07-14T09:00:00Z',
+        summary: 'Add a rate limit to /checkout',
+        context: 'Checkout is getting hammered by one client.',
+        whatToDo: 'Add a token-bucket limiter in front of /checkout.',
       },
-      TODOS[1]!,
-    ]
-    stubFetch({ todos: rich })
+    },
+  ]
+
+  it('a desktop row title is an anchor to the task detail page, and clicking it navigates there and renders the same sections', async () => {
+    stubFetch({ todos: RICH })
     renderPage()
     await screen.findByText('Add a rate limit to /checkout')
 
-    fireEvent.click(screen.getByText('Add a rate limit to /checkout'))
-    const dialog = await screen.findByRole('dialog')
+    const link = screen.getByText('Add a rate limit to /checkout').closest('a')!
+    expect(link.getAttribute('href')).toBe('/p/api/todos/todo-1')
 
-    expect(within(dialog).getByText('Checkout is getting hammered by one client.')).toBeTruthy()
-    expect(within(dialog).getByText('Add a token-bucket limiter in front of /checkout.')).toBeTruthy()
+    fireEvent.click(link)
+    await waitFor(() => expect(pathname()).toBe('/p/api/todos/todo-1'))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.querySelector('[data-slot="filed-task-detail"]')).not.toBeNull()
+    expect(screen.getByText('Checkout is getting hammered by one client.')).toBeTruthy()
+    expect(screen.getByText('Add a token-bucket limiter in front of /checkout.')).toBeTruthy()
     // No acceptance criteria and no knowledge refs on this entry — no section for either.
-    expect(dialog.querySelector('[data-slot="filed-task-acceptance-criteria"]')).toBeNull()
-    expect(dialog.querySelector('[data-slot="filed-task-knowledge-refs"]')).toBeNull()
+    expect(document.querySelector('[data-slot="filed-task-acceptance-criteria"]')).toBeNull()
+    expect(document.querySelector('[data-slot="filed-task-knowledge-refs"]')).toBeNull()
+  })
+
+  it('a mobile card title is an anchor with the same href — the shared-navigation-contract criterion', async () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }))
+    stubFetch({ todos: RICH })
+    renderPage()
+    await screen.findByText('Add a rate limit to /checkout')
+
+    const cardLink = document.querySelector<HTMLAnchorElement>(
+      '[data-slot="filed-task-card"] [data-slot="filed-task-title"]',
+    )!
+    expect(cardLink.tagName).toBe('A')
+    expect(cardLink.getAttribute('href')).toBe('/p/api/todos/todo-1')
+
+    fireEvent.click(cardLink)
+    await waitFor(() => expect(pathname()).toBe('/p/api/todos/todo-1'))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('no dialog opens after clicking any filed title, in either view, at any status — and the old dialog component is gone from the source tree', async () => {
+    const mixedStatus: WorkspaceTodoEntry[] = [
+      { ...RICH[0]!, todo: { ...RICH[0]!.todo, status: 'done', archivedAt: '2026-07-20T10:00:00Z' } },
+    ]
+    stubFetch({ todos: mixedStatus })
+    renderPage(createQueryClient(), '/tasks?archived=1')
+    await screen.findByText('Add a rate limit to /checkout')
+
+    fireEvent.click(screen.getByText('Add a rate limit to /checkout').closest('a')!)
+    await waitFor(() => expect(pathname()).toBe('/p/api/todos/todo-1'))
+    expect(screen.queryByRole('dialog')).toBeNull()
+
+    // Static check, not just a DOM one: a dialog that stopped OPENING but is still importable
+    // somewhere would be exactly the "two containers for one record" hedge this change removes.
+    const { readdirSync, readFileSync } = await import('node:fs')
+    const path = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const thisFile = fileURLToPath(import.meta.url)
+    const srcRoot = path.resolve(path.dirname(thisFile), '..')
+    const files: string[] = []
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) walk(full)
+        else if (/\.tsx?$/.test(entry.name)) files.push(full)
+      }
+    }
+    walk(srcRoot)
+    // Excludes THIS file: its own assertion has to name the deleted component to check for it.
+    const deletedName = ['Filed', 'Detail', 'Dialog'].join('')
+    const hits = files
+      .filter((file) => file !== thisFile)
+      .filter((file) => readFileSync(file, 'utf8').includes(deletedName))
+    expect(hits).toEqual([])
+  })
+
+  it("carries the board's own location.search onto the link, and the detail page's back link restores it", async () => {
+    // `?workflow=` narrows the RUNS table only (`filters.workflow`), never `filedFilters` — so
+    // the RICH filed entry stays visible under the default Active view while the URL still
+    // carries a real, non-default search string for the link to forward.
+    stubFetch({ todos: RICH })
+    renderPage(createQueryClient(), '/tasks?workflow=spec-to-deploy')
+    await screen.findByText('Add a rate limit to /checkout')
+
+    const link = screen.getByText('Add a rate limit to /checkout').closest('a')!
+    fireEvent.click(link)
+    await waitFor(() => expect(pathname()).toBe('/p/api/todos/todo-1'))
+
+    expect(screen.getByRole('link', { name: /tasks/i }).getAttribute('href')).toBe('/tasks?workflow=spec-to-deploy')
+  })
+
+  it('with no history state (a pasted/cold URL), the back link is exactly /tasks', async () => {
+    stubFetch({ todos: RICH })
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <MemoryRouter initialEntries={['/p/api/todos/todo-1']}>
+          <Routes>
+            <Route path="/p/:projectId/todos/:todoId" element={<FiledTaskDetailRoute />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    await screen.findByText('Add a rate limit to /checkout')
+    expect(screen.getByRole('link', { name: /tasks/i }).getAttribute('href')).toBe('/tasks')
+  })
+
+  it("a row's own checkbox and Start control still work without opening the detail page", async () => {
+    stubFetch({ todos: TODOS })
+    renderPage()
+    await screen.findByText('Add a rate limit to /checkout')
+
+    const apiRow = document.querySelector('[data-slot="filed-task-row"][data-project="api"]')!
+    fireEvent.click(apiRow.querySelector('[data-slot="filed-select"]')!)
+    expect(apiRow.getAttribute('data-selected')).toBe('')
+    expect(pathname()).toBe('/tasks')
+
+    // Start's own success navigation (into the new run) is exercised by "starts a filed task in
+    // ITS OWN project" above; this only asserts the click itself never routes through the detail
+    // page — the request lands directly from the row.
+    fireEvent.click(apiRow.querySelector('[data-action="start-filed-task"]')!)
+    await waitFor(() =>
+      expect(sent.some((r) => r.method === 'POST' && r.path === '/api/v1/p/api/todos/todo-1/start')).toBe(true),
+    )
+    expect(pathname()).not.toBe('/p/api/todos/todo-1')
   })
 })
 
@@ -1809,18 +1931,19 @@ describe('the Filed section — node column', () => {
     expect(cell.textContent).toContain('ghost-9')
   })
 
-  it('carries the same node info into the detail dialog', async () => {
+  it('carries the same node info onto the detail page', async () => {
     stubFetch({ todos: NODE_TODOS, cluster: true, clusterOverview: overview('hub-1') })
     renderPage()
     await screen.findByText('Running elsewhere')
 
-    fireEvent.click(screen.getByText('Running elsewhere'))
-    const dialog = await screen.findByRole('dialog')
+    const link = screen.getByText('Running elsewhere').closest('a')!
+    fireEvent.click(link)
+    await waitFor(() => expect(document.querySelector('[data-route="filed-task-detail"]')).not.toBeNull())
 
     await waitFor(() =>
-      expect(dialog.querySelector<HTMLElement>('[data-slot="task-node"]')?.dataset.nodeKind).toBe('known'),
+      expect(document.querySelector<HTMLElement>('[data-slot="task-node"]')?.dataset.nodeKind).toBe('known'),
     )
-    expect(dialog.querySelector<HTMLElement>('[data-slot="task-node"]')?.textContent).toBe('Laptop')
+    expect(document.querySelector<HTMLElement>('[data-slot="task-node"]')?.textContent).toBe('Laptop')
   })
 })
 
