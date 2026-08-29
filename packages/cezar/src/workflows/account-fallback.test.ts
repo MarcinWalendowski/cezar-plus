@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore, type WorkspaceResourceLimits } from '../workspace/semaphore.ts';
 import {
+  accountUsageKey,
   mergeWriteAgentAccountUsage,
   recordLimited,
   loadAgentAccountUsage,
@@ -620,5 +621,186 @@ describe('spec-to-deploy-codex — a derived step downgrades when every codex ac
       actualRunner: 'claude',
       reason: 'quota',
     });
+  }, 30_000);
+});
+
+/**
+ * V1 (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1): a logged-out account is
+ * NOT a limited one, and folding the two together is exactly the regression this rewrite exists to
+ * prevent. Its own fixture, deliberately NOT the file-level `beforeEach` above, which pre-limits
+ * `claude:default` and would confound quota with credentials in every case here.
+ */
+describe('a logged-out account is not a limited account', () => {
+  let repoRoot: string;
+  let home: string;
+  let store: RunStore;
+  let manager: RunManager | undefined;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  const workflow: WorkflowDef = {
+    name: 'quick-task',
+    source: 'built-in',
+    steps: [{ id: 'work', name: 'Work', prompt: '{{task}}' }],
+  };
+
+  /** A second claude login, `secondary` — the sibling every "healthy account rescues a dead one"
+   *  case in this suite needs. */
+  function writeAccounts(): void {
+    writeFileSync(
+      join(home, 'agent-accounts.json'),
+      JSON.stringify({
+        version: 1,
+        accounts: [
+          { id: 'secondary', provider: 'claude', label: 'Secondary', configDir: join(home, 'claude-secondary') },
+        ],
+        selections: {},
+        defaults: {},
+      }),
+      'utf8',
+    );
+  }
+
+  /** The `accountAuth` seam this spec adds: `disconnected` for exactly the keys named, `connected`
+   *  for everything else — never `'unknown'`, so every account in these fixtures classifies as a
+   *  real answer rather than falling back to "no opinion injected". */
+  function managerWith(fallback: boolean, disconnected: readonly string[]): RunManager {
+    const limits = (): WorkspaceResourceLimits => ({
+      maxParallel: 2,
+      memoryLimitMb: null,
+      fallbackAcrossAccountsWhenLimited: fallback,
+    });
+    const dead = new Set(disconnected);
+    return new RunManager(store, repoRoot, {
+      semaphore: new WorkspaceSemaphore({ initial: limits(), load: async () => limits() }),
+      accountAuth: (provider, profileId) =>
+        dead.has(accountUsageKey(provider, profileId)) ? 'disconnected' : 'connected',
+    });
+  }
+
+  beforeEach(async () => {
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    savedEnv.CEZ_HOME = process.env.CEZ_HOME;
+    savedEnv.CEZ_CODEX_BIN = process.env.CEZ_CODEX_BIN;
+    process.env.CEZ_DRY_RUN = '1';
+    // Codex doesn't gate on `CEZ_DRY_RUN` — same mock the sibling suites in this file use.
+    process.env.CEZ_CODEX_BIN = join(import.meta.dirname, '../../scripts/mock-codex-app-server.mjs');
+    home = mkdtempSync(join(tmpdir(), 'cez-fallback-creds-home-'));
+    process.env.CEZ_HOME = home;
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-fallback-creds-'));
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    writeAccounts();
+  });
+
+  afterEach(() => {
+    manager?.dispose();
+    manager = undefined;
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('claude:default logged out, claude:secondary healthy -> routes to the sibling, note says "logged out"', async () => {
+    manager = managerWith(true, [accountUsageKey('claude')]);
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      runner: 'claude',
+      worktree: false,
+    });
+    await expect.poll(() => store.getRun(record.id)?.agentProfile, { timeout: 15_000 }).toBe('secondary');
+    expect(store.getRun(record.id)?.runner).toBe('claude');
+    const note = store.readEvents(record.id).map((e) => String(e.message ?? '')).find((m) => m.includes('is logged out'));
+    expect(note).toBeDefined();
+    expect(note).toContain('claude:default');
+    expect(note).toContain('claude:secondary');
+  }, 30_000);
+
+  it('every claude account logged out, codex healthy -> crosses providers, metric names credentials as the cause', async () => {
+    manager = managerWith(true, [accountUsageKey('claude'), accountUsageKey('claude', 'secondary')]);
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      runner: 'claude',
+      worktree: false,
+    });
+    await expect.poll(() => store.getRun(record.id)?.runner, { timeout: 15_000 }).toBe('codex');
+    const note = store.readEvents(record.id).map((e) => String(e.message ?? '')).find((m) => m.includes('is logged out'));
+    expect(note).toContain('claude:default');
+    expect(note).toContain('codex:default');
+    const metric = store
+      .readEvents(record.id)
+      .find((e) => e.type === 'metric' && (e as { name?: unknown }).name === 'run.account_fallback');
+    expect(metric).toMatchObject({
+      site: 'explicit-reroute',
+      cause: 'credentials',
+      selectedTier: 'runnable',
+      selectedProvider: 'codex',
+    });
+  }, 30_000);
+
+  it('every claude account logged out, every codex account connected but limited -> held, never spawned, never refused', async () => {
+    await mergeWriteAgentAccountUsage((s) =>
+      recordLimited(s, accountUsageKey('codex'), {
+        source: 'usage-limit',
+        until: new Date(Date.now() + 3_600_000).toISOString(),
+      }),
+    );
+    manager = managerWith(true, [accountUsageKey('claude'), accountUsageKey('claude', 'secondary')]);
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      runner: 'claude',
+      worktree: false,
+    });
+    await expect
+      .poll(
+        () => (manager as unknown as { heldAtSpawn: Map<string, string> }).heldAtSpawn.get(record.id),
+        { timeout: 15_000 },
+      )
+      .toBe(accountUsageKey('codex'));
+    // Queued, not failed and not refused — `startRun` never returns an error, and there is no
+    // 409-shaped rejection at this layer at all (that is Phase 2's job).
+    expect(store.getRun(record.id)?.status).toBe('queued');
+    // Never spawned anything: no step ever picked up a backend.
+    expect(store.getRun(record.id)?.steps.find((s) => s.id === 'work')?.backend).toBeUndefined();
+    const note = store
+      .readEvents(record.id)
+      .map((e) => String(e.message ?? ''))
+      .find((m) => m.includes('held in the queue'));
+    expect(note).toContain('codex:default');
+  }, 20_000);
+
+  it('setting OFF still skips the disconnected member of a pool — pool resolution reads no setting', async () => {
+    // The project's stored claude selection is `pool:*`; every claude account is logged out and
+    // codex is healthy. Phase 1's own user-visible effect: `resolvePoolForDispatch` never reads
+    // `fallbackAcrossAccountsWhenLimited`, so this crosses providers even with the setting off.
+    writeFileSync(
+      join(home, 'agent-accounts.json'),
+      JSON.stringify({
+        version: 1,
+        accounts: [
+          { id: 'secondary', provider: 'claude', label: 'Secondary', configDir: join(home, 'claude-secondary') },
+        ],
+        selections: { [repoRoot]: { claude: 'pool:*' } },
+        defaults: {},
+      }),
+      'utf8',
+    );
+    manager = managerWith(false, [accountUsageKey('claude'), accountUsageKey('claude', 'secondary')]);
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      runner: 'claude',
+      worktree: false,
+    });
+    await expect.poll(() => store.getRun(record.id)?.runner, { timeout: 15_000 }).toBe('codex');
   }, 30_000);
 });

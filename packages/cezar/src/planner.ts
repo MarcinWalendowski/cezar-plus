@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { createRunner } from './core/runner-factory.ts';
+import type { ProviderId } from './core/provider-auth.ts';
 import { loadConfig } from './config.ts';
 import { discoverSkills, type Skill } from './skills.ts';
 import { resolveProfileEnvForRoot } from './workspace/agent-profiles.ts';
@@ -52,7 +53,34 @@ export interface PlanResult {
   fallback: boolean;
 }
 
-export async function planChain(repoRoot: string, task: string): Promise<PlanResult> {
+/**
+ * The account a `chooseAccount`-injected chooser resolved for the plan, replacing
+ * `config.defaultRunner` + `resolveProfileEnvForRoot(repoRoot, config.defaultRunner)`.
+ *
+ * All three fields MUST move together (`.ai/specs/2026-08-25-logged-out-account-fallback.md`,
+ * Solution 4b, Risk R8): picking a provider without repicking the account would run e.g. Codex
+ * under a Claude account's `CLAUDE_CONFIG_DIR`, and picking an account without repicking the
+ * model would pass `plannerModel` (`"sonnet"`, a Claude alias) to a non-Claude CLI.
+ */
+export interface PlannerAccountChoice {
+  provider: ProviderId;
+  profileId?: string;
+  env: Record<string, string>;
+}
+
+export async function planChain(
+  repoRoot: string,
+  task: string,
+  /**
+   * The `/plan` route injects a chooser backed by `assessAccountViability` (Solution 4b): prefer
+   * a `runnable` account on `config.defaultRunner`, then any other `runnable` candidate, resolving
+   * `undefined` when neither exists — which keeps today's behaviour exactly (`config.defaultRunner`
+   * + `resolveProfileEnvForRoot`) and lets the degraded fallback plan happen exactly as it does
+   * without a chooser at all. Omitted entirely, this is byte-identical to the pre-Phase-5 planner —
+   * every existing caller and test is unaffected.
+   */
+  chooseAccount?: (repoRoot: string, preferred: ProviderId) => Promise<PlannerAccountChoice | undefined>,
+): Promise<PlanResult> {
   const [skills, config, verifyCommands] = await Promise.all([
     discoverSkills(repoRoot),
     loadConfig(repoRoot),
@@ -61,15 +89,18 @@ export async function planChain(repoRoot: string, task: string): Promise<PlanRes
   const skillNames = new Set(skills.map((s) => s.name));
   const userPrompt = buildPlannerPrompt(task, skills, verifyCommands);
 
-  // Plan with the configured default runner. `plannerModel` ("sonnet") is a
-  // Claude alias, so only pass it when the planner runs on Claude — Codex /
-  // OpenCode pick their own default model instead.
-  const runner = createRunner(config.defaultRunner);
-  const plannerModel = config.defaultRunner === 'claude' ? config.plannerModel : undefined;
+  // Plan with the account the chooser picked, or the configured default runner when there is no
+  // chooser (or it found nothing runnable). `plannerModel` ("sonnet") is a Claude alias, so only
+  // pass it when the CHOSEN provider is Claude, not when the configured default merely is — Codex
+  // / OpenCode pick their own default model instead.
+  const choice = await chooseAccount?.(repoRoot, config.defaultRunner);
+  const provider = choice?.provider ?? config.defaultRunner;
+  const runner = createRunner(provider);
+  const plannerModel = provider === 'claude' ? config.plannerModel : undefined;
   // Plan under the SAME agent account this project's tasks run on (spec
   // 2026-07-29-agent-profiles). Without this the planner would quietly bill the personal
   // subscription for a project the user pointed at their work account.
-  const { env: profileEnv } = await resolveProfileEnvForRoot(repoRoot, config.defaultRunner);
+  const profileEnv = choice ? choice.env : (await resolveProfileEnvForRoot(repoRoot, provider)).env;
   // One retry on an unparseable answer; a runner error goes straight to fallback.
   for (let attempt = 0; attempt < 2; attempt++) {
     let text: string;

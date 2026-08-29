@@ -85,6 +85,7 @@ import { approvalsSatisfied, minApprovers } from '../runs/approvals.ts';
 import { defDescribesRun, firstUnfinishedStep, pendingChainSteps, stepTerminal } from '../runs/chain.ts';
 import { resolveProfileEnvForRoot } from '../workspace/agent-profiles.ts';
 import {
+  ASSUMED_LIMIT_COOLDOWN_MS,
   clearLimited,
   countInflight,
   isLimited,
@@ -93,14 +94,16 @@ import {
   recordDispatch,
   recordLimited,
   usageEntry,
+  type AgentAccountUsageStore,
   type InflightStep,
 } from '../workspace/agent-account-usage.ts';
 import { loadAgentAccounts } from '../workspace/agent-accounts.ts';
-import { listAgentProfiles } from '../workspace/agent-profiles.ts';
+import { listAgentProfiles, type ResolvedAgentProfile } from '../workspace/agent-profiles.ts';
 import { PROFILE_CAPABLE_PROVIDERS } from '../core/agent-profiles.ts';
 import {
   accountUsageKey,
   DEFAULT_AGENT_ACCOUNT_ID,
+  formatAgentRoute,
   runAccountKey,
   usageHoldAccountKey,
 } from '@loki-labs/better-cezar-contract';
@@ -111,6 +114,7 @@ import {
   type PoolChoice,
 } from '../workspace/agent-route-select.ts';
 import type { ProviderId } from '../core/provider-auth.ts';
+import type { AccountAuth, AccountTier } from '../workspace/account-viability.ts';
 import {
   buildWorkspaceGrant,
   loadWorkspaceGrant,
@@ -450,6 +454,12 @@ export const QUEUE_WATCHDOG_MS = 60_000;
 /** Shared empty holds for the common "nothing is held" pump — avoids allocating per sweep. */
 /** How often a brokered run's consumed byte offset is written to `runs.json`. */
 const OFFSET_PERSIST_MS = 1_000;
+
+/** Bound on the `git fetch` that lets a parked worktree resolve the sha a deploy made live
+ *  (`refreshParkedWorktree`). A person is waiting on this — on the Resolve path it is inside
+ *  their request — and the fetch is an optimization, not the answer: when it runs out of time
+ *  the probe still gets to speak. Well under the 60s probe budget that follows it. */
+const PARKED_FETCH_TIMEOUT_MS = 20_000;
 
 const NO_HOLDS: AccountHolds = { deadline: new Set(), inFlight: new Set() };
 
@@ -965,6 +975,25 @@ interface PersistedImages {
 }
 
 /**
+ * What `rerouteExplicitAccountIfUnavailable` found, tagged with whether it is safe to spawn on
+ * (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1). A bare `PoolChoice` is not
+ * enough: `execute()` and `runContinuation` both call this, and only one of them has a
+ * `requeueWhileHeld` behind it to turn a `waitable` choice into a park — the tag makes both
+ * callers treat it as an unconditional park rather than relying on a hold lookup to agree.
+ */
+type AccountPlacement =
+  | { tier: 'runnable'; choice: PoolChoice } // safe to spawn on, right now
+  | { tier: 'waitable'; choice: PoolChoice } // the caller MUST NOT spawn: park on this account
+  | undefined;
+
+/** The tagged return of `downgradePinnedRunner` — same shape as `AccountPlacement`, but carrying
+ *  the runner/account pair `agentEnvForStep` and the step record need, not a `PoolChoice`. */
+type PinnedPlacement =
+  | { tier: 'runnable'; runner: RunnerId; profileId?: string }
+  | { tier: 'waitable'; runner: RunnerId; profileId?: string }
+  | undefined;
+
+/**
  * The mini workflow engine: executes a `WorkflowDef` against a repo, one step
  * at a time, persisting every event to the RunStore (which the SSE endpoints
  * relay live to the GUI). No GitHub choreography — agent steps and shell
@@ -1136,6 +1165,20 @@ export class RunManager {
   private readonly loadGrant: () => Promise<WorkspaceGrant>;
   private readonly reapBroker: (runId: string, meta: SpoolMeta) => Promise<boolean>;
 
+  /**
+   * Whether ONE account is connected — the seam `.ai/specs/2026-08-25-logged-out-account-fallback.md`
+   * (Phase 1) adds so the dispatch layer can finally ask the question it never could:
+   * `grep -n 'providerAuth|ProviderAuthService' workflows/run.ts` returned nothing before this.
+   *
+   * Tri-state, not boolean, and the default is `'unknown'` rather than `'connected'`: the two read
+   * the same way in `tierOf` below (only `'disconnected'` excludes an account), but `'unknown'` is
+   * the honest value for "no opinion injected" and keeps the not-injected case distinguishable in a
+   * test from an injected `'connected'`. Defaulting this way means every existing constructor and
+   * every existing test keeps today's exact behaviour; only the three production wiring sites
+   * (`index.ts`, `project-context.ts`) inject the real answer.
+   */
+  private readonly accountAuth: (provider: ProviderId, profileId: string | undefined) => AccountAuth;
+
   constructor(
     private readonly store: RunStore,
     private readonly repoRoot: string,
@@ -1144,12 +1187,14 @@ export class RunManager {
       bootScratchRoot?: boolean;
       loadGrant?: () => Promise<WorkspaceGrant>;
       reapBroker?: (runId: string, meta: SpoolMeta) => Promise<boolean>;
+      accountAuth?: (provider: ProviderId, profileId: string | undefined) => AccountAuth;
     } = {},
   ) {
     this.dataDir = join(repoRoot, '.ai/cezar');
     this.bootScratchRoot = options.bootScratchRoot === true;
     this.loadGrant = options.loadGrant ?? (() => loadWorkspaceGrant());
     this.reapBroker = options.reapBroker ?? reapAbandonedBroker;
+    this.accountAuth = options.accountAuth ?? (() => 'unknown');
     this.semaphore = options.semaphore ?? new WorkspaceSemaphore();
     this.offSemaphore = this.semaphore.register({
       busySlots: () => this.busySlots(),
@@ -1467,13 +1512,16 @@ export class RunManager {
     // DEFAULT login however exhausted that login was. Resolve the pool for the step's provider
     // instead — limited-skip and the rest of the ranking come free from `selectPoolAccount`.
     // Spec: `.ai/specs/2026-08-23-step-runner-account-resolution.md`.
-    const steppedProfile = options.recordedProfileId === undefined && backend !== runRunner
-      ? (await resolvePoolForProvider({
+    const steppedChoice = options.recordedProfileId === undefined && backend !== runRunner
+      ? await resolvePoolForProvider({
           provider: backend as ProviderId,
           repoRoot: this.repoRoot,
           inflight: this.semaphore.accountInflight(),
-        }))?.accountId
+          tier: (profile) => this.credentialTier(profile),
+        })
       : undefined;
+    this.notePoolSkip(runId, steppedChoice, options.stepId);
+    const steppedProfile = steppedChoice?.accountId;
     const profileId = options.recordedProfileId
       ?? (backend === runRunner ? run?.agentProfile : steppedProfile);
     // Zero I/O when off (D4) — `loadKnowledgeSummary` itself re-checks the flag, this short-circuit
@@ -2306,6 +2354,9 @@ export class RunManager {
       }
       if (run.status === 'waiting') {
         if (run.pendingHandoff) {
+          // A `manual-deploy` park is re-probed by `recheckManualDeployParks()`, NOT here — see the
+          // ordering note on that method. `recover()` is awaited BEFORE the server listens, so a
+          // deploy probe run from here would interrogate a server that cannot answer yet.
           this.store.appendEvent(run.id, {
             type: 'lifecycle',
             message: `cezar restarted, still waiting for ${run.pendingHandoff.kind === 'manual-deploy' ? 'manual deployment' : 'manual merge'}`,
@@ -3064,16 +3115,68 @@ export class RunManager {
     );
   }
 
+  /** This account's tier, per `.ai/specs/2026-08-25-logged-out-account-fallback.md` Solution 1:
+   *  `disconnected` outranks quota entirely, and only a connected/unknown account is checked
+   *  against the usage store at all. */
+  private tierOf(
+    profile: { provider: ProviderId; id: string; isDefault: boolean },
+    usage: AgentAccountUsageStore,
+    now?: number,
+  ): AccountTier {
+    const auth = this.accountAuth(profile.provider, profile.isDefault ? undefined : profile.id);
+    if (auth === 'disconnected') return 'disconnected';
+    const key = accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id);
+    return isLimited(usageEntry(usage, key).limited, now) ? 'waitable' : 'runnable';
+  }
+
+  /** Credentials only, no quota — what `resolvePoolForDispatch`/`resolvePoolForProvider`'s `tier`
+   *  classifier needs, since quota is entirely their own `usage` argument's job and `disconnected`
+   *  never depends on it either way. Never `'waitable'`: this is a two-valued question in disguise. */
+  private credentialTier(profile: { provider: ProviderId; id: string; isDefault: boolean }): AccountTier {
+    return this.accountAuth(profile.provider, profile.isDefault ? undefined : profile.id) === 'disconnected'
+      ? 'disconnected'
+      : 'runnable';
+  }
+
+  /** Partition a candidate set into the three tiers, in one pass over `this.accountAuth`. */
+  private partitionByTier(
+    candidates: readonly ResolvedAgentProfile[],
+    usage: AgentAccountUsageStore,
+  ): {
+    runnable: ResolvedAgentProfile[];
+    waitable: ResolvedAgentProfile[];
+    disconnected: ResolvedAgentProfile[];
+  } {
+    const runnable: ResolvedAgentProfile[] = [];
+    const waitable: ResolvedAgentProfile[] = [];
+    const disconnected: ResolvedAgentProfile[] = [];
+    for (const profile of candidates) {
+      const tier = this.tierOf(profile, usage);
+      (tier === 'runnable' ? runnable : tier === 'waitable' ? waitable : disconnected).push(profile);
+    }
+    return { runnable, waitable, disconnected };
+  }
+
   /**
-   * The account a task NAMED is out of quota — move it to one that is not
-   * (`.ai/specs/2026-08-23-retarget-task-to-another-engine.md`, Phase 4). `undefined` means "leave
+   * The account a task NAMED is unavailable — quota-limited OR logged out — move it to one that
+   * is not (`.ai/specs/2026-08-23-retarget-task-to-another-engine.md` Phase 4, extended by
+   * `2026-08-25-logged-out-account-fallback.md` Phase 1 to credentials). `undefined` means "leave
    * the run where it is", which is also every answer when the setting is off.
    *
+   * **`undefined` is NOT always safe when the current account is `disconnected`.** Returning
+   * `undefined` means "leave the run where it is", and when the current account is merely
+   * OUT OF QUOTA that is correct — the ordinary hold path finds the record's own limit and parks
+   * on it. A LOGGED-OUT account has no such hold: `heldAccountFor` is keyed on quota, never on
+   * credentials, so `undefined` here would let the run fall through and spawn a dead CLI. So the
+   * tagged `Placement` below distinguishes "safe to spawn on" from "the caller MUST NOT spawn —
+   * park on this account instead", and only the `disconnected`-with-no-runnable-candidate case
+   * ever returns the second shape.
+   *
    * **Only for an explicit pick.** A `pool:` route is resolved by `resolvePoolForDispatch` before
-   * this is reached and already skips limited logins as its first signal — that is Phase 1, and it
-   * needs no setting because a pool is the user asking to be balanced. This is the other case: a
-   * user who named `codex`, or a specific login, and whose choice cezar would otherwise honour by
-   * making them wait.
+   * this is reached and already skips a disconnected/limited login on its own — that needs no
+   * setting because a pool is the user asking to be balanced. This is the other case: a user who
+   * named `codex`, or a specific login, and whose choice cezar would otherwise honour by making
+   * them wait (or, now, by spawning a login nobody can use).
    *
    * **This is the one place the override may live.** The admission gate is synchronous and runs
    * per pump sweep; resolving an account there would mean two JSON reads per sweep, and doing it
@@ -3084,16 +3187,17 @@ export class RunManager {
    * `selectPoolAccount` is reused rather than reimplemented: "best available login" is the same
    * question a pool asks, and a second ranking would drift from the first the moment either
    * changed. It is pure, so unlike `resolvePoolForDispatch` it moves no cursor — `recordDispatch`
-   * below is written explicitly, so the account this run takes still counts toward fairness.
+   * below is written explicitly, so the account this run takes still counts toward fairness (only
+   * for an actual start; parking a run advances nothing, since nothing ran).
    */
-  private async rerouteExplicitAccountIfLimited(
+  private async rerouteExplicitAccountIfUnavailable(
     runId: string,
     // Narrowed to the two fields this actually reads (not the full `ExecuteRunInput`) so
     // `runContinuation` can call it too — a continuation has no `ExecuteRunInput`, only the
     // account/provider a resume is about to pin to.
     input: Pick<ExecuteRunInput, 'agentProfile' | 'runner'>,
     defaultRunner: RunnerId,
-  ): Promise<PoolChoice | undefined> {
+  ): Promise<AccountPlacement> {
     if (!this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
     try {
       const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
@@ -3114,37 +3218,62 @@ export class RunManager {
           ? input.agentProfile
           : undefined;
       const current = accountUsageKey(provider, resolvedAgentProfile);
-      // Nothing to route around. The common case, and the cheap exit.
-      if (!isLimited(usageEntry(usage, current).limited)) return undefined;
-
-      const candidates = listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS).filter(
-        (profile) => !isLimited(usageEntry(usage, accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id)).limited),
+      const currentTier = this.tierOf(
+        { provider, id: resolvedAgentProfile ?? DEFAULT_AGENT_ACCOUNT_ID, isDefault: resolvedAgentProfile === undefined },
+        usage,
       );
-      // Every login limited: `selectPoolAccount` would still answer (by design — see its docblock),
-      // and its answer would be another closed account. Filtering FIRST and refusing an empty set
-      // is what keeps this from quietly moving the run somewhere no better, which would burn a turn
-      // and lose the account the user actually chose.
-      const choice = candidates.length > 0
-        ? selectPoolAccount({ candidates, store: usage, inflight: this.semaphore.accountInflight() })
+      // The pinned account is runnable — nothing to do. The common case, and the cheap exit.
+      if (currentTier === 'runnable') return undefined;
+
+      const candidates = listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS);
+      const { runnable, waitable, disconnected } = this.partitionByTier(candidates, usage);
+      const pool = runnable.length > 0 ? runnable : currentTier === 'disconnected' ? waitable : [];
+      const choice = pool.length > 0
+        ? selectPoolAccount({ candidates: pool, store: usage, inflight: this.semaphore.accountInflight() })
         : undefined;
       if (!choice) return undefined;
       if (choice.provider === provider && choice.accountId === (resolvedAgentProfile ?? DEFAULT_AGENT_ACCOUNT_ID)) {
         return undefined;
       }
+      const tier: 'runnable' | 'waitable' = pool === runnable ? 'runnable' : 'waitable';
+      const target = accountUsageKey(choice.provider, choice.accountId);
 
-      await mergeWriteAgentAccountUsage((store) =>
-        recordDispatch(store, accountUsageKey(choice.provider, choice.accountId)),
-      );
-      // Say so, always. Overriding a choice the user made in silence is the failure this whole
-      // setting is a decision about — the note is what makes it a fallback rather than cezar
-      // ignoring the picker, which is the bug this spec was filed for in the first place.
+      if (tier === 'runnable') {
+        // The cursor advances only on an actual start — a park (below) ran nothing.
+        await mergeWriteAgentAccountUsage((store) => recordDispatch(store, target));
+        // Say so, always. Overriding a choice the user made in silence is the failure this whole
+        // setting is a decision about — the note is what makes it a fallback rather than cezar
+        // ignoring the picker.
+        const causeText = currentTier === 'waitable' ? 'is out of quota' : 'is logged out';
+        this.store.appendEvent(runId, {
+          type: 'note',
+          message: `${current} ${causeText}, so this task starts on ${target} instead ` +
+            '(Settings, Resources, "Account fallback")',
+        });
+      } else {
+        // `currentTier` is `disconnected` here by construction (see `pool` above).
+        this.store.appendEvent(runId, {
+          type: 'note',
+          message: `${current} is logged out, so this task waits on ${target} instead ` +
+            '(Settings, Resources, "Account fallback")',
+        });
+      }
       this.store.appendEvent(runId, {
-        type: 'note',
-        message:
-          `${current} is out of quota, so this task starts on ${accountUsageKey(choice.provider, choice.accountId)} instead ` +
-          '(Settings, Resources, "Out-of-quota fallback")',
+        type: 'metric',
+        name: 'run.account_fallback',
+        runId,
+        workflow: this.store.getRun(runId)?.workflow,
+        site: 'explicit-reroute',
+        requestedRoute: formatAgentRoute({ kind: 'account', accountId: resolvedAgentProfile ?? DEFAULT_AGENT_ACCOUNT_ID }),
+        requestedProvider: provider,
+        requestedAccount: current,
+        selectedProvider: choice.provider,
+        selectedAccount: target,
+        selectedTier: tier,
+        cause: currentTier === 'disconnected' ? 'credentials' : 'quota',
+        skippedDisconnected: disconnected.map((p) => accountUsageKey(p.provider, p.isDefault ? undefined : p.id)),
       });
-      return choice;
+      return { tier, choice };
     } catch {
       // An unreadable home must never fail a run: fall through to the account the task named and
       // let the ordinary hold park it, which is exactly the behaviour with this setting off.
@@ -3153,17 +3282,19 @@ export class RunManager {
   }
 
   /**
-   * A step pins a provider that is WHOLLY out of quota — return where to run it instead.
+   * A step pins a provider that is WHOLLY unavailable (out of quota, logged out, or a mix) —
+   * return where to run it instead.
    *
    * `undefined` means "keep the pin", which is every ordinary case: the setting is off, the step
-   * pins nothing, or at least one account of the pinned provider is still open. Only when the
-   * pinned provider has no usable login anywhere does this answer, and then it answers with the
-   * best available account on another provider.
+   * pins nothing, or at least one account of the pinned provider is still `runnable`. Only when
+   * the pinned provider has no RUNNABLE login anywhere does this answer, and then it answers with
+   * the best available account on another provider — `runnable` if one exists, else the best
+   * `waitable` one, tagged so the caller knows it must not spawn.
    *
-   * **Keyed on EVERY account of the provider being limited, never on one.** One exhausted login is
-   * `resolvePoolForProvider`'s job — it moves within the provider and keeps the pin's promise
-   * intact. Downgrading there would throw away a working Claude account to satisfy a rule about
-   * availability, which is the opposite of what the rule is for.
+   * **Keyed on EVERY account of the provider being unusable, never on one.** One exhausted or
+   * logged-out login is `resolvePoolForProvider`'s job — it moves within the provider and keeps
+   * the pin's promise intact. Downgrading there would throw away a working Claude account to
+   * satisfy a rule about availability, which is the opposite of what the rule is for.
    *
    * Never throws: an unreadable home keeps the pin, which is the behaviour that predates this.
    */
@@ -3171,52 +3302,114 @@ export class RunManager {
     runId: string,
     step: { id: string; model?: string | undefined },
     pinned: RunnerId,
-  ): Promise<RunnerId | undefined> {
+  ): Promise<PinnedPlacement> {
     if (!this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
     try {
       const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
       const all = listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS);
-      const open = all.filter(
-        (profile) =>
-          !isLimited(
-            usageEntry(usage, accountUsageKey(profile.provider, profile.isDefault ? undefined : profile.id)).limited,
-          ),
-      );
-      // Still somewhere to go on the pinned provider — not this function's problem.
-      if (open.some((profile) => profile.provider === pinned)) return undefined;
-      const choice = open.length > 0
-        ? selectPoolAccount({ candidates: open, store: usage, inflight: this.semaphore.accountInflight() })
-        : undefined;
-      // Nothing open anywhere. Keep the pin and let the turn fail honestly rather than moving the
-      // work somewhere no better — rung 4 of the ladder, and the bottom of "never blocked".
-      if (!choice || choice.provider === pinned) return undefined;
+      const { runnable, waitable, disconnected } = this.partitionByTier(all, usage);
+      // Still somewhere RUNNABLE to go on the pinned provider — not this function's problem;
+      // `resolvePoolForProvider` will pick it and skip whatever else is wrong with the rest.
+      if (runnable.some((profile) => profile.provider === pinned)) return undefined;
 
-      this.store.appendEvent(runId, {
-        type: 'note',
-        stepId: step.id,
-        message:
-          `this step asks for ${step.model ? `${step.model} on ` : ''}${pinned}, and every ${pinned} account is out of quota — ` +
-          `running on ${accountUsageKey(choice.provider, choice.accountId)} instead`,
-      });
-      // Named now (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, Analytics), alongside
-      // the note above: nine steps can downgrade on `spec-to-deploy-codex` where the default chain
-      // has two, so the promise is degraded LOUDLY rather than silently. `reason` is a named field
-      // rather than an implied constant so a future second downgrade cause does not silently merge
-      // into the quota number — `downgradePinnedRunner` fires on quota exhaustion only, today.
+      const pool = runnable.length > 0 ? runnable : waitable;
+      const choice = pool.length > 0
+        ? selectPoolAccount({ candidates: pool, store: usage, inflight: this.semaphore.accountInflight() })
+        : undefined;
+      // Nothing anywhere, or the only candidate is a same-provider waitable account the ordinary
+      // quota-hold path already owns — keep the pin and let the turn fail (or wait) honestly
+      // rather than moving the work somewhere no better.
+      if (!choice || choice.provider === pinned) return undefined;
+      const tier: 'runnable' | 'waitable' = pool === runnable ? 'runnable' : 'waitable';
+
+      const pinnedWaitable = waitable.some((profile) => profile.provider === pinned);
+      const pinnedDisconnected = disconnected.some((profile) => profile.provider === pinned);
+      const cause: 'quota' | 'credentials' | 'quota+credentials' =
+        pinnedWaitable && pinnedDisconnected ? 'quota+credentials' : pinnedDisconnected ? 'credentials' : 'quota';
+      const target = accountUsageKey(choice.provider, choice.accountId);
+      const profileId = choice.accountId === DEFAULT_AGENT_ACCOUNT_ID ? undefined : choice.accountId;
+
+      if (tier === 'runnable') {
+        const causeText =
+          cause === 'credentials' ? 'logged out' : cause === 'quota' ? 'out of quota' : 'out of quota or logged out';
+        this.store.appendEvent(runId, {
+          type: 'note',
+          stepId: step.id,
+          message:
+            `this step asks for ${step.model ? `${step.model} on ` : ''}${pinned}, and every ${pinned} account is ${causeText} — ` +
+            `running on ${target} instead`,
+        });
+        // Named now (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, Analytics), alongside
+        // the note above: nine steps can downgrade on `spec-to-deploy-codex` where the default
+        // chain has two, so the promise is degraded LOUDLY rather than silently. `reason` is a
+        // named field rather than an implied constant so a second downgrade cause does not
+        // silently merge into the quota number.
+        this.store.appendEvent(runId, {
+          type: 'metric',
+          stepId: step.id,
+          name: 'run.step.runner_downgraded',
+          runId,
+          workflow: this.store.getRun(runId)?.workflow,
+          plannedRunner: pinned,
+          actualRunner: choice.provider,
+          actualAccount: target,
+          reason: cause,
+        });
+      }
+      // Emitted for both tiers, same as the explicit-reroute site — the `waitable` case is a real
+      // fallback decision (the pinned provider is dead, work moves to a different account) even
+      // though `holdStepOnWaitableAccount` is the one that writes the wait-specific note.
       this.store.appendEvent(runId, {
         type: 'metric',
-        stepId: step.id,
-        name: 'run.step.runner_downgraded',
+        name: 'run.account_fallback',
         runId,
+        stepId: step.id,
         workflow: this.store.getRun(runId)?.workflow,
-        plannedRunner: pinned,
-        actualRunner: choice.provider,
-        reason: 'quota',
+        site: 'pinned-step',
+        requestedRoute: formatAgentRoute({ kind: 'pool', provider: pinned }),
+        requestedProvider: pinned,
+        selectedProvider: choice.provider,
+        selectedAccount: target,
+        selectedTier: tier,
+        cause,
+        skippedDisconnected: disconnected.map((p) => accountUsageKey(p.provider, p.isDefault ? undefined : p.id)),
       });
-      return choice.provider as RunnerId;
+
+      return { tier, runner: choice.provider as RunnerId, profileId };
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * A pinned step's fallback is only `waitable` — every account of the pinned provider is
+   * unavailable and the best account cezar can move it to is out of quota, not ready to spawn
+   * (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1). Unlike the quota-only case
+   * `downgradePinnedRunner` handled before this, **a logged-out CLI never produces "usage limit,
+   * back at T"**, so nothing would arm an appointment on its own — this does that explicitly,
+   * mirroring `scheduleAutoResumeIfLimited`'s shape without depending on a provider's own words.
+   *
+   * Returns without spawning anything: no `createRunner`, no `agentEnvForStep`, no session. The
+   * caller returns the message straight through as the step's failure, and the ordinary
+   * end-of-`execute()` bookkeeping (`finishStep`, the run's terminal status, `dropActive`) takes
+   * it from there — `dropActive` calls `scheduleAutoResumeIfLimited`, which no-ops here because
+   * `armAutoResume` below has already registered a timer for this run.
+   */
+  private holdStepOnWaitableAccount(
+    runId: string,
+    step: { id: string; model?: string | undefined },
+    pinned: RunnerId,
+    waitableRunner: RunnerId,
+    waitableProfileId: string | undefined,
+  ): string {
+    const target = accountUsageKey(waitableRunner, waitableProfileId);
+    const message =
+      `this step asks for ${pinned}, and every ${pinned} account is logged out; the best account cezar can move it to ` +
+      `(${target}) is out of quota, so this task waits for that window`;
+    this.store.appendEvent(runId, { type: 'note', stepId: step.id, message });
+    const deadline = this.holdReopensAt(target) ?? new Date(Date.now() + ASSUMED_LIMIT_COOLDOWN_MS);
+    this.armAutoResume(runId, deadline.getTime());
+    return message;
   }
 
   /**
@@ -3409,6 +3602,56 @@ export class RunManager {
       ? accountUsageKey(resolved.provider, resolved.accountId)
       : runAccountKey({ ...run, runner }, runner);
     if (!accountHeldOn(account, run, this.semaphore.accountHolds())) return false;
+    this.holdRunOnAccount(runId, workflow, input, account, state);
+    return true;
+  }
+
+  /**
+   * `resolvePoolForDispatch`/`resolvePoolForProvider` live in `workspace/`, which has no store
+   * handle, so they report what they skipped on the `PoolChoice` itself and this is where the
+   * `run.account_fallback` metric actually gets written — one call per site, only when something
+   * was actually excluded.
+   */
+  private notePoolSkip(runId: string, choice: PoolChoice | undefined, stepId?: string): void {
+    if (!choice?.skippedDisconnected?.length) return;
+    this.store.appendEvent(runId, {
+      type: 'metric',
+      name: 'run.account_fallback',
+      runId,
+      ...(stepId ? { stepId } : {}),
+      workflow: this.store.getRun(runId)?.workflow,
+      site: 'pool',
+      requestedRoute: formatAgentRoute({ kind: 'pool' }),
+      requestedProvider: undefined,
+      selectedProvider: choice.provider,
+      selectedAccount: accountUsageKey(choice.provider, choice.accountId),
+      // `resolvePoolForDispatch`/`resolvePoolForProvider` do not report their own quota tier on
+      // `PoolChoice` — only which candidates they excluded as disconnected — so this is
+      // necessarily an approximation: `runnable` unless the account is currently in a recorded
+      // hold, which is the only quota fact this class has cheap access to here.
+      selectedTier: this.semaphore.accountHolds().deadline.has(accountUsageKey(choice.provider, choice.accountId))
+        ? 'waitable'
+        : 'runnable',
+      cause: 'credentials',
+      skippedDisconnected: choice.skippedDisconnected,
+    });
+  }
+
+  /**
+   * The body of `requeueWhileHeld` from the hold decision down, extracted so a `disconnected`
+   * current account with only a `waitable` fallback (`rerouteExplicitAccountIfUnavailable`'s
+   * `{tier: 'waitable'}` placement) can park UNCONDITIONALLY, without relying on `accountHeldOn`
+   * to agree — there is no recorded quota hold against a login nobody has ever run on yet, so that
+   * lookup would answer `false` and let `execute()` spawn on it
+   * (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1).
+   */
+  private holdRunOnAccount(
+    runId: string,
+    workflow: WorkflowDef,
+    input: ExecuteRunInput,
+    account: string,
+    state?: ActiveRun,
+  ): void {
     state?.releaseRepoRoot?.();
     if (state) state.releaseRepoRoot = undefined;
     this.pendingJobs.set(runId, { workflow, input });
@@ -3419,7 +3662,55 @@ export class RunManager {
     this.heldAtSpawn.set(runId, account);
     this.noteHeld(runId, account);
     this.dropActive(runId);
-    return true;
+  }
+
+  /**
+   * `runContinuation`'s no-spawn park, when the account a resume would run on is `disconnected`
+   * and the best fallback found is only `waitable`
+   * (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1). The `deferForCapacity`
+   * branch of `continueRun` (`:2276-2287`-ish) VERBATIM, plus the hold bookkeeping
+   * `requeueWhileHeld`/`holdRunOnAccount` do — two existing mechanisms joined rather than a third
+   * invented: the continuation-defer shape is already the supported way to put a continuation back
+   * in the queue with its step already added, `pump()` already re-hydrates it, and `heldAtSpawn` is
+   * what stops admission from immediately re-dequeuing it.
+   *
+   * Returns BEFORE `this.active.set` and before any spawn — the caller (`runContinuation`) must
+   * `return` right after calling this.
+   */
+  private parkContinuationOnAccount(
+    runId: string,
+    stepId: string,
+    name: string,
+    sessionId: string | undefined,
+    prompt: string,
+    images: ContentBlock[],
+    choice: PoolChoice,
+  ): void {
+    // The step was already added (by `continueRun`, before this park) with its real `nameOrigin`;
+    // `'marker'` is a third value `StepState` allows that this narrower field never actually
+    // carries for a `continue-N` step, so it folds to `'step'` alongside a genuinely missing one.
+    const recordedNameOrigin = this.store.getRun(runId)?.steps.find((s) => s.id === stepId)?.nameOrigin;
+    const nameOrigin: 'step' | 'prompt' = recordedNameOrigin === 'prompt' ? 'prompt' : 'step';
+    const account = accountUsageKey(choice.provider, choice.accountId);
+    this.pendingContinuations.set(runId, {
+      stepId,
+      sessionId,
+      backend: choice.provider,
+      prompt,
+      images,
+      name,
+      nameOrigin,
+    });
+    this.queue.push(runId);
+    this.store.updateRun(runId, {
+      status: 'queued',
+      error: undefined,
+      finishedAt: undefined,
+      currentStepId: undefined,
+    });
+    this.heldAtSpawn.set(runId, account);
+    this.noteHeld(runId, account);
+    this.starting.delete(runId);
   }
 
   /**
@@ -4336,22 +4627,33 @@ export class RunManager {
     const resumedProfileId = sessionId === undefined
       ? undefined
       : record?.steps.find((s) => s.sessionId === sessionId)?.profileId;
-    // Out-of-quota fallback for a RESUME (extends spec 2026-08-24-reroute-checks-dangling-
-    // account-key). `execute()` checks a fresh dispatch against a hold via
-    // `rerouteExplicitAccountIfLimited`; nothing ever checked a CONTINUATION the same way, so a
-    // manual Continue and every unattended auto-resume (`fireAutoResume` calls `continueRun`,
-    // nothing else) kept re-pinning to the same held login forever — measured on
+    // Out-of-quota-or-logged-out fallback for a RESUME (extends spec 2026-08-24-reroute-checks-
+    // dangling-account-key, and Phase 1 of 2026-08-25-logged-out-account-fallback.md for
+    // credentials). `execute()` checks a fresh dispatch against a hold via
+    // `rerouteExplicitAccountIfUnavailable`; nothing ever checked a CONTINUATION the same way, so
+    // a manual Continue and every unattended auto-resume (`fireAutoResume` calls `continueRun`,
+    // nothing else) kept re-pinning to the same held (or dead) login forever — measured on
     // `prod-host`: a run parked behind a hold auto-resumed, failed, and re-armed the next
     // appointment days out, on repeat, while a second unlimited account of the same provider sat
     // idle. `agentEnvForStep` (below) resolves the SAME account this reroute checks
     // (`recordedProfileId ?? run.agentProfile`) when called from here — the two must agree on the
     // identity or this checks a hold nobody will run under, the exact defect
     // `2026-08-24-reroute-checks-dangling-account-key.md` fixed for `execute()`.
-    const rerouted = await this.rerouteExplicitAccountIfLimited(
+    const placement = await this.rerouteExplicitAccountIfUnavailable(
       runId,
       { agentProfile: resumedProfileId ?? record?.agentProfile, runner: backend },
       backend,
     );
+    if (placement?.tier === 'waitable') {
+      // The session's own account is logged out and the best fallback is only out of quota, not
+      // ready to resume on. There is no `requeueWhileHeld` behind THIS caller — unlike `execute()`,
+      // nothing downstream would catch a waitable choice and park it — so this returns before
+      // `this.active.set` and before any spawn, exactly like `continueRun`'s own
+      // `deferForCapacity` branch this mirrors.
+      this.parkContinuationOnAccount(runId, stepId, name, sessionId, prompt, images, placement.choice);
+      return;
+    }
+    const rerouted = placement?.choice;
     if (rerouted) {
       // Same reasoning as `execute()`'s own write of `chosen.accountId`: from here on the record
       // names the account that is actually going to run, so the thread header, the next resume,
@@ -5091,13 +5393,36 @@ export class RunManager {
       // Workspace-wide, via the semaphore every manager registers with — the boot project's
       // included, which no project-context map can see. See `SemaphoreParticipant.accountInflight`.
       inflight: this.semaphore.accountInflight(),
+      // A disconnected pool member is never selected — the one user-visible effect of Phase 1 on
+      // its own, since the pre-flight gate cannot see a pool member (it only knows the discovered
+      // default) and this is the only thing standing between it and a run that starts and dies.
+      // Credentials only, deliberately: quota is `selectPoolAccount`'s own job against its `usage`
+      // argument, and `disconnected` never depends on quota either way.
+      tier: (profile) => this.credentialTier(profile),
     });
-    // Out-of-quota fallback (spec 2026-08-23-retarget-task-to-another-engine, Phase 4). Only for
-    // an EXPLICIT pick — `pooled` being set means the user asked for a pool, which already routed
-    // around the limit on its own (Phase 1) and needs no override. **ON by default** since
+    this.notePoolSkip(runId, pooled);
+    // Out-of-quota-or-logged-out fallback (spec 2026-08-23-retarget-task-to-another-engine, Phase 4,
+    // extended to credentials by 2026-08-25-logged-out-account-fallback.md, Phase 1). Only for an
+    // EXPLICIT pick — `pooled` being set means the user asked for a pool, which already routed
+    // around the problem on its own and needs no override. **ON by default** since
     // `2026-08-23-never-block-a-task.md` (this comment said "Off by default" until then).
-    const rerouted = pooled ?? (await this.rerouteExplicitAccountIfLimited(runId, input, config.defaultRunner));
-    const chosen = pooled ?? rerouted;
+    const placement: AccountPlacement = pooled
+      ? { tier: 'runnable', choice: pooled }
+      : await this.rerouteExplicitAccountIfUnavailable(runId, input, config.defaultRunner);
+    if (placement?.tier === 'waitable') {
+      // The current account is logged out and nothing is runnable anywhere: an unconditional
+      // park, not a hold lookup that would find nothing recorded against a login nobody has run
+      // on yet and let the spawn below reach it.
+      this.holdRunOnAccount(
+        runId,
+        workflow,
+        input,
+        accountUsageKey(placement.choice.provider, placement.choice.accountId),
+        undefined,
+      );
+      return;
+    }
+    const chosen = placement?.choice;
     const taskBackend: RunnerId = chosen?.provider ?? input.runner ?? config.defaultRunner;
     // The account may have gone into a usage-limit hold since this run was dequeued — the queue
     // gate cannot be the only one, because dequeue is not the moment of no return. Nothing has
@@ -5901,6 +6226,10 @@ export class RunManager {
           once({ kind: 'skipped' });
           return { resolved: true, verdict: 'manual handoff skipped' };
         }
+        // Same reason as the boot recheck (`refreshParkedWorktree`): a manual-deploy park is
+        // answered by an activation of a branch this worktree has never fetched, so without this
+        // the probe cannot tell "not deployed" from "I have never heard of that commit".
+        if (pending.kind === 'manual-deploy') await this.refreshParkedWorktree(state.cwd);
         const checked = await recheck();
         if (checked.ok) {
           once({ kind: 'resolved', verdict: checked });
@@ -5917,7 +6246,9 @@ export class RunManager {
         };
         this.store.updateRun(runId, { pendingHandoff: next, status: 'waiting', waitingReason: 'handoff' });
         emit({ type: 'note', stepId: step.id, message: `handoff recheck is still red: ${checked.detail}` });
-        return { resolved: false, verdict: checked.detail };
+        // `summary` over `detail` HERE only: this value is the answer to a button press, and
+        // `detail` carries every probe's source. The full text is already in the note above.
+        return { resolved: false, verdict: checked.summary ?? checked.detail };
       };
       const parkedInterrupt = state.interrupt;
       state.interrupt = () => {
@@ -6303,6 +6634,109 @@ export class RunManager {
   }
 
   /**
+   * Read-only: run the repo's OWN declared deploy probes in a parked run's worktree and report
+   * whether they now pass. Deliberately engine-generic — it reaches `.ai/deploy-targets.json`
+   * through the same post-condition every deploy step already uses, so nothing here learns what
+   * cezar is, and a repo that declares no manual target never parks this way and never arrives.
+   *
+   * A worktree that is GONE is not evidence of a deploy. Count-based retention reclaims worktrees
+   * (`reclaimedAt`), and the probes cannot run without one, so an absent path stays parked rather
+   * than reading as satisfied — the direction that costs a human a button press instead of
+   * silently continuing a run on an unverified deploy.
+   */
+  /**
+   * Re-probe every run parked on a `manual-deploy` handoff and re-enter the chain for the ones
+   * whose targets are now live. Returns how many were requeued.
+   *
+   * **WHEN.** After the server is listening, at boot. On a blue-green box an ACTIVATION IS A
+   * RESTART — the flip restarts this very service — so boot is the exact moment such a park may
+   * have just been satisfied: no timer, no polling, no race against the cutover it would be
+   * watching for (`.ai/specs/2026-08-26-activate-main-not-worktrees.md` S4). Before this, every
+   * parked run merely re-announced its wait and a human pressed Resolve once per run, so the toil
+   * scaled with the backlog: measured 2026-08-26, production sat 18 commits behind `origin/main`
+   * and every run that finished in that window was parked on the same single action.
+   *
+   * **WHY NOT FROM `recover()`, which is the obvious place.** `recover()` is awaited BEFORE
+   * `startServer()` (`index.ts`), and a deploy probe asks THIS server which sha it is serving. Run
+   * from there it would interrogate a socket that is not accepting yet, spend its full bounded
+   * poll doing it, and report red for every run — never firing at the one moment it exists for,
+   * while adding that poll to boot per parked run. Placement here is ordering, not preference.
+   *
+   * PROBE first, requeue only on green: `requeueHandoff` re-enters the chain at the deploy step,
+   * which is an AGENT step, so requeueing unconditionally would spend a model call per parked run
+   * on every restart — including the crash restarts that changed nothing.
+   */
+  async recheckManualDeployParks(): Promise<number> {
+    const parked = this.store
+      .listRuns()
+      .filter((r) => r.status === 'waiting' && r.pendingHandoff?.kind === 'manual-deploy');
+    let requeued = 0;
+    for (const run of parked) {
+      const pending = run.pendingHandoff;
+      if (!pending) continue;
+      if (!(await this.manualDeployNowLive(run))) continue;
+      this.store.appendEvent(run.id, {
+        type: 'lifecycle',
+        message: 'every deploy target now probes green after the restart — rechecking this handoff',
+      });
+      await this.requeueHandoff(run, pending, 'manual deploy detected after restart');
+      requeued += 1;
+    }
+    return requeued;
+  }
+
+  /**
+   * Let a parked worktree ANSWER the deploy probe. Changes nothing about what the probe asks.
+   *
+   * A deploy probe compares what this worktree built against the sha the running process reports.
+   * The activation that satisfies it deploys `origin/main`, whose commits did not exist when the
+   * worktree was cut — so the live sha is not in this worktree's object db at all, and every git
+   * question about it errors "unknown object" instead of answering "no". A probe that folds those
+   * two into one red (`git merge-base --is-ancestor … 2>/dev/null`, which is what every worktree
+   * cut before 2026-08-26 carries) then reports a CORRECT activation as "the running server is
+   * NOT serving this HEAD" — permanently, since nothing later brings the object in.
+   *
+   * Measured 2026-08-29 on prod-host: run `cc25d636`'s worktree could not resolve
+   * `origin/main`'s tip (`ABSENT (unknown object)`), and its operator had pressed Resolve five
+   * times against five honest-looking reds.
+   *
+   * **Why here and not in the probe.** The probe WAS taught to fetch
+   * (`.ai/deploy-targets.json`, 2026-08-26) — but that repair ships in the REPO, while the probe
+   * that runs for a parked run is the copy in the run's OWN worktree, cut before the fix existed.
+   * A worktree-side fix cannot reach a run that is already parked, which is every run it is for.
+   * Engine-side is the only side that reaches them.
+   *
+   * Best-effort and side-effect-free where it matters: a failed or slow fetch leaves the probe to
+   * answer exactly as it would have, and this touches the object db and remote-tracking refs
+   * only — never HEAD, the index, or the working tree.
+   */
+  private async refreshParkedWorktree(cwd: string | undefined): Promise<void> {
+    // A MISSING cwd must not become "the process's own directory". `execFile` with `cwd:
+    // undefined` inherits the server's, so a run with no worktree would have this reaching the
+    // network from the cezar checkout itself — a real fetch, on someone else's repository, on
+    // every Resolve press. Caught by `handoff-gate.test.ts`, whose parked runs have no worktree
+    // at all: two tests went from instant to a 5s network timeout.
+    if (!cwd || !existsSync(cwd)) return;
+    await runGit(cwd, ['fetch', '--quiet', 'origin'], undefined, PARKED_FETCH_TIMEOUT_MS);
+  }
+
+  private async manualDeployNowLive(run: RunRecord): Promise<boolean> {
+    const cwd = run.worktreePath;
+    if (!cwd || !existsSync(cwd)) return false;
+    await this.refreshParkedWorktree(cwd);
+    try {
+      const result = await evaluatePostcondition('all-services-deployed', {
+        cwd,
+        workspaceRun: (run.workspaceProjects?.length ?? 0) > 0,
+      });
+      return result.ok;
+    } catch {
+      // A probe harness failure is not a deploy: stay parked and leave the decision with a person.
+      return false;
+    }
+  }
+
+  /**
    * Hand the outcome to whoever is waiting on it — and when NOBODY is (a restart killed the
    * `execute()` that was parked), re-enter the chain from the persisted record instead.
    *
@@ -6452,7 +6886,15 @@ export class RunManager {
     // guarantee — a real reduction in what the workflow promises, mitigated by announcement rather
     // than prevention, which is why the note below is asserted by a test rather than decorative.
     const pinned = step.runner ?? undefined;
-    const backend = (pinned ? await this.downgradePinnedRunner(runId, step, pinned) : undefined) ?? step.runner ?? taskBackend;
+    const downgrade = pinned ? await this.downgradePinnedRunner(runId, step, pinned) : undefined;
+    if (downgrade?.tier === 'waitable') {
+      // Every account of the pinned provider is unavailable, and the best fallback found is only
+      // out of quota, not logged in and healthy — no session has been minted for THIS attempt yet
+      // and nothing may spawn. Mark the run failed with a real appointment and let the ordinary
+      // auto-resume machinery bring it back, exactly like a provider-reported usage limit would.
+      return this.holdStepOnWaitableAccount(runId, step, pinned as RunnerId, downgrade.runner, downgrade.profileId);
+    }
+    const backend = downgrade?.runner ?? step.runner ?? taskBackend;
     this.store.updateStep(runId, step.id, { sessionId, backend });
 
     // Loaded once, closed over by `onEvent` below — the step budget (PLAN D27 Phase 1) is
@@ -6732,8 +7174,20 @@ export class RunManager {
         generateFollowups: followupsEnabled() && input.generateFollowups !== false,
         // A resume reattaches to a session that lives inside ONE account's config dir, so it must
         // run under the account that created it — not whatever the project has been switched to
-        // since. Same rule `runContinuation` applies to a resumed continuation.
-        ...(resumeFrom?.profileId ? { recordedProfileId: resumeFrom.profileId } : {}),
+        // since. Same rule `runContinuation` applies to a resumed continuation. Wins over a
+        // downgrade: a session belongs to the login that created it.
+        ...(resumeFrom?.profileId
+          ? { recordedProfileId: resumeFrom.profileId }
+          : downgrade
+            ? // `downgrade.profileId` is `undefined` when the CHOSEN account is that provider's own
+              // default — still a downgrade that must not be re-resolved. Passed as the literal
+              // sentinel so `agentEnvForStep`'s `options.recordedProfileId === undefined` check
+              // (its "nothing was recorded, resolve the pool myself" branch) does not re-run
+              // `resolvePoolForProvider` and land on a DIFFERENT account than the one the note,
+              // the metric and the step record all just named
+              // (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1).
+              { recordedProfileId: downgrade.profileId ?? DEFAULT_AGENT_ACCOUNT_ID }
+            : {}),
         // The session this step is about to run under, minted (or resumed) just above — see the
         // option's own doc comment for why `stepId` is the authoritative half of the pair.
         stepId: step.id,
@@ -7856,11 +8310,27 @@ function runGit(
   cwd: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
+  /** Wall-clock bound, for the git commands that talk to a REMOTE — the local ones cannot hang.
+   *  `killSignal: 'SIGKILL'` rather than the default SIGTERM because a timeout that only sends a
+   *  signal has not ended anything: a child that ignores it leaves this promise pending forever,
+   *  and the caller here is an HTTP request a person is waiting on. */
+  timeoutMs?: number,
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile('git', args, { cwd, env, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => {
-      resolve({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' });
-    });
+    execFile(
+      'git',
+      args,
+      {
+        cwd,
+        env,
+        maxBuffer: 32 * 1024 * 1024,
+        encoding: 'utf8',
+        ...(timeoutMs ? { timeout: timeoutMs, killSignal: 'SIGKILL' as const } : {}),
+      },
+      (error, stdout, stderr) => {
+        resolve({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' });
+      },
+    );
   });
 }
 

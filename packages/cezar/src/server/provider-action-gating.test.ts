@@ -6,14 +6,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProviderAuthService, type ProviderId } from '../core/provider-auth.ts';
 import { RunStore, type RunRecord } from '../runs/store.ts';
 import { mergeWriteAgentAccounts } from '../workspace/agent-accounts.ts';
+import { mergeWriteAgentAccountUsage, recordLimited } from '../workspace/agent-account-usage.ts';
 import { defaultWorkspaceConfig, type WorkspaceConfig } from '../workspace/config.ts';
 import { RunManager, type StartRunInput } from '../workflows/run.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp } from './server.ts';
 import { localCliAuthor } from '../runs/task-author.ts';
+import {
+  fallbackOffMessage,
+  noEligibleFallbackMessage,
+  NO_PROVIDER_AUTHORIZED_MESSAGE,
+} from './provider-action-gate.ts';
 
 const DISABLED_MESSAGE = 'Codex is disabled. Enable it in Settings → Agents → Providers.';
+const CLAUDE_UNAVAILABLE_MESSAGE = 'Claude Code credentials are unavailable. Authorize it in Settings → Agents → Providers.';
 
 const memoryWorkspaceConfig = (disabledProviders: ProviderId[] = ['codex']) => {
   let config: WorkspaceConfig = { ...defaultWorkspaceConfig(), disabledProviders };
@@ -180,7 +187,12 @@ describe('provider action gating', () => {
     await expectDisabled(response);
   });
 
-  it('blocks a message using the persisted current backend before delivery', async () => {
+  it('delivers into an already-open session with NO credential check at all (Solution 4c)', async () => {
+    // `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 4c: the gate MOVES below
+    // `manager.sendMessage`, it does not merely relax — delivering into a live session invokes no
+    // provider, so a disabled/logged-out fallback provider must not strand the message. Codex is
+    // disabled in this fixture's default workspace config; the run's own backend is codex too, and
+    // this now succeeds anyway.
     const run = createExistingRun('codex');
     const response = await apiRequest(app, `/api/v1/runs/${run.id}/messages`, {
       method: 'POST',
@@ -188,8 +200,9 @@ describe('provider action gating', () => {
       body: JSON.stringify({ text: 'Continue' }),
     });
 
-    await expectDisabled(response);
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ delivered: true });
+    expect(sendMessage).toHaveBeenCalledOnce();
   });
 
   it('blocks a continue override before resuming the run', async () => {
@@ -339,25 +352,39 @@ describe('the gate verifies before it refuses', () => {
   });
 
   it('still refuses when the fresh answer agrees — verifying is not a way in', async () => {
-    const { app, providerAuth, advance } = setup();
+    // Codex/OpenCode/pi disabled: with the new `assessAccountViability` rung, an ENABLED healthy
+    // account elsewhere would legitimately reroute this (that is the feature this spec ships).
+    // Disabling every alternative keeps this test's own premise — claude specifically, and nothing
+    // rescues it — true under the new gate too.
+    const { app, providerAuth, advance } = setup({ disabled: ['codex', 'opencode', 'pi'] });
     await providerAuth.status();
     advance(61_000);
 
     const response = await start(app, 'claude');
     expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
-      error: 'Claude Code credentials are unavailable. Authorize it in Settings → Agents → Providers.',
-    });
+    expect(await response.json()).toEqual({ error: NO_PROVIDER_AUTHORIZED_MESSAGE });
     expect(startRun).not.toHaveBeenCalled();
   });
 
-  it('cannot be talked out of a rejection it actually observed during a run', async () => {
-    const { app, providerAuth, state } = setup();
-    state.claudeLoggedIn = true; // credentials look fine to a probe…
-    await providerAuth.status();
-    providerAuth.reportRuntimeAuthFailure('claude'); // …but a run was rejected
+  it('refuses a runtime-rejected account that the fresh reprobe still finds disconnected', async () => {
+    // `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 1: the per-account
+    // `runtimeRejections` entry this writes is deliberately DIFFERENT from the provider-wide
+    // banner latch (`runtimeFailures`) — it clears the moment a SUBSEQUENT probe finds the exact
+    // account connected again, because it is a ROUTING fact ("can I spawn on this login right
+    // now?"), not an acknowledgeable incident. That means an account which genuinely reconnects
+    // after being rejected is legitimately routable again — proven at the unit level in
+    // `workspace/account-viability.test.ts` ("the per-account runtime rejection, and its clear
+    // rules"), not here. This gate-level test keeps the account ACTUALLY disconnected throughout,
+    // so the fresh reprobe `providerActionError` always performs before refusing agrees with the
+    // rejection rather than clearing it.
+    const { app, providerAuth } = setup({ disabled: ['codex', 'opencode', 'pi'] });
+    await providerAuth.status(); // claude starts disconnected
+    providerAuth.reportRuntimeAuthFailure('claude'); // and a run's own credentials were rejected
+    // `state.claudeLoggedIn` stays false — the account is disconnected for real, not just latched.
 
-    expect((await start(app, 'claude')).status).toBe(409);
+    const response = await start(app, 'claude');
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: NO_PROVIDER_AUTHORIZED_MESSAGE });
     expect(startRun).not.toHaveBeenCalled();
   });
 
@@ -451,13 +478,17 @@ describe('the gate verifies before it refuses', () => {
     it('still refuses when NEITHER the default NOR the pool has a connected login', async () => {
       // The negative control. A pool check that always says yes would pass the case above and
       // silently wave every task through regardless of whether anything in the pool actually works.
+      //
+      // The project's claude selection is `pool:claude` (single-provider), which forces the
+      // candidate set to claude accounts only even under the new `assessAccountViability` rung
+      // (mirroring `resolvePoolForProvider`'s own narrowing) — codex, healthy in this fixture, is
+      // globally eligible, so the terminal message names the fallback-off case rather than
+      // claiming nothing anywhere is authorized (which would be false: codex is).
       const app = await setupPool({ defaultLoggedIn: false, secondaryLoggedIn: false });
 
       const response = await start(app, 'claude');
       expect(response.status).toBe(409);
-      expect(await response.json()).toEqual({
-        error: 'Claude Code credentials are unavailable. Authorize it in Settings → Agents → Providers.',
-      });
+      expect(await response.json()).toEqual({ error: fallbackOffMessage('claude') });
       expect(startRun).not.toHaveBeenCalled();
     });
 
@@ -496,6 +527,410 @@ describe('the gate verifies before it refuses', () => {
         error: 'Claude Code is disabled. Enable it in Settings → Agents → Providers.',
       });
       expect(startRun).not.toHaveBeenCalled();
+    });
+  });
+});
+
+/**
+ * V2 — the gate stops refusing when a fallback exists.
+ * `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 2 / "Message copy, decided".
+ * One case per row of the outcomes table, plus V4's pinned-site negative control.
+ */
+describe('the fallback gate (Phase 2, assessAccountViability)', () => {
+  let repoRoot: string;
+  let home: string;
+  let store: RunStore;
+  let startRun: ReturnType<typeof vi.fn>;
+  const savedHome = process.env.CEZ_HOME;
+
+  const workspaceConfigWith = (opts: { disabled?: ProviderId[]; fallback?: boolean } = {}) => {
+    const config: WorkspaceConfig = {
+      ...defaultWorkspaceConfig(),
+      disabledProviders: opts.disabled ?? [],
+      resources: { ...defaultWorkspaceConfig().resources, fallbackAcrossAccountsWhenLimited: opts.fallback ?? true },
+    };
+    return { load: async () => config, mergeWrite: async () => config };
+  };
+
+  /** claude default/secondary and codex default, each independently connected or not — the SAME
+   *  `env?.CLAUDE_CONFIG_DIR` discriminator `setupPool` above uses. opencode/pi answer `connected`
+   *  only when `opencodeConnected` is passed, so "only OpenCode connected" has a fixture. */
+  const buildAuth = (opts: {
+    claudeDefault: boolean;
+    claudeSecondary?: boolean;
+    codexDefault: boolean;
+    opencodeConnected?: boolean;
+  }) => new ProviderAuthService({
+    platform: 'linux',
+    runCommand: async (executable, _args, _timeoutMs, env) => {
+      if (executable === 'claude') {
+        const loggedIn = env?.CLAUDE_CONFIG_DIR ? (opts.claudeSecondary ?? false) : opts.claudeDefault;
+        return loggedIn
+          ? { stdout: '{"loggedIn":true}', stderr: '', exitCode: 0 }
+          : { stdout: '{"loggedIn":false}', stderr: '', exitCode: 1 };
+      }
+      if (executable === 'codex') {
+        return opts.codexDefault
+          ? { stdout: 'Logged in using ChatGPT', stderr: '', exitCode: 0 }
+          : { stdout: '', stderr: 'not logged in', exitCode: 1 };
+      }
+      return opts.opencodeConnected
+        ? { stdout: '┌  Credentials ~/.local/share/opencode/auth.json\n└  1 credential', stderr: '', exitCode: 0 }
+        : { stdout: '', stderr: 'no credentials', exitCode: 1 };
+    },
+  });
+
+  const buildApp = (providerAuth: ProviderAuthService, workspaceConfig = workspaceConfigWith()) => createApp({
+    repoRoot,
+    store,
+    manager: { startRun, sendMessage: vi.fn(() => true), continueRun: vi.fn(() => ({ ok: true })) } as unknown as RunManager,
+    version: 'test',
+    providerAuth,
+    workspaceConfig,
+  });
+
+  const startClaude = (app: Hono, body: Record<string, unknown> = {}) => apiRequest(app, '/api/v1/runs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ task: 'Task', runner: 'claude', steps: [{ id: 'task', prompt: '{{task}}' }], ...body }),
+  });
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'cez-gate-fallback-home-'));
+    process.env.CEZ_HOME = home;
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-gate-fallback-'));
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    startRun = vi.fn((_workflow: WorkflowDef, input: StartRunInput) => store.createRun({
+      author: localCliAuthor(),
+      title: 'Task',
+      workflow: 'quick-task',
+      task: input.task,
+      runner: input.runner,
+      agentProfile: input.agentProfile,
+      steps: [],
+    }));
+  });
+
+  afterEach(() => {
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    if (savedHome === undefined) delete process.env.CEZ_HOME;
+    else process.env.CEZ_HOME = savedHome;
+  });
+
+  it('THE REPORTED BUG: pool:*, fallback off, claude wholly logged out, codex healthy → 201', async () => {
+    await mergeWriteAgentAccounts((s) => {
+      s.defaults.claude = 'pool:*';
+      return s;
+    });
+    const providerAuth = buildAuth({ claudeDefault: false, codexDefault: true });
+    const app = buildApp(providerAuth, workspaceConfigWith({ fallback: false }));
+
+    const response = await startClaude(app);
+    expect(response.status).toBe(201);
+    expect(startRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('the same bug with a STORED EXPLICIT account instead of a pool → also 201', async () => {
+    // `poolHasConnectedAccount` cannot reach this at all (`route.kind !== 'pool'` returns false) —
+    // pins the gap the old gate had no answer for.
+    const providerAuth = buildAuth({ claudeDefault: false, codexDefault: true });
+    const app = buildApp(providerAuth, workspaceConfigWith({ fallback: true }));
+
+    const response = await startClaude(app);
+    expect(response.status).toBe(201);
+    expect(startRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('claude logged out, every connected codex account LIMITED → 201, not 409 — the run parks', async () => {
+    await mergeWriteAgentAccountUsage((s) =>
+      recordLimited(s, 'codex:default', { source: 'usage-limit', until: new Date(Date.now() + 3_600_000).toISOString() }),
+    );
+    const providerAuth = buildAuth({ claudeDefault: false, codexDefault: true });
+    const app = buildApp(providerAuth, workspaceConfigWith({ fallback: true }));
+
+    const response = await startClaude(app);
+    expect(response.status).toBe(201);
+    expect(startRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('V8: /plan gates on `runnable`, not `placeable` — a waitable-only codex still 409s', async () => {
+    // `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 4b: `placeable` would be
+    // TRUE here (a waitable codex candidate exists), and gating `/plan` on it would hand
+    // `planChain` a chooser with nothing RUNNABLE to offer, spawn the logged-out claude default,
+    // and degrade to the one-step `fallback: true` plan instead of refusing honestly — the
+    // mutation this case exists to catch (V8's own).
+    await mergeWriteAgentAccountUsage((s) =>
+      recordLimited(s, 'codex:default', { source: 'usage-limit', until: new Date(Date.now() + 3_600_000).toISOString() }),
+    );
+    const providerAuth = buildAuth({ claudeDefault: false, codexDefault: true });
+    const app = buildApp(providerAuth, workspaceConfigWith({ fallback: true }));
+
+    const response = await apiRequest(app, '/api/v1/plan', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ task: 'Plan it' }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: fallbackOffMessage('claude') });
+  });
+
+  it('nothing connected on any provider → 409 "No agent provider is authorized…"', async () => {
+    const providerAuth = buildAuth({ claudeDefault: false, codexDefault: false });
+    const app = buildApp(providerAuth, workspaceConfigWith({ fallback: true }));
+
+    const response = await startClaude(app);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: NO_PROVIDER_AUTHORIZED_MESSAGE });
+    expect(startRun).not.toHaveBeenCalled();
+  });
+
+  it('fallback off, explicit route, healthy sibling on ANOTHER provider → 409, fallback-off message', async () => {
+    const providerAuth = buildAuth({ claudeDefault: false, codexDefault: true });
+    const app = buildApp(providerAuth, workspaceConfigWith({ fallback: false }));
+
+    const response = await startClaude(app);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: fallbackOffMessage('claude') });
+    expect(startRun).not.toHaveBeenCalled();
+  });
+
+  it('an explicitly selected HEALTHY secondary while the default is disconnected → 201, either setting', async () => {
+    const secondaryDir = join(home, 'secondary-claude');
+    await mergeWriteAgentAccounts((s) => {
+      s.accounts.push({ id: 'secondary', provider: 'claude', configDir: secondaryDir, label: 'Secondary', addedAt: '2026-08-24T00:00:00.000Z' });
+      s.selections[repoRoot] = { claude: 'secondary' };
+      return s;
+    });
+    for (const fallback of [true, false]) {
+      const providerAuth = buildAuth({ claudeDefault: false, claudeSecondary: true, codexDefault: false });
+      const app = buildApp(providerAuth, workspaceConfigWith({ fallback }));
+      const response = await startClaude(app);
+      expect(response.status).toBe(201);
+    }
+  });
+
+  it('a DEAD explicit account with a healthy sibling: 409 with fallback off, 201 with it on', async () => {
+    // An EXPLICIT ACCOUNT route never triggers `poolHasConnectedAccount` (pool-only), which is
+    // what warms a non-default account's cache in the pooled-login fixtures above. Warm it here
+    // explicitly, the way `warmAgentKnowledge` would at boot — a cold peek reads `unknown`, and
+    // `unknown` counts as eligible/connected by design (Solution 1), which would make this case
+    // pass for the wrong reason if the cache were left cold.
+    const secondaryDir = join(home, 'secondary-claude');
+    await mergeWriteAgentAccounts((s) => {
+      s.accounts.push({ id: 'secondary', provider: 'claude', configDir: secondaryDir, label: 'Secondary', addedAt: '2026-08-24T00:00:00.000Z' });
+      s.selections[repoRoot] = { claude: 'default' };
+      return s;
+    });
+    const offAuth = buildAuth({ claudeDefault: false, claudeSecondary: true, codexDefault: false });
+    await offAuth.profileStatus('claude', { id: 'secondary', configDir: secondaryDir });
+    const offResponse = await startClaude(buildApp(offAuth, workspaceConfigWith({ fallback: false })));
+    expect(offResponse.status).toBe(409);
+    expect(await offResponse.json()).toEqual({ error: fallbackOffMessage('claude') });
+
+    const onAuth = buildAuth({ claudeDefault: false, claudeSecondary: true, codexDefault: false });
+    await onAuth.profileStatus('claude', { id: 'secondary', configDir: secondaryDir });
+    const onResponse = await startClaude(buildApp(onAuth, workspaceConfigWith({ fallback: true })));
+    expect(onResponse.status).toBe(201);
+  });
+
+  it('the composer override, not the project route: overrides a healthy pool onto a dead account', async () => {
+    const overrideDir = join(home, 'override-claude');
+    await mergeWriteAgentAccounts((s) => {
+      s.accounts.push({ id: 'claude-default', provider: 'claude', configDir: overrideDir, label: 'Dup', addedAt: '2026-08-24T00:00:00.000Z' });
+      s.defaults.claude = 'pool:claude';
+      return s;
+    });
+    // The project's pool is healthy (claude default connected), but the body names a specific
+    // logged-out account and fallback is off — the override must be what gets gated, not the
+    // project's own pool selection. Warmed explicitly for the same cold-cache reason as above.
+    const providerAuth = buildAuth({ claudeDefault: true, codexDefault: false });
+    await providerAuth.profileStatus('claude', { id: 'claude-default', configDir: overrideDir });
+    const app = buildApp(providerAuth, workspaceConfigWith({ fallback: false }));
+    const response = await startClaude(app, { agentProfile: 'claude-default' });
+    expect(response.status).toBe(409);
+  });
+
+  it('a mixed-provider workflow with ONE disconnected pinned provider — every requirement must place', async () => {
+    const workflow: WorkflowDef = {
+      name: 'mixed',
+      source: 'built-in',
+      steps: [
+        { id: 'spec', name: 'Spec', prompt: '{{task}}', runner: 'claude' },
+        { id: 'build', name: 'Build', prompt: '{{task}}' },
+      ],
+    };
+    const offAuth = buildAuth({ claudeDefault: false, codexDefault: true });
+    const offResponse = await apiRequest(buildApp(offAuth, workspaceConfigWith({ fallback: false })), '/api/v1/runs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ task: 'Task', runner: 'codex', steps: workflow.steps }),
+    });
+    expect(offResponse.status).toBe(409);
+    expect(await offResponse.json()).toEqual({ error: fallbackOffMessage('claude') });
+
+    const onAuth = buildAuth({ claudeDefault: false, codexDefault: true });
+    const onResponse = await apiRequest(buildApp(onAuth, workspaceConfigWith({ fallback: true })), '/api/v1/runs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ task: 'Task', runner: 'codex', steps: workflow.steps }),
+    });
+    expect(onResponse.status).toBe(201);
+  });
+
+  it('only OpenCode connected → 409, the no-eligible-fallback message, not "no agent provider"', async () => {
+    const providerAuth = buildAuth({ claudeDefault: false, codexDefault: false, opencodeConnected: true });
+    const app = buildApp(providerAuth, workspaceConfigWith({ fallback: true }));
+
+    const response = await startClaude(app);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: noEligibleFallbackMessage('claude') });
+    expect(startRun).not.toHaveBeenCalled();
+  });
+
+  it('codex disabled and required, claude connected → unchanged disabled message, viability untouched', async () => {
+    const providerAuth = buildAuth({ claudeDefault: true, codexDefault: false });
+    const app = buildApp(providerAuth, workspaceConfigWith({ disabled: ['codex'], fallback: true }));
+
+    const response = await apiRequest(app, '/api/v1/runs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ task: 'Task', runner: 'codex', steps: [{ id: 'task', prompt: '{{task}}' }] }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: DISABLED_MESSAGE });
+    expect(startRun).not.toHaveBeenCalled();
+  });
+
+  it('site 3, live delivery: an open session on a logged-out provider still delivers, no status read', async () => {
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'Existing',
+      workflow: 'quick-task',
+      task: 'Existing task',
+      runner: 'claude',
+      steps: [{ id: 'task', name: 'Task', kind: 'agent' }],
+    });
+    store.updateRun(run.id, { status: 'running', currentStepId: 'task' });
+    store.updateStep(run.id, 'task', { backend: 'claude', status: 'running' });
+    const providerAuth = buildAuth({ claudeDefault: false, codexDefault: false });
+    const statusSpy = vi.spyOn(providerAuth, 'status');
+    const app = buildApp(providerAuth, workspaceConfigWith({ fallback: true }));
+
+    const response = await apiRequest(app, `/api/v1/runs/${run.id}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'keep going' }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ delivered: true });
+    expect(statusSpy).not.toHaveBeenCalled();
+  });
+
+  it('site 3, reopen: a waiting/inactive run reopens onto a healthy fallback, refuses when nothing is', async () => {
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'Waiting',
+      workflow: 'quick-task',
+      task: 'Waiting task',
+      runner: 'claude',
+      steps: [{ id: 'task', name: 'Task', kind: 'agent' }],
+    });
+    store.updateRun(run.id, { status: 'waiting' });
+    // No live session for THIS run: `sendMessage` must answer `false` so the ladder actually
+    // reaches the reopen branch — the shared `startRun`-only mock at the top of this describe
+    // answers `true` unconditionally, which would deliver into a session that does not exist.
+    const reopenApp = (providerAuth: ProviderAuthService, workspaceConfig: ReturnType<typeof workspaceConfigWith>) => createApp({
+      repoRoot,
+      store,
+      manager: {
+        startRun,
+        sendMessage: vi.fn(() => false),
+        continueRun: vi.fn(() => ({ ok: true })),
+        isActive: vi.fn(() => false),
+      } as unknown as RunManager,
+      version: 'test',
+      providerAuth,
+      workspaceConfig,
+    });
+
+    const healthyAuth = buildAuth({ claudeDefault: false, codexDefault: true });
+    const healthyResponse = await apiRequest(
+      reopenApp(healthyAuth, workspaceConfigWith({ fallback: true })),
+      `/api/v1/runs/${run.id}/messages`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'still there?' }) },
+    );
+    expect(healthyResponse.status).toBe(200);
+    expect(await healthyResponse.json()).toEqual({ continued: true });
+
+    const nothingAuth = buildAuth({ claudeDefault: false, codexDefault: false });
+    const nothingResponse = await apiRequest(
+      reopenApp(nothingAuth, workspaceConfigWith({ fallback: true })),
+      `/api/v1/runs/${run.id}/messages`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'still there?' }) },
+    );
+    expect(nothingResponse.status).toBe(409);
+    expect(await nothingResponse.json()).toEqual({ error: NO_PROVIDER_AUTHORIZED_MESSAGE });
+  });
+
+  /**
+   * V4 — the two pinned sites stay pinned, byte-identical, in the SAME fixture that makes
+   * `POST /runs` answer `201` above (claude wholly logged out, codex healthy, fallback off): the
+   * whole point is that one workspace state produces `201` on a reroutable site and `409` on a
+   * pinned one.
+   */
+  describe('V4: sites 7 and 8 keep blocking', () => {
+    const buildRunWithSession = () => {
+      const run = store.createRun({
+        author: localCliAuthor(),
+        title: 'Handoff',
+        workflow: 'quick-task',
+        task: 'Handoff task',
+        runner: 'claude',
+        steps: [{ id: 'task', name: 'Task', kind: 'agent' }],
+      });
+      store.updateStep(run.id, 'task', { sessionId: 'sess-1' });
+      return run;
+    };
+
+    it('POST /runs/:id/open-in-cli refuses byte-identically while POST /runs succeeds', async () => {
+      await mergeWriteAgentAccounts((s) => {
+        s.defaults.claude = 'pool:*';
+        return s;
+      });
+      const providerAuth = buildAuth({ claudeDefault: false, codexDefault: true });
+      const app = buildApp(providerAuth, workspaceConfigWith({ fallback: false }));
+
+      const started = await startClaude(app);
+      expect(started.status).toBe(201);
+
+      const run = buildRunWithSession();
+      const response = await apiRequest(app, `/api/v1/runs/${run.id}/open-in-cli`, { method: 'POST' });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: CLAUDE_UNAVAILABLE_MESSAGE });
+    });
+
+    it('POST /runs/:id/open-in (CLI target) refuses byte-identically while POST /runs succeeds', async () => {
+      await mergeWriteAgentAccounts((s) => {
+        s.defaults.claude = 'pool:*';
+        return s;
+      });
+      const providerAuth = buildAuth({ claudeDefault: false, codexDefault: true });
+      const app = buildApp(providerAuth, workspaceConfigWith({ fallback: false }));
+
+      const started = await startClaude(app);
+      expect(started.status).toBe(201);
+
+      const run = buildRunWithSession();
+      const response = await apiRequest(app, `/api/v1/runs/${run.id}/open-in`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ target: 'cli:claude' }),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: CLAUDE_UNAVAILABLE_MESSAGE });
     });
   });
 });

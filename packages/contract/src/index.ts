@@ -33,3 +33,4 @@ export * from './backup.ts';
 export * from './orgs.ts';
 export * from './invites.ts';
 export * from './cluster.ts';
+export * from './analytics.ts';
