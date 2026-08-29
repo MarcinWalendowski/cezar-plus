@@ -32,6 +32,7 @@ import {
   type GlobalTasksUrlState,
 } from './global-tasks'
 import { allProjectTags } from './project-tags'
+import { parseFiledDetailKey } from './filed-tasks'
 
 /**
  * The global Tasks page's behavior, as a table. What matters here and nowhere else:
@@ -560,6 +561,15 @@ describe('URL state', () => {
     expect(params.get('fsort')).toBe('created-asc')
   })
 
+  it('round-trips a Filed detail deep link without changing the other URL state', () => {
+    const over = {
+      filedDetail: 'web:todo-42',
+      filedSort: 'created-asc' as const,
+    }
+    expect(roundTrip(over)).toEqual(state(over))
+    expect(urlStateToSearchParams(state(over)).get(SEARCH_PARAMS.filedDetail)).toBe('web:todo-42')
+  })
+
   it('never lets the Filed facets collide with the runs facets sharing the same param names', () => {
     // `SEARCH_PARAMS.status` (runs) and `FILED_SEARCH_PARAMS.status` (filed todos) both use the
     // key name `status` internally — the wire values must stay `status` and `fstatus`, or one
@@ -596,6 +606,16 @@ describe('URL state', () => {
     expect(urlStateFromSearchParams(new URLSearchParams('untagged=yes')).filters.tags).toEqual([])
     // Anything but the exact flag is the default view.
     expect(urlStateFromSearchParams(new URLSearchParams('archived=yes')).view).toBe('active')
+  })
+})
+
+describe('parseFiledDetailKey', () => {
+  it('splits the first colon and rejects empty sides', () => {
+    expect(parseFiledDetailKey('web:todo-42')).toEqual({ project: 'web', todoId: 'todo-42' })
+    expect(parseFiledDetailKey('web:todo:42')).toEqual({ project: 'web', todoId: 'todo:42' })
+    expect(parseFiledDetailKey(':todo-42')).toBeNull()
+    expect(parseFiledDetailKey('web:')).toBeNull()
+    expect(parseFiledDetailKey('web')).toBeNull()
   })
 })
 

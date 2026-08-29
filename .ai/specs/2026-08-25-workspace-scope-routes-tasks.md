@@ -253,6 +253,10 @@ A new built-in in `workflows/types.ts`, alongside `quick-task` / `note-to-spec` 
 | 2 | `file` | Decide which project(s) the input concerns and file one todo into each, with Context / What to do / Acceptance criteria in the body. **Never** `--start`. | `Bash` restricted to `cez todo add` |
 | 3 | `dispatch` | **Optional.** Flip the just-filed todos to autostart. No-op — and says so — when the run was not created with auto-start. | `Bash` restricted to `cez todo start` |
 
+**SUPERSEDED 2026-08-29 by 2026-08-25-composer-dispatch-mode.md:** Plan shaping now removes the
+dispatch step when auto-start is off. The filing and dispatch operations remain separate when the
+choice is on, but the OFF path no longer reaches a no-op agent step.
+
 **Step 2 files and step 3 starts, deliberately as two steps.** Passing `--start` in step 2 would
 make "filed" and "started" one indivisible act; splitting them means a failure in step 3 leaves the
 work filed and recoverable on the Filed board rather than losing it, and it makes both facts
@@ -414,6 +418,10 @@ neither "ISOLATED git worktree" nor "applies your changes back", and that every 
 whose input names two projects files exactly two todos, in the right `todos.json`, with
 `autostart` **absent**.
 
+**SUPERSEDED 2026-08-29 by 2026-08-25-composer-dispatch-mode.md:** The optional dispatch behavior
+below was replaced by shaping the persisted plan before the run starts. The new spec's OFF path
+omits the step entirely, rather than spawning it to report a no-op.
+
 **V5 — dispatch is genuinely optional.** With `autoStart: false`, assert zero runs start and step 3
 reports a no-op. With `autoStart: true`, assert each filed todo reaches `autostart: true` and the
 cockpit's watcher starts it under the project's own cap. Both directions — an "optional" step tested
@@ -515,6 +523,10 @@ description of the route was corrected in place with the superseded text kept be
 ### Verification — executed
 
 - **V3 (the grant is honest)** — `workspace/granted-roots.test.ts`, 22 pass. Covers the
+**SUPERSEDED 2026-08-29 by 2026-08-25-composer-dispatch-mode.md:** The V4/V5 verification below
+describes the prior prompt-level no-op. It is retained as the historical record, while the new
+spec verifies the frozen two-step or three-step plan and the filed-todo receipt.
+
   partially-isolated case (the exact prod defect, and the assertion that fails under the old
   `worktrees.length > 0`), the fully-isolated legacy case so the change is a narrowing rather than a
   blanket `false`, and the `brand` shape: every granted path is a registry root verbatim, never a
@@ -624,6 +636,10 @@ rather than the symlink believed:
   `ExecMainStartTimestamp` matches, so the restart did happen.
 - **The loader serves the workflow.** `loadWorkflows('/var/lib/cezar/loki-labs')` on the live dist
   returns `input-to-tasks (built-in)` alongside the four pre-existing ones.
+**SUPERSEDED 2026-08-29 by 2026-08-25-composer-dispatch-mode.md:** This historical production
+check predates the frozen plan. Its `dispatch` token assertion remains a record of the old
+definition, but OFF runs now omit that step and ON runs receive the filed-todo ledger.
+
 - **No step can write, on the live definition.** Every step's `allowedTools` read off the deployed
   module: `context`/`file` = `Read,Grep,Glob,Bash`, `dispatch` = `Read,Bash`; zero write tools.
   **With a control:** the same check run against `spec-to-deploy` reports `Write,Edit`, so it is

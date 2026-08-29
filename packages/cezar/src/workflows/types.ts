@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { RUNNER_IDS, type RunnerId } from '../core/agent-runner.ts';
+import type { RunRecord } from '../runs/store.ts';
 import { POSTCONDITION_IDS } from './postconditions.ts';
 
 const verifyEntrySchema = z
@@ -412,6 +413,26 @@ export const DEFAULT_ALLOWED_TOOLS = ['Read', 'Edit', 'Write', 'Grep', 'Glob', '
 /** The workspace-scope workflow's name — referenced by the composer and the workspace run route,
  *  which default to it, so it lives here rather than being spelled as a literal in three files. */
 export const INPUT_TO_TASKS_NAME = 'input-to-tasks';
+export const INPUT_TO_TASKS_DISPATCH_STEP = 'dispatch';
+
+/** The built-in workspace workflow, identified without treating a same-named file as built-in. */
+export function isBuiltInInputToTasks(def: Pick<WorkflowDef, 'source' | 'name'>): boolean {
+  return def.source === 'built-in' && def.name === INPUT_TO_TASKS_NAME;
+}
+
+/** Whether a persisted run has the grant and definition needed for the filed-task ledger. */
+export function isBuiltInInputToTasksRun(run: RunRecord): boolean {
+  return (run.workspaceProjects?.length ?? 0) > 0 && run.workflowDef !== undefined && isBuiltInInputToTasks(run.workflowDef);
+}
+
+/** Freeze the composer's dispatch choice into the run's workflow definition. */
+export function inputToTasksPlan(def: WorkflowDef, autoStart: boolean): WorkflowDef {
+  if (autoStart || !isBuiltInInputToTasks(def)) return def;
+  return {
+    ...def,
+    steps: def.steps.filter((step) => step.id !== INPUT_TO_TASKS_DISPATCH_STEP),
+  };
+}
 
 /**
  * The ONLY workflow a workspace-scoped task runs
@@ -431,8 +452,9 @@ export const INPUT_TO_TASKS_NAME = 'input-to-tasks';
  * **Why `file` and `dispatch` are two steps rather than one `--start`.** Filing and starting are
  * separately observable facts, and the failure modes differ: if `dispatch` fails, the work is still
  * on the Filed board and a person can start it, whereas a failed combined step could lose both.
- * It also makes the optional half a genuine no-op — `dispatch` reports that it did nothing when the
- * run was created without auto-start, rather than silently being a different filing command.
+ * The composer freezes its auto-start choice into the persisted workflow plan. Runs created with
+ * auto-start off omit `dispatch` entirely, while enabled runs retain it and give it the filed-task
+ * ledger to mark.
  *
  * **`allowedTools` excludes `Edit` and `Write` on every step, deliberately.** The grant hands this
  * run the real checkouts of a dozen projects. The prompt tells it not to edit them; the tool list
@@ -498,25 +520,26 @@ export const INPUT_TO_TASKS_WORKFLOW: WorkflowDef = {
       ].join('\n'),
     },
     {
-      id: 'dispatch',
-      name: 'Start the filed tasks (optional)',
+      id: INPUT_TO_TASKS_DISPATCH_STEP,
+      name: 'Start the filed tasks',
       allowedTools: ['Read', 'Bash'],
       bashAllowlist: ['cez todo', 'cezar todo'],
       prompt: [
-        'This step is OPTIONAL and is a no-op unless this task was created with auto-start enabled.',
+        'Start every filed task from the ledger below. This step exists only when the composer',
+        'selected auto-start, and the persisted plan is the authoritative decision.',
         '',
         'Auto-start for this run: {{autoStart}}',
         '',
-        'If that says `false` or is empty: do nothing at all. Report that the filed tasks are',
-        'waiting on the Filed board for a person to start them, and list them. Do not start them.',
+        'Filed tasks:',
+        '{{filedTodos}}',
         '',
-        'If it says `true`: for each todo the previous step filed, run',
+        'For EVERY entry above, run',
         '',
         '    cez todo start <id> --project <id-of-its-project>',
         '',
         'which marks it for autostart. The running cockpit picks it up and starts it under that',
-        "project's own concurrency cap — you are not starting the run yourself, and you must not",
-        'try to. Report which todos you marked and which you did not.',
+        "project's own concurrency cap. You are not starting the implementation run yourself.",
+        'Report which todos you marked and every failure.',
       ].join('\n'),
     },
   ],

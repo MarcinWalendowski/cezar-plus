@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { collectSecretValues, redactDeep, redactSecrets } from '../core/secret-redaction.ts';
@@ -135,6 +135,19 @@ const queuedMessageSchema = z.object({
   /** `/api/v1/runs/:id/images/…` URLs — the base64 never enters `runs.json`. */
   images: z.array(z.string()).optional(),
   createdAt: z.string(),
+});
+
+const filedTodoSchema = z.object({
+  project: z.string(),
+  todoId: z.string(),
+  summary: z.string().max(500),
+  autostart: z.literal(true).optional(),
+  startedTaskId: z.string().optional(),
+});
+
+const filedTodosSchema = z.object({
+  items: z.array(filedTodoSchema),
+  at: z.string(),
 });
 
 /** Exported for `./run-index.ts`, the read-only reader of the same file. Nothing else should
@@ -446,6 +459,7 @@ export const runRecordSchema = z.object({
       }),
     )
     .optional(),
+  filedTodos: filedTodosSchema.optional(),
   /** A parallel workspace run's per-project worktrees (spec
    *  2026-08-19-parallel-workspace-runs-worktrees). Each granted git project is isolated in its own
    *  `cez/<id8>` worktree; the diff is applied back to the real checkout and the worktree removed on
@@ -829,6 +843,7 @@ export class RunStore extends EventEmitter {
     worktree?: false;
     /** A workspace run's grant — see the schema field above. */
     workspaceProjects?: WorkspaceGrantProject[];
+    filedTodos?: z.infer<typeof filedTodosSchema>;
     /** `input-to-tasks` auto-start — see the schema field above. */
     autoStart?: boolean;
     groupId?: string;
@@ -863,6 +878,7 @@ export class RunStore extends EventEmitter {
       stepBudgetOverride: input.stepBudgetOverride,
       worktree: input.worktree,
       workspaceProjects: input.workspaceProjects,
+      filedTodos: input.filedTodos,
       autoStart: input.autoStart,
       groupId: input.groupId,
       variant: input.variant,
@@ -1158,7 +1174,18 @@ export class RunStore extends EventEmitter {
     const full: RunEvent = this.redact({ ...event, seq, ts: new Date().toISOString() });
     // Sync append keeps event order without a write queue; local NDJSON
     // appends at agent-event rates are effectively free.
-    appendFileSync(this.eventsPath(runId), `${JSON.stringify(full)}\n`, 'utf8');
+    const eventPath = this.eventsPath(runId);
+    let separator = '';
+    try {
+      const size = statSync(eventPath).size;
+      if (size > 0) {
+        const lastByte = readFileSync(eventPath).at(-1);
+        if (lastByte !== 0x0a) separator = '\n';
+      }
+    } catch {
+      // The append below creates the event file for a new run.
+    }
+    appendFileSync(eventPath, `${separator}${JSON.stringify(full)}\n`, 'utf8');
     this.emit('event', { runId, event: full });
 
     // The janitor trick: agents print the PR URL after `gh pr create` — the

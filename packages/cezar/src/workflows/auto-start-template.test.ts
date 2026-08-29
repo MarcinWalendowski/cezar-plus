@@ -11,12 +11,8 @@ const specs: AgentRunSpec[] = [];
 /**
  * `{{autoStart}}` reaching the agent (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`, V5).
  *
- * `input-to-tasks`'s third step is optional, and the ONLY thing that makes it optional is a token
- * in its prompt. Nothing else gates it: the step always runs, reads whether the user ticked the
- * box, and does nothing when they did not. So a substitution that silently failed would render the
- * literal `{{autoStart}}`, the agent would guess, and "optional" would mean "sometimes". That is a
- * failure with no error and no red test anywhere else — `load.test.ts` proves the token is IN the
- * prompt, which stays true whether or not anything ever replaces it.
+ * The dispatch step is present only in an auto-start plan. Its prompt still receives the frozen
+ * decision and filed-task ledger, so a restart cannot change what the agent is asked to do.
  *
  * Asserted at the spawn spec, the same seam and the same faked `createRunner` as
  * `workspace-grant-wiring.test.ts`, so it covers the whole path from the persisted record to the
@@ -43,7 +39,7 @@ vi.mock('../core/runner-factory.ts', () => ({
 }));
 
 const { RunStore } = await import('../runs/store.ts');
-const { RunManager } = await import('./run.ts');
+const { RunManager, formatFiledTodos } = await import('./run.ts');
 const { WorkspaceSemaphore } = await import('../workspace/semaphore.ts');
 type Store = ReturnType<typeof RunStore.open>;
 type Manager = InstanceType<typeof RunManager>;
@@ -131,5 +127,13 @@ describe('RunManager renders {{autoStart}} from the RECORD', () => {
     });
     const spec = await spawned();
     expect(spec.userPrompt).toBe('task=[sweep the boards] autoStart=[false]');
+  });
+
+  it('formats the persisted ledger as one project-qualified command entry per todo', () => {
+    expect(formatFiledTodos([])).toBe('(none)');
+    expect(formatFiledTodos([
+      { project: 'api', todoId: 'todo-1', summary: 'Fix the API' },
+      { project: 'web', todoId: 'todo-2', summary: 'Fix the web' },
+    ])).toBe('- todo-1  --project api  Fix the API\n- todo-2  --project web  Fix the web');
   });
 });

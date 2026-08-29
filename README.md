@@ -358,6 +358,9 @@ each project's own board**. It edits no project file, so it needs no lock and
 cannot collide with the runs already going. Tick **Start filed tasks** and it
 starts them too, each in its own project and its own worktree, the same as
 starting them by hand. Leave it off (the default) and they wait for you.
+The choice is frozen into the run plan: off means the dispatch step is omitted,
+while on retains it. The completed run shows one direct global Filed-board link
+for every todo it created.
 
 > **Breaking, in the next minor (0.11.0).** A workspace-scoped run used to edit
 > every registered project's working tree directly and merge the diffs back.

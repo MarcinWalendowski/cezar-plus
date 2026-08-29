@@ -228,12 +228,21 @@ export const FILED_SEARCH_PARAMS = {
   status: 'fstatus',
   priority: 'fpriority',
   sort: 'fsort',
+  detail: 'fdetail',
 } as const
 
 // Selection for 2026-08-24-bulk-start-filed-tasks.md.
 
 export function filedTaskKey(entry: WorkspaceTodoEntry): string {
   return `${entry.project}:${entry.todo.id}`
+}
+
+/** Parse the global Tasks deep-link key, splitting only at the project/id boundary. */
+export function parseFiledDetailKey(value: string | null | undefined): { project: string; todoId: string } | null {
+  if (!value) return null
+  const separator = value.indexOf(':')
+  if (separator <= 0 || separator === value.length - 1) return null
+  return { project: value.slice(0, separator), todoId: value.slice(separator + 1) }
 }
 
 export function toggleFiledSelection(selected: ReadonlySet<string>, key: string): Set<string> {

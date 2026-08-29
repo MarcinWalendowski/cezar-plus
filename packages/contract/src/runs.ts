@@ -187,6 +187,23 @@ export const workspaceWorktreeSchema = z.object({
 });
 export type WorkspaceWorktree = z.infer<typeof workspaceWorktreeSchema>;
 
+/** One todo filed by a workspace-scoped input-to-tasks run. */
+export const filedTodoSchema = z.object({
+  project: z.string(),
+  todoId: z.string(),
+  summary: z.string().max(500),
+  autostart: z.literal(true).optional(),
+  startedTaskId: z.string().optional(),
+});
+export type FiledTodo = z.infer<typeof filedTodoSchema>;
+
+/** The append-only ledger captured from the registered projects' todo files. */
+export const filedTodosSchema = z.object({
+  items: z.array(filedTodoSchema),
+  at: z.string(),
+});
+export type FiledTodos = z.infer<typeof filedTodosSchema>;
+
 /**
  * The stored run record, as `runs.json` holds it (`src/runs/store.ts`).
  *
@@ -434,7 +451,11 @@ export const runRecordSchema = z.object({
    * `buildWorkspaceGrant` (`workspace/granted-roots.ts`) — a pure function, so nothing re-reads
    * the registry mid-run.
    */
+  /** The composer's frozen input-to-tasks dispatch choice. */
+  autoStart: z.boolean().optional(),
   workspaceProjects: z.array(workspaceGrantProjectSchema).optional(),
+  /** Todos filed by an input-to-tasks workspace run, captured before completion is reported. */
+  filedTodos: filedTodosSchema.optional(),
   /**
    * A parallel WORKSPACE RUN's per-project worktrees
    * (`.ai/specs/2026-08-19-parallel-workspace-runs-worktrees.md`). At start, every granted git

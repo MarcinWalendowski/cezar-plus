@@ -440,6 +440,7 @@ export const SEARCH_PARAMS = {
   filedStatus: FILED_SEARCH_PARAMS.status,
   filedPriority: FILED_SEARCH_PARAMS.priority,
   filedSort: FILED_SEARCH_PARAMS.sort,
+  filedDetail: FILED_SEARCH_PARAMS.detail,
 } as const
 
 const GROUP_BY_VALUES = new Set<string>(GROUP_BY_OPTIONS.map((option) => option.value))
@@ -458,6 +459,8 @@ export interface GlobalTasksUrlState {
   filedFilters: FiledTaskFilters
   /** The Filed section's sort — `created-desc` (newest first) by default. */
   filedSort: FiledSort
+  /** `project:todoId` for a Filed detail dialog opened from a run thread. */
+  filedDetail: string | undefined
 }
 
 /** The local spelling of `ListView`, so this module's public shape does not depend on a
@@ -471,6 +474,7 @@ export const DEFAULT_URL_STATE: GlobalTasksUrlState = {
   view: 'active',
   filedFilters: NO_FILED_FILTERS,
   filedSort: DEFAULT_FILED_SORT,
+  filedDetail: undefined,
 }
 
 /**
@@ -496,6 +500,7 @@ export function urlStateToSearchParams(state: GlobalTasksUrlState): URLSearchPar
   for (const status of state.filedFilters.statuses) params.append(SEARCH_PARAMS.filedStatus, status)
   for (const priority of state.filedFilters.priorities) params.append(SEARCH_PARAMS.filedPriority, priority)
   if (state.filedSort !== DEFAULT_FILED_SORT) params.set(SEARCH_PARAMS.filedSort, state.filedSort)
+  if (state.filedDetail !== undefined) params.set(SEARCH_PARAMS.filedDetail, state.filedDetail)
   return params
 }
 
@@ -525,5 +530,6 @@ export function urlStateFromSearchParams(params: URLSearchParams): GlobalTasksUr
       priorities: params.getAll(SEARCH_PARAMS.filedPriority).filter(isFiledPriority),
     },
     filedSort: isFiledSort(filedSort) ? filedSort : DEFAULT_FILED_SORT,
+    filedDetail: params.get(SEARCH_PARAMS.filedDetail) ?? undefined,
   }
 }

@@ -67,6 +67,7 @@ import {
   filedTaskKey,
   filedTasksExcludingFacet,
   filterFiledTasks,
+  parseFiledDetailKey,
   selectedFiledEntries,
   setFiledSelection,
   sortFiledTasks,
@@ -283,7 +284,7 @@ export function GlobalTasksRoute() {
   // source of truth means a refresh, a pasted link and the Back button all land on the same
   // filtered view, with no effect syncing two copies that can disagree.
   const [searchParams, setSearchParams] = useSearchParams()
-  const { filters, groupBy, view, filedFilters, filedSort } = React.useMemo(
+  const { filters, groupBy, view, filedFilters, filedSort, filedDetail } = React.useMemo(
     () => urlStateFromSearchParams(searchParams),
     [searchParams],
   )
@@ -552,6 +553,9 @@ export function GlobalTasksRoute() {
           query={filters.query}
           filedFilters={filedFilters}
           filedSort={filedSort}
+          filedDetail={filedDetail}
+          onOpenDetail={(entry) => commit((state) => ({ ...state, filedDetail: filedTaskKey(entry) }))}
+          onCloseDetail={() => commit((state) => ({ ...state, filedDetail: undefined }))}
           onToggleFacet={(facet, value) =>
             setFiledFilters((current) => ({ ...current, [facet]: toggleFacetValue(current[facet], value) }))
           }
@@ -729,6 +733,9 @@ function FiledTasks({
   query,
   filedFilters,
   filedSort,
+  filedDetail,
+  onOpenDetail,
+  onCloseDetail,
   onToggleFacet,
   onClearFacet,
   onSortChange,
@@ -738,6 +745,9 @@ function FiledTasks({
   query: string
   filedFilters: FiledTaskFilters
   filedSort: FiledSort
+  filedDetail: string | undefined
+  onOpenDetail: (entry: WorkspaceTodoEntry) => void
+  onCloseDetail: () => void
   onToggleFacet: (facet: FiledFacetId, value: string) => void
   onClearFacet: (facet: FiledFacetId) => void
   onSortChange: (sort: FiledSort) => void
@@ -752,11 +762,15 @@ function FiledTasks({
   // fetch for the whole section — `nodeRoster.clusterOn` gates the Node column/cell everywhere
   // below, so a single-node cockpit never grows a column that is always empty.
   const nodeRoster = useTaskNodeRoster()
-  const [detail, setDetail] = React.useState<WorkspaceTodoEntry | null>(null)
   const [shown, setShown] = React.useState(FILED_ROW_PAGE_SIZE)
   const [selected, setSelected] = React.useState<ReadonlySet<string>>(() => new Set())
 
   const all = todos.data?.todos ?? []
+  const detail = React.useMemo(() => {
+    const requested = parseFiledDetailKey(filedDetail)
+    if (!requested) return null
+    return all.find((entry) => entry.project === requested.project && entry.todo.id === requested.todoId) ?? null
+  }, [all, filedDetail])
   // Unfiltered-by-facet/query, so the section's own "is there anything filed at all" question and
   // the count badge's denominator both answer against the same set the tab itself defines.
   const viewEntries = React.useMemo(() => filterFiledTasks(all, NO_FILED_FILTERS, view, ''), [all, view])
@@ -785,7 +799,14 @@ function FiledTasks({
     setShown(FILED_ROW_PAGE_SIZE)
   }, [view, filedFilters, filedSort, query])
 
-  if (viewEntries.length === 0) return null
+  if (todos.data !== undefined && filedDetail !== undefined && detail === null) {
+    return (
+      <section data-slot="filed-task-detail-missing" className="rounded-lg border border-border bg-card p-3 text-[12.5px] text-soft-foreground">
+        That task is no longer on this board.
+      </section>
+    )
+  }
+  if (viewEntries.length === 0 && detail === null) return null
 
   const rows = sorted.slice(0, shown)
   const hasMore = sorted.length > rows.length
@@ -867,7 +888,7 @@ function FiledTasks({
               entry={entry}
               now={now}
               nodeRoster={nodeRoster}
-              onOpenDetail={() => setDetail(entry)}
+              onOpenDetail={() => onOpenDetail(entry)}
               onStart={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
               onArchive={(archived) => update.mutate({ entry, patch: { archived } })}
               selected={selected.has(filedTaskKey(entry))}
@@ -922,7 +943,7 @@ function FiledTasks({
                     entry={entry}
                     now={now}
                     nodeRoster={nodeRoster}
-                    onOpenDetail={() => setDetail(entry)}
+                    onOpenDetail={() => onOpenDetail(entry)}
                     onStart={() => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
                     onArchive={(archived) => update.mutate({ entry, patch: { archived } })}
                     selected={selected.has(filedTaskKey(entry))}
@@ -952,9 +973,9 @@ function FiledTasks({
       <FiledDetailDialog
         entry={detail}
         nodeRoster={nodeRoster}
-        onClose={() => setDetail(null)}
+        onClose={onCloseDetail}
         onStart={(entry) => {
-          setDetail(null)
+          onCloseDetail()
           start.mutate({ projectId: entry.project, todoId: entry.todo.id })
         }}
         onArchive={(entry, archived) => update.mutate({ entry, patch: { archived } })}
@@ -1406,6 +1427,9 @@ function FiledDetailBody({
       <div className="mt-1.5 flex flex-wrap items-center gap-2">
         <FiledStatusPill status={filedStatus(entry)} />
         {todo.priority ? <FiledPriorityChip priority={todo.priority} /> : null}
+        <span data-slot="filed-task-id" className="font-mono text-[11px] text-soft-foreground">
+          {todo.id}
+        </span>
         <Link
           to={scopeTo(entry.project, '/')}
           className="font-mono text-[11px] text-soft-foreground hover:text-foreground hover:underline"
