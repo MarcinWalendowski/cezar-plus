@@ -1,7 +1,9 @@
 # Composer dispatch mode shapes the plan
 
-- **Status:** Implemented, QA Needed. Code and test coverage are in this change; build, gates and
-  browser E2E remain for the authoritative verification steps.
+- **Status:** Implemented, QA Needed. Focused workflow, contract, typecheck, unit, build and package
+  gates passed on 2026-08-29. The full `npm test` gate remains red in six unrelated recovery and
+  account-routing tests. Browser E2E was skipped because `agent-browser` could not launch, and the
+  production V8 check has not run. The feature therefore remains QA Needed.
 - **Date:** 2026-08-25
 - **Task:** "Make input-to-tasks honor composer dispatch mode"
 - **Brief:** `.ai/specs/briefs/2026-08-25-composer-dispatch-mode.md` (read in full; every citation
@@ -216,10 +218,13 @@ Each phase is independently shippable and independently green.
   ```
   `body.autoStart` stays recorded on the input exactly as today (absent / `true` / `false` remain
   three distinct answers on the record; see `workspace-run-routes.test.ts:236-251`).
-- `workflows/run.ts#reviveWorkflow` (2770-2778): apply the same shaper to the **catalog fallback**
-  using `run.autoStart === true`, **and persist the shaped result back onto the record** with
-  `this.store.updateRun(run.id, { workflowDef: shaped })` before returning it. The `workflowDef`
-  branch is already shaped by construction and is left alone.
+- `workflows/run.ts#reviveWorkflow` (2770-2778): when the **catalog fallback is the built-in
+  input-to-tasks workflow**, apply the same shaper using `run.autoStart === true`, and persist the
+  shaped result back onto the record with `this.store.updateRun(run.id, { workflowDef: shaped })`
+  before returning it. Every other catalog fallback keeps the existing return-without-persisting
+  behavior, because persisting a catalog definition that does not describe a legacy run changes
+  recovery settlement. The `workflowDef` branch is already shaped by construction and is left
+  alone.
 
   Persisting is not tidiness, it is a precondition of the rest of this spec. Today the fallback
   returns the catalog def to the caller and writes nothing (`run.ts:2774-2777`, verified in the
@@ -229,8 +234,9 @@ Each phase is independently shippable and independently green.
   field still absent would therefore file todos with **no ledger, no `{{filedTodos}}` rendering
   and no completion metric**, while still running whatever steps the catalog gave it, the exact
   silent half-feature this spec exists to remove. One `updateRun` on the recovery path closes it,
-  and it is the same field `startRun` already writes (`run.ts:1555`). V3 asserts the persistence in
-  both modes.
+  and it is the same field `startRun` already writes (`run.ts:1555`). This persistence is scoped to
+  the built-in input-to-tasks fallback; V3 asserts it in both modes, while the existing recovery
+  tests pin unchanged settlement for every other catalog fallback.
 - `workflows/run.ts#startRun`: emit `run.input_to_tasks.planned` (see Analytics) alongside the
   existing `run.workflow.selected` (`run.ts:1560-1568`), for `input-to-tasks` runs only.
 
@@ -503,10 +509,11 @@ that field being absent: `reviveWorkflow` reads `run.workflowDef` and falls thro
 hold, so this predicate would answer `false` for the whole remainder of the run and quietly disable
 ledger collection, `{{filedTodos}}` templating and completion analytics, for the run that most
 needs them, since it already crashed once. Phase 1 therefore requires `reviveWorkflow` to **shape
-and persist** the recovered definition into `run.workflowDef` before returning it, which restores
-the invariant this predicate depends on: *any run that is executing has its own frozen def on the
-record.* The predicate is deliberately not loosened to re-resolve from the catalog itself, that
-would reintroduce the name-only test this section exists to forbid.
+and persist the recovered built-in input-to-tasks definition** into `run.workflowDef` before
+returning it, which restores the invariant this predicate depends on for this workflow. Other
+catalog fallbacks are deliberately not persisted, preserving their legacy settlement behavior.
+The predicate is deliberately not loosened to re-resolve from the catalog itself, that would
+reintroduce the name-only test this section exists to forbid.
 
 | Event | Emitted | Dimensions |
 | --- | --- | --- |

@@ -2966,6 +2966,7 @@ export class RunManager {
     const { workflows } = await loadWorkflows(this.repoRoot);
     const catalog = workflows.find((w) => w.name === run.workflow);
     if (!catalog) return null;
+    if (!isBuiltInInputToTasks(catalog)) return catalog;
     const shaped = inputToTasksPlan(catalog, run.autoStart === true);
     this.store.updateRun(run.id, { workflowDef: shaped });
     return shaped;
