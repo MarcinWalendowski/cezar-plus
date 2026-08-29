@@ -1,5 +1,31 @@
 # Plain-End Question Verification
 
+**Status (current, 2026-08-29): Implemented and Done.** All three phases landed in `5bec2e55`
+("docs: verify plain-end structured question with a runtime E2E") and are merged to `origin/main`
+in `2394d174`. P1 shipped `packages/web/e2e/plain-end-question.e2e.ts`: the focused run reported
+`TEST_E2E_STATUS=passed` for all three cases (question fallback, nudge-to-chips, report park),
+twice, and the V5 discriminating-mutation check (gut `task-thread.tsx`'s `hasWaitingQuestion` to
+`false`, rebuild `web/dist`, rerun) reproduced exactly the predicted split, case A red / case C
+still green, then was reverted and rebuilt clean. P2 corrected `.ai/specs/2026-08-23-plain-end-structured-question.md`
+in place (5 markers: status block, nested-defects stack, verification-table row, the line-786
+"never run" sentence, the runbook) — verified by direct read, not by re-running V7's greps in this
+step. P3 filed two KB proposals to the durable lessons log and one follow-up todo for an unrelated
+onboarding bug found along the way (`fc8fecca`, still open, out of this spec's scope). A second
+todo filed mid-session (`9105b80b`, a pre-existing `global-tasks.tsx` typecheck/test break found
+by this task's own `run-tests` step, also out of scope) is now moot: the file it names no longer
+references the undefined symbol at `HEAD`, resolved incidentally by `7ec6f951` landing through
+`origin/main` before this branch merged. `cezar todo` has no `close`/`resolve` subcommand
+(`cezar todo --help`: only `add`/`start`/`list`), so the entry itself is left as `todo` in
+`.ai/cezar/todos.json` rather than hand-edited outside that tool's contract; this paragraph is the
+record that it is resolved. The gate suite was re-run once more after this spec's own implement
+step, on the merged `HEAD` `2394d174`:
+`npm run typecheck` exit 0, `npm test` 12269 passed / 4 skipped (0 failed — the C18 knowledge-catalog
+budget flake this spec's Verification section warned about did **not** reproduce this run), `npm
+run test:unit` 47/47, `npm run build` exit 0, `npm run test:package` 25/25. Per this spec's own
+"Done vs QA Needed" rule below (V2 `passed`, not `skipped`, and V5 demonstrated it can fail), this
+closes as **Done**, not QA Needed. The original scope statement, current at spec-writing time,
+follows unchanged.
+
 **Status:** Spec, not yet implemented. Scope is **verification and record reconciliation**, not
 re-implementation: the mechanism this task asks for already landed in `d811d34c` (2026-08-24) and
 is an ancestor of this branch's `HEAD` (`0a46010b`, `cez/eba6cb05`).
@@ -269,7 +295,7 @@ degrades to absent rather than failing the whole parse. `max(280)` matches
 Each phase is independently shippable and independently valuable. P1 is the one that closes the
 gate; P2 and P3 are record work that can land separately if P1 needs iteration.
 
-### P1: V8 becomes an executable regression (closes AC5 and the QA gate)
+### P1: V8 becomes an executable regression (closes AC5 and the QA gate) — shipped, `5bec2e55`
 
 New file `packages/web/e2e/plain-end-question.e2e.ts`. Template: `queued-stack.e2e.ts` (live mock
 runs, `CEZ_DRY_RUN=1`, real server) crossed with `task-thread.e2e.ts` (thread-route assertions,
@@ -339,7 +365,7 @@ runs, `CEZ_DRY_RUN=1`, real server) crossed with `task-thread.e2e.ts` (thread-ro
 Ship: the E2E file only. No source change. If it goes red, that is a genuine finding and the fix is
 scoped then, on the failure output.
 
-### P2: the prior spec stops contradicting itself
+### P2: the prior spec stops contradicting itself — shipped, `5bec2e55`
 
 Targeted edits to `.ai/specs/2026-08-23-plain-end-structured-question.md`. Per the house correction
 rule, this marks what is invalidated in place and leaves the original text below it: the layered
@@ -383,7 +409,7 @@ line 786 exactly as it already applies to the runbook at 939-945.
 
 Ship: one file, docs only.
 
-### P3: the orphan branch and the tracker mismatch are on the record
+### P3: the orphan branch and the tracker mismatch are on the record — shipped, `5bec2e55`
 
 1. Add a short subsection to this spec (or to P2's status block) recording: `cez/183740fe` exists
    locally, tip `89535360`, holding `v8-ask-chips.png` and `v8-question-fallback.png`; both were
@@ -538,6 +564,11 @@ prior spec recorded the root suite at 10,774 passed / 1 failed / 4 skipped, the 
 being the C18 knowledge-catalog host-speed budget, reproduced on a clean detached baseline. If that
 is still the only failure, say so explicitly and name it rather than claiming a green gate; if
 anything else is red, it is a finding.
+
+**Result (2026-08-29): Done.** V2 reported `passed`, twice; V5 demonstrated the assertions can fail
+(case A red under the mutation) and pass again once reverted and rebuilt. See the status block at
+the top of this spec for the full gate results. The paragraph below is the rule that result was
+checked against, left as written.
 
 **Done vs QA Needed.** Per repo doctrine, this is Done when V2 reports `passed` (not `skipped`) and
 V5 has demonstrated the assertions can fail. Until then it stays QA Needed, which is precisely the
