@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { LockableRunner } from '@loki-labs/better-cezar-contract';
 import { DEFAULT_MONITORING_WAKE_MINUTES, loadWorkspaceConfig } from './config.ts';
 
 /**
@@ -32,7 +33,9 @@ import { DEFAULT_MONITORING_WAKE_MINUTES, loadWorkspaceConfig } from './config.t
  * nothing consults them here).
  */
 
-/** The cached `resources` slice run enforcement consults. */
+/** The cached workspace POLICY run enforcement consults, of which the `resources` slice is one
+ *  kind — the bag is not renamed for carrying `runnerLock` too, since `@loki-labs/better-cezar`
+ *  is published and `BACKWARD_COMPATIBILITY.md` applies. */
 export interface WorkspaceResourceLimits {
   /** Workspace-wide cap on concurrently *running* agent runs. */
   maxParallel: number;
@@ -56,7 +59,12 @@ export interface WorkspaceResourceLimits {
   /** Resume a run stopped by a provider usage limit when that limit resets. Default ON. */
   autoResumeOnUsageLimit?: boolean;
   /** Start a task on another account when the one it NAMED is limited, rather than waiting.
-   *  Default OFF: overriding an explicit pick is a product decision, not a bug fix. */
+   *  **CORRECTED 2026-08-29 (`.ai/specs/2026-08-29-global-provider-toggle.md`): the actual default
+   *  has been ON since `.ai/specs/2026-08-23-never-block-a-task.md`** (`DEFAULT_LIMITS` below sets
+   *  `true`, and the `fallbackAcrossAccountsWhenLimited()` accessor is `?? true`) — see that
+   *  accessor's own doc comment for the reasoning. Original text, now describing only the state
+   *  before that spec shipped: ~~Default OFF: overriding an explicit pick is a product decision,
+   *  not a bug fix.~~ */
   fallbackAcrossAccountsWhenLimited?: boolean;
   /** Per-task process-tree memory ceiling in MiB; null = no limit. */
   memoryLimitMb: number | null;
@@ -68,6 +76,11 @@ export interface WorkspaceResourceLimits {
    * project has an override", i.e. every project inherits.
    */
   projectLimits?: ReadonlyMap<string, number>;
+  /** The global provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`), a top-level
+   *  `~/.cezar/config.json` key, NOT a `resources` key — carried in this bag because the run loop
+   *  needs the same synchronous, live-applied read `maxParallel`/`fallbackAcrossAccountsWhenLimited`
+   *  already get. Absent/`undefined` = Auto. */
+  runnerLock?: LockableRunner;
 }
 
 /** Realpath-normalize a root the same way the registry does
@@ -133,6 +146,20 @@ export interface SemaphoreParticipant {
    * Optional like `accountHolds`, and absent means "contributes nothing" rather than zero-for-all.
    */
   accountInflight?(): Record<string, number>;
+  /**
+   * The workspace `runnerLock` just CHANGED (D7a/D3b item 2,
+   * `.ai/specs/2026-08-29-global-provider-toggle.md`) — fired by `refresh()` only on an actual
+   * transition, and only BEFORE the sweep it then runs, so a memo naming a stale verdict about
+   * the OLD target is never read by that sweep. `RunManager`'s implementation drops
+   * `heldAtSpawn`/`heldNotified` for every queued run whose target the lock changes, the same
+   * action `retargetQueuedRun` already takes for the identical reason (a memo is a verdict about
+   * a specific account, and the lock write retargets every run it applies to).
+   *
+   * Optional exactly like `accountHolds`/`accountInflight`, so a stub participant or an older
+   * caller keeps working: an unimplemented hook does nothing, which is why declaring it here (a
+   * "no behaviour change" phase) and filling it in `RunManager` (a later phase) is safe to split.
+   */
+  onRunnerLockChanged?(): void;
 }
 
 const DEFAULT_LIMITS: WorkspaceResourceLimits = {
@@ -151,7 +178,7 @@ const DEFAULT_LIMITS: WorkspaceResourceLimits = {
  *  The registry `root` is already realpath-normalized (`registerProject`), so
  *  the keys match `normalizeRootSync`'s output at lookup time. */
 async function loadResourceLimits(): Promise<WorkspaceResourceLimits> {
-  const { resources, projects } = await loadWorkspaceConfig();
+  const { resources, projects, runnerLock } = await loadWorkspaceConfig();
   const projectLimits = new Map<string, number>();
   for (const project of projects) {
     if (typeof project.maxParallel === 'number') projectLimits.set(project.root, project.maxParallel);
@@ -168,6 +195,9 @@ async function loadResourceLimits(): Promise<WorkspaceResourceLimits> {
     fallbackAcrossAccountsWhenLimited: resources.fallbackAcrossAccountsWhenLimited,
     memoryLimitMb: resources.memoryLimitMb,
     projectLimits,
+    // Top-level key, not a `resources` key (D7) — `null`/absent both normalize to `undefined` here,
+    // so `refresh()`'s transition check never sees a difference between them.
+    runnerLock: runnerLock ?? undefined,
   };
 }
 
@@ -327,6 +357,14 @@ export class WorkspaceSemaphore {
     return this.limits.memoryLimitMb;
   }
 
+  /** The global provider lock, read SYNCHRONOUSLY from the in-memory snapshot
+   *  (`.ai/specs/2026-08-29-global-provider-toggle.md`, D7): a recovery-sweep predicate
+   *  (`run.ts:2956`) consults this on every tick and must never `readFile`. `undefined` = Auto,
+   *  identical to every other accessor's "absent" convention in this class. */
+  runnerLock(): LockableRunner | undefined {
+    return this.limits.runnerLock;
+  }
+
   /**
    * Every agent account held across the WHOLE workspace, by kind — the union of what each manager
    * reports (spec 2026-08-03-auto-resume-after-usage-limit). A `pump()` consults this before
@@ -433,10 +471,26 @@ export class WorkspaceSemaphore {
    * because the file was momentarily unreadable.
    */
   async refresh(): Promise<void> {
+    // D7a: `refresh()` fires from boot, a `maxParallel` PATCH and any workspace-config PUT — only
+    // one of which can ever carry a lock — so the `onRunnerLockChanged` fan-out below must be
+    // gated on an ACTUAL transition, never on "refresh happened", or it would drop every queued
+    // run's held-account memo on an unrelated settings save.
+    const previousRunnerLock = this.limits.runnerLock;
+    let loaded: WorkspaceResourceLimits;
     try {
-      this.limits = await this.load();
+      loaded = await this.load();
     } catch {
-      // keep the last good snapshot
+      // keep the last good snapshot — the lock did not change, so no hook fires below.
+      await this.release();
+      return;
+    }
+    this.limits = loaded;
+    // `null`/absent both normalize to `undefined` (`loadResourceLimits`), so clearing an
+    // already-clear lock is not a transition either.
+    if (loaded.runnerLock !== previousRunnerLock) {
+      // BEFORE `release()`: the memos must be stale-free before the pump that reads them runs,
+      // or the first sweep after a lock change still holds runs back on the old verdict.
+      for (const participant of this.participants) participant.onRunnerLockChanged?.();
     }
     // A raised cap is capacity appearing everywhere at once — same sweep.
     await this.release();

@@ -106,6 +106,7 @@ import {
   formatAgentRoute,
   runAccountKey,
   usageHoldAccountKey,
+  type LockableRunner,
 } from '@loki-labs/better-cezar-contract';
 import {
   resolvePoolForDispatch,
@@ -113,6 +114,7 @@ import {
   selectPoolAccount,
   type PoolChoice,
 } from '../workspace/agent-route-select.ts';
+import { applyRunnerLock } from './runner-lock.ts';
 import type { ProviderId } from '../core/provider-auth.ts';
 import type { AccountAuth, AccountTier } from '../workspace/account-viability.ts';
 import {
@@ -1298,6 +1300,7 @@ export class RunManager {
       oldestQueuedAt: () => this.oldestQueuedAt(),
       accountHolds: () => this.accountHolds(),
       accountInflight: () => this.accountInflight(),
+      onRunnerLockChanged: () => this.onRunnerLockChanged(),
     });
     // Memory guard (#memory-guard): the shared process-tree sampler already ticks ~every 2 s for
     // the runs table; piggyback on it to enforce the per-task memory ceiling.
@@ -2104,6 +2107,27 @@ export class RunManager {
       }
       this.noteHeld(runId, account);
     }
+  }
+
+  /**
+   * The workspace `runnerLock` just changed (D3b item 2, D7a,
+   * `.ai/specs/2026-08-29-global-provider-toggle.md`), fired by `WorkspaceSemaphore.refresh()`
+   * only on an actual transition and BEFORE the `release()`/pump sweep it then runs.
+   *
+   * **The lock write is a retarget of the whole queue**, exactly as `retargetQueuedRun` (below)
+   * retargets one run — and for the same reason its own docblock gives: `heldAtSpawn` is a memo
+   * about a specific account, and it is stale the instant the target changes, or it keeps a run
+   * out of the queue on the strength of a verdict about a DIFFERENT account. A lock write can move
+   * every queued run's target at once, so both maps are cleared wholesale here — the same
+   * bulk-clear shape `pump()` already uses when nothing is held anywhere (above). A false-positive
+   * clear (a run whose target happened not to move) costs at most one extra dequeue-and-resolve;
+   * leaving a stale memo in place would keep a locked run parked on a verdict about the provider it
+   * no longer targets, for as long as that other provider's hold lasts — the exact recovery case
+   * this feature exists to unblock ("everything is stuck on codex, flip it").
+   */
+  private onRunnerLockChanged(): void {
+    this.heldAtSpawn.clear();
+    this.heldNotified.clear();
   }
 
   /**

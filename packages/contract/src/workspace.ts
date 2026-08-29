@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { type Runner, runnerSchema } from './health.ts';
+import { type Runner, runnerSchema, lockableRunnerSchema } from './health.ts';
 
 /**
  * The workspace + settings families: `~/.cezar/config.json`'s settings slice, both GUI-pref bags
@@ -82,6 +82,11 @@ export const workspaceConfigResponseSchema = z.object({
     reviewGate: z.boolean().nullable(),
     stepBudget: z.number().nullable(),
   }),
+  /** The global provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`). `null` = Auto,
+   *  which is byte-for-byte the behaviour that predates this key. ALWAYS present on the wire,
+   *  `workspaceConfigBody` materializes it, with the tri-state in the value, matching how
+   *  `projectDefaults` reports absence. */
+  runnerLock: lockableRunnerSchema.nullable(),
 });
 export type WorkspaceConfigResponse = z.infer<typeof workspaceConfigResponseSchema>;
 
@@ -138,6 +143,9 @@ export const setWorkspaceConfigInputSchema = z.object({
       worktreeRetentionDefault: z.number().int().min(0).max(1000).optional(),
     })
     .optional(),
+  /** `null` CLEARS the lock back to Auto, the one thing a bare absent key cannot say in a partial
+   *  patch, same convention as `agentDefaults.runner` and `projectDefaults`. */
+  runnerLock: lockableRunnerSchema.nullable().optional(),
 });
 export type SetWorkspaceConfigInput = z.infer<typeof setWorkspaceConfigInputSchema>;
 
