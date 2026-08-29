@@ -161,6 +161,8 @@
 
 ## ✨ Added
 
+- 🧵 **`input-to-tasks`, the workflow a workspace run uses**: two or three steps: gather context
+  across the whole workspace, file the tasks it implies, and retain dispatch only when selected. No step has
 - 🗂 **The Filed board splits into Active and Backlog, sorted and paged by the server** (spec
   `.ai/specs/2026-08-25-split-active-backlog-tables.md`). `/tasks` used to render one Filed table
   of every filed todo, ordered and paged in the browser, with in-flight work interleaved through
@@ -206,9 +208,6 @@
   turns it off, and the route then answers `202 {accepted: 0}` without creating so much as the
   directory.
 
-
-- 🧵 **`input-to-tasks`, the workflow a workspace run uses** — three steps: gather context
-  across the whole workspace, file the tasks it implies, and (optionally) start them. No step has
   `Edit` or `Write`, so "it does not touch your files" is structural rather than a request in a
   prompt.
 - ▶️ **`cezar todo start <id> [--project <id|path>] [--json]`** — marks an already-filed todo
@@ -217,6 +216,8 @@
 - ☑️ **`autoStart` on `POST /api/v1/workspace/runs`** (optional, default `false`) and its
   **Start filed tasks** chip in the composer. Off means the key is absent, so the default
   submission is byte-identical to what an older cockpit sends.
+- 🔗 **Workspace run receipts link every filed todo**: each run freezes its dispatch choice,
+  records the project and todo id, and links directly to that todo on the global Filed board.
 
 - 🎚 **cezar classifies a task into a row of that table when nobody pinned one** (spec
   `.ai/specs/2026-08-24-auto-classify-task-model.md`).

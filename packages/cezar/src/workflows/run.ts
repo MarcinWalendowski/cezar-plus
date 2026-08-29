@@ -128,9 +128,10 @@ import {
   applyWorkspaceWorktrees,
   discardWorkspaceWorktrees,
 } from '../workspace/workspace-worktrees.ts';
-import type { PendingApproval, PendingHandoff, TestAttestation, TestAttestationProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
+import type { FiledTodo, PendingApproval, PendingHandoff, TestAttestation, TestAttestationProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
+import { WorkspaceTodoIndex, type WorkspaceTodoEntry } from '../workspace/todo-index.ts';
 import { UiEventSink } from '../runs/ui-event-sink.ts';
 import type { UiEvent } from '../core/ui-events.ts';
 import {
@@ -139,9 +140,13 @@ import {
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_WORKFLOW,
   DEFAULT_WORKFLOW_NAME,
+  INPUT_TO_TASKS_DISPATCH_STEP,
+  inputToTasksPlan,
   parseReviewVerdict,
   resolveStepModel,
   stepKind,
+  isBuiltInInputToTasksRun,
+  isBuiltInInputToTasks,
   type ReviewVerdict,
   type StepModelChoice,
   type TaskClass,
@@ -196,6 +201,22 @@ export async function resolveTodoWorkflow(
   }
   const { workflows } = await loadWorkflows(repoRoot);
   return workflows.find((w) => w.name === DEFAULT_WORKFLOW_NAME) ?? DEFAULT_WORKFLOW;
+}
+
+/** Select and order the todos belonging to one input-to-tasks run. */
+export function filedTodoEntriesForRun(runId: string, entries: readonly WorkspaceTodoEntry[]): FiledTodo[] {
+  return entries
+    .filter((entry) => entry.todo.author?.parentTaskId === runId)
+    .map(({ project, todo }) => ({
+      project,
+      todoId: todo.id,
+      summary: todo.summary.length > 500 ? `${todo.summary.slice(0, 497)}…` : todo.summary,
+      ...(todo.autostart === true ? { autostart: true as const } : {}),
+      ...(todo.startedTaskId !== undefined ? { startedTaskId: todo.startedTaskId } : {}),
+      ts: todo.ts ?? '',
+    }))
+    .sort((a, b) => a.ts.localeCompare(b.ts) || a.todoId.localeCompare(b.todoId))
+    .map(({ ts: _ts, ...item }) => item);
 }
 
 async function configuredModelProvider(
@@ -1769,6 +1790,15 @@ export class RunManager {
       requestedRunner: input.runner,
       stepCount: workflow.steps.length,
     });
+    if (isBuiltInInputToTasks(workflow) && (input.workspaceProjects?.length ?? 0) > 0) {
+      this.store.appendEvent(run.id, {
+        type: 'metric',
+        name: 'run.input_to_tasks.planned',
+        runId: run.id,
+        dispatchMode: input.autoStart === true ? 'filed-and-dispatched' : 'filed-only',
+        stepCount: workflow.steps.length,
+      });
+    }
     // Initial pasted images must be visible while the run is still queued (#612),
     // and must survive a restart before a slot opens. Persist them before the job
     // enters `pendingJobs`; `hydrateQueuedInput` reconstructs their content blocks
@@ -2978,7 +3008,12 @@ export class RunManager {
     const def = run.workflowDef;
     if (def) return def;
     const { workflows } = await loadWorkflows(this.repoRoot);
-    return workflows.find((w) => w.name === run.workflow) ?? null;
+    const catalog = workflows.find((w) => w.name === run.workflow);
+    if (!catalog) return null;
+    if (!isBuiltInInputToTasks(catalog)) return catalog;
+    const shaped = inputToTasksPlan(catalog, run.autoStart === true);
+    this.store.updateRun(run.id, { workflowDef: shaped });
+    return shaped;
   }
 
   /**
@@ -6281,6 +6316,7 @@ export class RunManager {
           if (!capture.ok) { runError = capture.runError; break; }
         }
         this.finishStep(runId, step.id, 'done', undefined, emit);
+        if (step.id === 'file') await this.collectFiledTodos(runId);
         i++;
         continue;
       }
@@ -7205,11 +7241,17 @@ export class RunManager {
       }
     }
 
+    const runForDispatch = this.store.getRun(runId);
+    if (step.id === INPUT_TO_TASKS_DISPATCH_STEP && runForDispatch && isBuiltInInputToTasksRun(runForDispatch)) {
+      await this.collectFiledTodos(runId);
+    }
     // Read from the RECORD, not from `input`: a resume rebuilds `input`, and `autoStart` is a
     // decision taken once at creation that must survive every later restart unchanged.
-    const autoStart = this.store.getRun(runId)?.autoStart === true;
+    const currentRun = this.store.getRun(runId);
+    const autoStart = currentRun?.autoStart === true;
+    const filedTodos = currentRun?.filedTodos?.items ?? [];
     let userPrompt =
-      resumeFrom?.prompt ?? applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart);
+      resumeFrom?.prompt ?? applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart, formatFiledTodos(filedTodos));
     if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
     if (checkFailure) {
       userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
@@ -7620,7 +7662,7 @@ export class RunManager {
         // `userPrompt` must be rebuilt from the step's own template — not just the session id —
         // or the fresh session runs contextless. Re-run exactly the three lines that built it the
         // first time, with `resumeFrom` treated as absent.
-        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart);
+        userPrompt = applyTemplate(step.prompt ?? '{{task}}', input.task, autoStart, formatFiledTodos(this.store.getRun(runId)?.filedTodos?.items ?? []));
         if (chainNote) userPrompt = `${chainNote}\n\n---\n\n${userPrompt}`;
         if (checkFailure) {
           userPrompt += `\n\nFeedback on the previous attempt — read it and act on it:\n\n${checkFailure}`;
@@ -8190,6 +8232,20 @@ export class RunManager {
     this.store.updateRun(runId, { workspaceWorktrees: kept.length > 0 ? kept : undefined });
   }
 
+  /** Snapshot the todos this run filed, preserving project identity and start marks. */
+  private async collectFiledTodos(runId: string): Promise<FiledTodo[]> {
+    const run = this.store.getRun(runId);
+    if (!run || !isBuiltInInputToTasksRun(run)) return [];
+    const listed = await new WorkspaceTodoIndex({
+      listProjects: async () => run.workspaceProjects ?? [],
+    }).list();
+    const filedTodos = filedTodoEntriesForRun(runId, listed.todos);
+    this.store.updateRun(runId, {
+      filedTodos: { items: filedTodos, at: new Date().toISOString() },
+    });
+    return filedTodos;
+  }
+
   private async settleSuccess(runId: string, opts: { pendingAsk?: boolean } = {}): Promise<void> {
     // Invariant I1 (spec 2026-08-20-chain-integrity-restart-and-continuation): only the CHAIN
     // finishes the run. `settleSuccess` has three callers and only `execute()`'s success path can
@@ -8221,6 +8277,23 @@ export class RunManager {
     this.chainReentries.delete(runId);
     await this.applyWorkspaceRun(runId);
     const run = this.store.getRun(runId);
+    if (run && isBuiltInInputToTasksRun(run)) {
+      const items = await this.collectFiledTodos(runId);
+      const completed = this.store.readEvents(runId).some(
+        (event) => event.type === 'metric' && event.name === 'run.input_to_tasks.completed',
+      );
+      if (!completed) {
+        this.store.appendEvent(runId, {
+          type: 'metric',
+          name: 'run.input_to_tasks.completed',
+          runId,
+          dispatchMode: run.autoStart === true ? 'filed-and-dispatched' : 'filed-only',
+          todoCount: items.length,
+          autostartMarked: items.filter((item) => item.autostart === true || item.startedTaskId !== undefined).length,
+          projectCount: new Set(items.map((item) => item.project)).size,
+        });
+      }
+    }
     let review = false;
     if (run?.worktreePath && existsSync(run.worktreePath)) {
       const diff = await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD');
@@ -8819,17 +8892,24 @@ function findLastAgentStepIndex(workflow: WorkflowDef): number {
  * Prompt tokens. `{{task}}` is the original and the only one a user-written workflow file is
  * documented to use (`types.ts` header).
  *
- * `{{autoStart}}` was added 2026-08-25 for `input-to-tasks`'s optional `dispatch` step
- * (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`): that step has to know whether the run
- * was created with auto-start, and it is a per-RUN fact, not something the step can read from the
- * repo. It renders as the literal `true`/`false` so the prompt can compare against it in words.
+ * `{{autoStart}}` and `{{filedTodos}}` were added 2026-08-25 for the built-in `input-to-tasks`
+ * dispatch step (`.ai/specs/2026-08-25-composer-dispatch-mode.md`). Both are per-run facts read
+ * from the persisted record, so a restart gives the agent the same decision and ledger.
  *
  * Unknown tokens are LEFT ALONE, as they always were — `replaceAll` only touches what it matches.
  * That is deliberate: a workflow file containing `{{foo}}` gets it through to the agent verbatim
  * rather than an empty string, so a typo in a prompt is visible rather than silently blanked.
  */
-function applyTemplate(template: string, task: string, autoStart = false): string {
-  return template.replaceAll('{{task}}', task).replaceAll('{{autoStart}}', String(autoStart));
+export function formatFiledTodos(items: readonly FiledTodo[]): string {
+  if (items.length === 0) return '(none)';
+  return items.map((item) => `- ${item.todoId}  --project ${item.project}  ${item.summary}`).join('\n');
+}
+
+function applyTemplate(template: string, task: string, autoStart = false, filedTodos = '(none)'): string {
+  return template
+    .replaceAll('{{task}}', task)
+    .replaceAll('{{autoStart}}', String(autoStart))
+    .replaceAll('{{filedTodos}}', filedTodos);
 }
 
 /**

@@ -90,6 +90,31 @@ describe('RunStore — directional usage persistence', () => {
     store.updateStep(run.id, 'task', { usageInvocationsObserved: 2, usageTurnsStarted: 2 });
     expect(store.getRun(run.id)?.inputTokens).toBeUndefined();
   });
+
+  it('round-trips the filed todo ledger and repairs a torn event separator', () => {
+    const store = RunStore.open(dataDir);
+    const filedTodos = {
+      at: '2026-08-29T00:00:00.000Z',
+      items: [{ project: 'web', todoId: 'todo-1', summary: 'Update the page', autostart: true as const }],
+    };
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'route work',
+      workflow: 'input-to-tasks',
+      task: 'route work',
+      autoStart: true,
+      filedTodos,
+      steps: [{ id: 'file', name: 'File', kind: 'agent' }],
+    });
+    store.appendEvent(run.id, { type: 'note', message: 'first' });
+    const eventPath = join(dataDir, 'runs', `${run.id}.ndjson`);
+    writeFileSync(eventPath, readFileSync(eventPath, 'utf8').trimEnd(), 'utf8');
+    store.appendEvent(run.id, { type: 'note', message: 'second' });
+    store.flush();
+
+    expect(RunStore.open(dataDir).getRun(run.id)).toMatchObject({ autoStart: true, filedTodos });
+    expect(RunStore.open(dataDir).readEvents(run.id).map((event) => event.message)).toEqual(['first', 'second']);
+  });
 });
 
 describe('RunStore — context occupancy roll-up (spec 2026-08-19-context-usage-in-tasks-table)', () => {

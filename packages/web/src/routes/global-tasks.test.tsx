@@ -2270,6 +2270,22 @@ describe('the Filed section', () => {
     })
   })
 
+  it('opens a Filed detail requested by the global deep link', async () => {
+    stubFetch({ todos: TODOS })
+    renderPage(createQueryClient(), '/tasks?fdetail=api%3Atodo-1')
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('Add a rate limit to /checkout')).toBeTruthy()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /close/i }))
+    await waitFor(() => expect(search()).not.toContain('fdetail'))
+  })
+
+  it('shows a visible state for a Filed detail that no longer exists', async () => {
+    stubFetch({ todos: TODOS })
+    renderPage(createQueryClient(), '/tasks?fdetail=api%3Amissing')
+    expect(await screen.findByText('That task is no longer on this board.')).toBeTruthy()
+  })
+
 })
 
 // ---- "which worker is processing this?" (2026-08-22-multi-node-cezar-cluster.md) --------------
