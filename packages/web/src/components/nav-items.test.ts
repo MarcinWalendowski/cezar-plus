@@ -13,6 +13,9 @@ describe('activeNavPath', () => {
     ['/tasks/abc123/changes', '/'],
     ['/tasks/abc123/files', '/'],
     ['/compare/grp-1', '/'],
+    // The filed-task detail page (`.ai/specs/2026-08-29-filed-task-detail-page.md`) is a Tasks
+    // surface too, same rule.
+    ['/todos/abc123', '/'],
 
     ['/inbox', '/inbox'],
     ['/git', '/git'],

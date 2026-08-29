@@ -1,5 +1,11 @@
 # Filed task detail page
 
+- **SUPERSEDED 2026-08-29 in full by `.ai/specs/2026-08-29-filed-task-detail-page.md`**, which
+  reversed this document's scope decision (BROAD: every filed row navigates, `FiledDetailDialog`
+  deleted, not just the Archived view) and carried its route shape, component-extraction plan and
+  back-link mechanics through to a landed implementation (`d15e26f9`, merged `main` via PR #13,
+  `5c5de5eb`, 2026-08-29T16:38:24Z). Read the 2026-08-29 spec for the current design and status;
+  the rest of this document is kept unchanged below as the record of what Phase 4 alone shipped.
 - **Status:** Partial. **Corrected 2026-08-26 (same day):** this read "Specified, not
   implemented" until the implement step ran; that is now stale in the other direction too.
   Only Phase 4 (the analytics backend companion) shipped, in `abe83105` (merged to `origin/main`
