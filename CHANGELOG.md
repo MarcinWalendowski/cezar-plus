@@ -1,5 +1,38 @@
 # Unreleased
 
+## Added
+
+- ⚡ **`spec-to-deploy` reworks a spec in the session that wrote it, and reviews it twice** (spec
+  `.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`). Measured on run `872b396a`: the
+  `review-spec` step took **14:02** — of which tool execution was 33.5s — and the `spec` rework it
+  sent back took **11:39 and $5.92**, more than the 9:24/$3.74 spec it was reworking, because a
+  `revise` verdict restarted the writer in a **cold session** that re-derived 373k tokens of file
+  dumps still sitting in the window the engine had just thrown away.
+
+  - **New optional workflow-step key `onFail.resume`.** When set, a loop-back re-enters the target
+    step's own session and hands it the review as feedback instead of re-templating its opening
+    prompt. Absent = today's cold restart, so no workflow already on disk changes behaviour. Four
+    guards (target must be an agent step, must have recorded a session, must not have been moved
+    off its runner by a quota downgrade, and a Claude transcript must exist) each fall back to a
+    cold session and name themselves on the new `run.step.looped_back` metric — an optimization
+    that can fail a run is not one.
+  - **New step `review-spec-local`,** between `spec` and `review-spec`: the same read-only review,
+    on the same runner and model as the writer, running before the cross-provider pass. Cheap
+    defects die in a cheap loop, so the expensive reviewer sees a spec that already survived a
+    round. One warm revision of its own (`max: 1`); the human approval gate stays on exactly one
+    step.
+  - **`review-spec`'s effort drops `xhigh` → `high`,** and it is now told to check the brief and
+    the first review rather than re-sweep the record it had already been swept twice. Regressing
+    per-turn latency on output tokens over that step's 20 turns gives `4.8s + 24.5s per 1k output
+    tokens` (R² = 0.947) — 89% of its wall clock was generation, and 21,284 of its 30,390 output
+    tokens were reasoning. Total judgement applied to a spec goes **up** (two reviews, one of them
+    opus); the wall clock of the slow step goes down.
+
+  Nothing about the Claude side of the token table changed, and one thing it shows is worth
+  naming: `spec` reports **no** reasoning tokens because Anthropic's `result.usage` carries no
+  reasoning split — thinking is billed inside `output_tokens` — not because opus did not think.
+  The same run recorded `blockCounts.thinkingWithheld` of 12, 21, 23 and 29 on those steps.
+
 ## ⚠️ Breaking
 
 - 🧭 **A workspace-scoped run routes work instead of doing it** (spec
