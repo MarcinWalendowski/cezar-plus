@@ -858,6 +858,102 @@ function continuedStepName(sessionStepName: string): string {
  * not. The instruction that matters is "land what you have", because the same bound is armed
  * again for the retry and a second stop ends the run.
  */
+/**
+ * Why a loop-back did or did not re-enter the target step's own session — the `reason` field of
+ * the `run.step.looped_back` metric (`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`).
+ *
+ * `resumed` is the only success value; every other member names a guard that fired and sent the
+ * step back COLD. They are distinguished rather than collapsed into one falsy value because they
+ * call for different actions: `disabled` is a workflow that never asked, `no-session` is a target
+ * that never got far enough to have one, `backend-changed` is a quota downgrade having moved the
+ * step off its pinned runner, and `not-agent` is a workflow pointing `onFail.retry` at a check
+ * step. Only the middle two are ever surprising.
+ */
+export type LoopBackResumeReason =
+  | 'resumed'
+  | 'disabled'
+  | 'not-agent'
+  | 'no-session'
+  | 'backend-changed';
+
+/** The handle `runAgentStep` consumes as `resumeFrom`, minus the fields only a restart carries. */
+export interface LoopBackResumeHandle {
+  sessionId: string;
+  profileId?: string;
+  prompt: string;
+  verifyTranscript: true;
+}
+
+/**
+ * Should this loop-back re-enter the target step's OWN session, and if not, why not
+ * (`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`, D1)?
+ *
+ * Pure and exported so the guards can be tested one at a time. Inline in `loopBackTo` they were
+ * reachable only by driving a whole chain to a `revise` verdict per case, which is the shape that
+ * gets a branch written and never exercised — and a guard that never fires is indistinguishable
+ * from a guard that is wrong.
+ *
+ * Every branch except `resumed` returns NO handle, which means a cold session: this is an
+ * optimization, and an optimization that can fail a run is not one.
+ */
+export function loopBackResumeDecision(args: {
+  /** `step.onFail?.resume === true` — the workflow asked for this at all. */
+  enabled: boolean;
+  target: WorkflowStepDef | undefined;
+  /** The target's row in the run record, read BEFORE the loop-back resets it to `pending`. */
+  targetRecord: { sessionId?: string; profileId?: string; backend?: RunnerId } | undefined;
+  /** The run's own backend, i.e. what an unpinned step runs on. */
+  taskBackend: RunnerId;
+}): { reason: LoopBackResumeReason; resume?: LoopBackResumeHandle } {
+  const { enabled, target, targetRecord, taskBackend } = args;
+  if (!enabled || !target) return { reason: 'disabled' };
+  if (stepKind(target) !== 'agent') return { reason: 'not-agent' };
+  if (!targetRecord?.sessionId) return { reason: 'no-session' };
+  // Where the target WOULD run now, against where it actually ran. They differ when a pinned
+  // runner was downgraded for quota (`downgradePinnedRunner`, `2026-08-23-never-block-a-task.md`),
+  // and handing one provider's conversation id to another is not a resume, it is an error the
+  // reactive fallback would then have to clean up.
+  //
+  // `?? would` on the recorded side deliberately: `runAgentStep` stamps `backend` before it
+  // spawns, so a record with a session but no backend is a hand-edited or pre-#547 file rather
+  // than a real mismatch — widen the READ, per this repo's own precedent, instead of refusing it.
+  const would = target.runner ?? taskBackend;
+  if ((targetRecord.backend ?? would) !== would) return { reason: 'backend-changed' };
+  return {
+    reason: 'resumed',
+    resume: {
+      sessionId: targetRecord.sessionId,
+      // `sessionId` and `profileId` are a PAIR — see `chainResumeAt`.
+      ...(targetRecord.profileId ? { profileId: targetRecord.profileId } : {}),
+      prompt: loopBackContinuationPrompt(target.name ?? target.id),
+      // A Claude session whose transcript never landed must not be handed to `--resume`.
+      verifyTranscript: true,
+    },
+  };
+}
+
+/**
+ * The prompt a RESUMED loop-back opens with (`.ai/specs/2026-08-29-step-resume-and-two-stage-
+ * review.md`, D1). It replaces the step's templated prompt — `runAgentStep` reads
+ * `resumeFrom?.prompt ?? applyTemplate(...)` — and the review itself still arrives right after
+ * it through `checkFailure`, unchanged.
+ *
+ * It has one job beyond politeness: a resumed session already believes it FINISHED this step, and
+ * re-sending the original "write ONE spec file" prompt to a window that already contains the
+ * written spec is how a resumed step re-emits a file it should have been editing. So the text
+ * says what changed (a reviewer objected) and what to do with it (apply the list to what is
+ * already on disk), and never restates the step's original instructions.
+ */
+export function loopBackContinuationPrompt(stepName: string): string {
+  return (
+    `A reviewer has asked for changes to your work on "${stepName}". This is the SAME session you ` +
+    'just finished it in — everything you read and wrote is still here, and the files are still ' +
+    'on disk, so do not start over and do not re-read what you already have. Apply the change ' +
+    'list below to what exists, leave everything it does not name alone, and end the turn the ' +
+    'same way you ended it last time.'
+  );
+}
+
 export function stoppedContinuationPrompt(_reason: AgentStopReason): string {
   return (
     'Your previous turn did not end on its own — cezar stopped the session because it had ' +
@@ -5664,6 +5760,15 @@ export class RunManager {
     const canLoopBack = (from: WorkflowStepDef): boolean =>
       Boolean(from.onFail) && (retriesUsed.get(from.id) ?? 0) < (from.onFail?.max ?? 0);
 
+    /** The resume handle a warm loop-back (`onFail.resume`) hands to the step it re-runs.
+     *  Declared HERE rather than beside `stopResume` because `loopBackTo` below writes it, and a
+     *  closure assigning an outer binding declared further down reads as a hazard even where it
+     *  is legal. Consumed exactly once, by the next step the loop runs — same one-shot contract
+     *  as `stopResume`, which is why they are cleared together. */
+    let loopBackResume:
+      | { sessionId: string; profileId?: string; prompt: string; verifyTranscript?: true }
+      | undefined;
+
     /**
      * Send the chain BACK to `step.onFail.retry`, carrying `feedback` into that step's prompt.
      *
@@ -5677,10 +5782,49 @@ export class RunManager {
      * Returns the index to continue from. Callers check `canLoopBack` first.
      */
     const loopBackTo = (from: number, step: WorkflowStepDef, feedback: string, message: string): number => {
-      retriesUsed.set(step.id, (retriesUsed.get(step.id) ?? 0) + 1);
+      const attempt = (retriesUsed.get(step.id) ?? 0) + 1;
+      retriesUsed.set(step.id, attempt);
       checkFailure = feedback;
       const retryIdx = workflow.steps.findIndex((candidate) => candidate.id === step.onFail?.retry);
       emit({ type: 'note', stepId: step.id, message });
+      // Read the target's record BEFORE the reset below: `updateStep(... 'pending')` is what the
+      // rail needs, and it runs over a slice that INCLUDES the target, so reading after it would
+      // still see `sessionId` today but only because that particular write happens not to clear
+      // it. Reading first makes the ordering irrelevant instead of load-bearing.
+      const target = retryIdx >= 0 ? (workflow.steps[retryIdx] as WorkflowStepDef | undefined) : undefined;
+      const targetRecord = target
+        ? this.store.getRun(runId)?.steps.find((s) => s.id === target.id)
+        : undefined;
+      // ---- warm loop-back (spec 2026-08-29, D1) -------------------------------------------
+      // Every branch falls back to a COLD session and names its reason. A `resume: true` that
+      // silently never fires is the exact shape this feature exists to remove, so the reason is a
+      // metric field rather than a comment.
+      const decision = loopBackResumeDecision({
+        enabled: step.onFail?.resume === true,
+        target,
+        targetRecord,
+        taskBackend,
+      });
+      const resumeReason = decision.reason;
+      if (decision.resume) {
+        loopBackResume = decision.resume;
+        emit({
+          type: 'note',
+          stepId: step.id,
+          message: `resuming "${target?.id}" in its own session — the rework keeps what it already read`,
+        });
+      }
+      emit({
+        type: 'metric',
+        stepId: step.id,
+        name: 'run.step.looped_back',
+        runId,
+        workflow: workflow.name,
+        target: step.onFail?.retry,
+        attempt,
+        resumed: resumeReason === 'resumed',
+        reason: resumeReason,
+      });
       for (const between of workflow.steps.slice(retryIdx, from + 1)) {
         this.store.updateStep(runId, between.id, { status: 'pending' });
       }
@@ -5777,8 +5921,12 @@ export class RunManager {
         const interactive = i === lastAgentIdx && i === workflow.steps.length - 1;
         // A stop re-entry's handle wins: it is for THIS iteration of THIS step, whereas
         // `resumeFrom` belongs to the restart that opened the loop and is spent on `resumeIdx`.
-        const stepResume = stopResume ?? (i === resumeIdx ? resumeFrom : undefined);
+        // Precedence: a STOP re-entry's handle is for this exact iteration of this exact step and
+        // wins; a loop-back handle belongs to the step the loop-back targeted, which is the step
+        // running now; `resumeFrom` belongs to the restart that opened the loop.
+        const stepResume = stopResume ?? loopBackResume ?? (i === resumeIdx ? resumeFrom : undefined);
         stopResume = undefined;
+        loopBackResume = undefined;
         resumeFrom = undefined;
         state.stepStopped = undefined;
         state.brokerNeverAnswered = undefined;

@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
-import { type WorkspaceTodosResponse } from '@loki-labs/better-cezar-contract';
+import { workspaceTodosQuerySchema, type WorkspaceTodosResponse } from '@loki-labs/better-cezar-contract';
 import type { ProjectApiEnv } from './server.ts';
+import { queryZodValidator } from './validators.ts';
 import { WorkspaceTodoIndex, type WorkspaceTodoProjectSource } from '../workspace/todo-index.ts';
 import { listProjects } from '../workspace/projects.ts';
 
@@ -26,6 +27,18 @@ import { listProjects } from '../workspace/projects.ts';
  *
  * Workspace-level and single-mount — never mirrored under `/api/v1/p/:projectId`
  * (`BACKWARD_COMPATIBILITY.md` §2, the same rule every sibling workspace family follows).
+ *
+ * **Optional query, added 2026-08-25** (`.ai/specs/2026-08-25-split-active-backlog-tables.md`):
+ * `partition`/`sort`/`dir`/`limit`/`view`/`status`/`priority`/`q` move the Filed board's ordering
+ * and paging off the browser. Every key is optional and **a request carrying none of them answers
+ * exactly what it answered before they existed** — same `todos`, same `projects`, and neither of
+ * the two new response keys. That is not a courtesy: this payload is §2-protected and the
+ * composer's own board reads it.
+ *
+ * Validation is `queryZodValidator` middleware rather than parsing in the handler, so the query
+ * shape reaches the ROUTE TYPE and `hc` refuses a `?bogus=1` at compile time (see
+ * `./validators.ts` on why parsing inside a handler is invisible to Hono). Unknown keys are
+ * stripped by the zod object rather than rejected, so no existing caller newly fails.
  */
 
 export interface WorkspaceTodosRouteDeps {
@@ -52,9 +65,13 @@ function defaultTodoIndex(): WorkspaceTodoIndex {
 export function createWorkspaceTodosRoutes(deps: WorkspaceTodosRouteDeps = {}) {
   const index = deps.todoIndex ?? defaultTodoIndex();
 
-  return new Hono<ProjectApiEnv>().get('/workspace/todos', async (c) => {
-    const result = await index.list();
-    const body: WorkspaceTodosResponse = { ...result };
-    return c.json(body);
-  });
+  return new Hono<ProjectApiEnv>().get(
+    '/workspace/todos',
+    queryZodValidator(workspaceTodosQuerySchema),
+    async (c) => {
+      const result = await index.list(c.req.valid('query'));
+      const body: WorkspaceTodosResponse = { ...result };
+      return c.json(body);
+    },
+  );
 }

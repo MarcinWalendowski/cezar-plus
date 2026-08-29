@@ -236,7 +236,6 @@ describe('cold-project reopen discovery', () => {
     const listeners = new Set<(ctx: ProjectContext) => void>();
     let targetStore: RunStore | undefined;
     let targetContext: ProjectContext | undefined;
-    let stopTargetWatch: (() => void) | undefined;
     let builds = 0;
     let loadCalls = 0;
     let resident = false;
@@ -272,8 +271,10 @@ describe('cold-project reopen discovery', () => {
         } as unknown as ProjectContext;
         targetContext = built;
         resident = true;
+        // Deliberately does NOT arm the watcher itself, see the twin comment in
+        // `todo-autostart.test.ts`. The only path from a woken context to a live
+        // `reopen-requests.json` watch must be `createApp`'s `contexts.onContextBuilt(...)`.
         for (const listener of listeners) listener(built);
-        stopTargetWatch = watchReopenRequests({ dataDir: targetDataDir, manager });
         return built;
       },
     } as unknown as ProjectContexts;
@@ -325,7 +326,9 @@ describe('cold-project reopen discovery', () => {
       expect(builds).toBe(1);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      stopTargetWatch?.();
+      // Same teardown-by-resubscribe as the autostart twin: one subscription per dataDir, so
+      // re-subscribing stops what `onContextBuilt` armed and stopping the replacement leaves none.
+      if (targetContext) watchReopenRequests({ dataDir: targetDataDir, manager })();
       stopBootWatch();
       bootStore.flush();
       targetStore?.flush();

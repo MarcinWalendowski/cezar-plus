@@ -9,7 +9,7 @@ import { CenteredState } from '@/components/centered-state'
 import { FiledTaskActions, FiledTaskDetailContent } from '@/components/filed-task-detail'
 import { useTaskNodeRoster } from '@/components/task-node-cell'
 import { filedStatus } from '@/lib/filed-tasks'
-import { trackEvent } from '@/lib/analytics'
+import { track } from '@/lib/analytics'
 
 import { FiledTaskDetailLoading } from './filed-task-detail-loading'
 
@@ -94,7 +94,7 @@ export function FiledTaskDetailRoute() {
     const key = `${projectId}:${todoId}`
     if (emitted.current === key) return
     emitted.current = key
-    trackEvent('todo.detail_opened', {
+    track('todo.detail_opened', {
       project: projectId,
       todo: todoId,
       status: filedStatus(foundEntry),

@@ -28,9 +28,11 @@ import { findForeignWorkspaceOwner, loadForeignWorkspaceRunSources } from './run
 import { runRunStatsCommand } from './runs/stats-cli.ts';
 import { runRunsCommand } from './runs/reopen-cli.ts';
 import { RunManager } from './workflows/run.ts';
+import { recheckManualDeployParksEverywhere } from './workflows/recheck-parks-workspace.ts';
 import { loadWorkflows } from './workflows/load.ts';
 import { DEFAULT_WORKFLOW_NAME } from './workflows/types.ts';
 import { startServer, WorkspaceEventBus, type SessionResolver } from './server/server.ts';
+import type { ProjectContexts } from './server/project-context.ts';
 import { runAuthBootGate } from './auth-boot-gate.ts';
 import { buildLocalModeRoutes } from './local-mode-boot.ts';
 import type { Hono } from 'hono';
@@ -43,7 +45,7 @@ import { checkForUpdate } from './update-check.ts';
 import { ensureBootRepo, holdsOnlyRuntimeState } from './workspace/boot-repo.ts';
 import { loadWorkspaceConfig } from './workspace/config.ts';
 import { runMigrations } from './workspace/migrations.ts';
-import { shouldRegisterProject } from './workspace/projects.ts';
+import { listProjects, shouldRegisterProject } from './workspace/projects.ts';
 import { runProjectsCommand } from './workspace/projects-cli.ts';
 import { runBackupCommand } from './backup/cli.ts';
 import { runKnowledgeCommand } from './knowledge/cli.ts';
@@ -881,9 +883,16 @@ async function serveCommand(
     );
   }
 
+  // The project-context resolver, captured from `startServer` below. It is the only way to reach
+  // a NON-boot project's manager, which the manual-deploy sweep at the end of this function needs:
+  // production's boot project is `workspace` and every cezar deploy park lives in `cezar`.
+  let sharedContexts: ProjectContexts | undefined;
   startServer({
     repoRoot,
     listenFd,
+    onContextsReady: (contexts) => {
+      sharedContexts = contexts;
+    },
     // P3: the same controller the signal handlers below drain. Without it the server counts
     // nothing and registers nothing, and the drain has no work to do — which is exactly the state
     // this wiring was missing.
@@ -926,7 +935,18 @@ async function serveCommand(
   void waitForHealth(`${url}/api/v1/ready`, 30_000)
     .then(async (ready) => {
       if (!ready) return;
-      const requeued = await manager.recheckManualDeployParks();
+      // EVERY project, not just the boot one. Calling `manager.recheckManualDeployParks()` here
+      // swept the boot project alone, and on prod-host the boot project is `workspace` while
+      // every deploy park is in the separately-registered `cezar` project — so the sweep ran, found
+      // nothing, and two runs stayed parked across an activation that had satisfied both of them
+      // (measured 2026-08-29; their own probes exited 0 by hand). A project is opened only when a
+      // cheap read of its `runs.json` shows a park, so this keeps the lazy-watcher cost at zero.
+      const requeued = await recheckManualDeployParksEverywhere({
+        bootManager: manager,
+        bootRoot: repoRoot,
+        ...(sharedContexts ? { contexts: sharedContexts } : {}),
+        listProjects,
+      });
       if (requeued > 0) console.log(`  rechecked ${requeued} run(s) parked on a manual deploy\n`);
     })
     .catch(() => undefined);

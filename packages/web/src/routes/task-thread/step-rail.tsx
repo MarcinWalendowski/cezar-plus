@@ -12,10 +12,11 @@ import type { Runner, StepState, StepStatus } from '@loki-labs/better-cezar-api-
 import { LiveDuration } from '@/components/live-duration'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { formatDuration } from '@/lib/format'
+import { track } from '@/lib/analytics'
 import { modelConflictsWithRunner } from '@/routes/new-task-form'
 import { cn } from '@/lib/utils'
 
-import { ACTIVE_STEP_STATUSES, TERMINAL_STEP_STATUSES, stepElapsed } from './step-timing'
+import { ACTIVE_STEP_STATUSES, TERMINAL_STEP_STATUSES, stepAttempts, stepElapsed, type StepAttemptElapsed } from './step-timing'
 
 /**
  * The WORKFLOW step rail (spec §"Task thread" — steps ≠ plan: these are the run's own
@@ -75,10 +76,15 @@ export function railProgress(steps: ReadonlyArray<Pick<StepState, 'status'>>): n
 }
 
 export function StepRail({
+  runId,
   steps,
   planned,
   runRunner,
 }: {
+  /** Required, not optional (spec 2026-08-29-step-retry-timing, Phase 3 step 1a): an optional
+   *  prop would let the `step.attempts_expanded` analytics event ship `undefined` and make it
+   *  silently unattributable — a failure mode indistinguishable from working. */
+  runId: string
   steps: StepState[]
   planned?: PlannedSteps
   runRunner?: Runner | undefined
@@ -88,34 +94,123 @@ export function StepRail({
   return (
     <div data-slot="step-rail" className="flex min-w-0 flex-col gap-1">
       {steps.map((step, index) => (
-        <div
+        <StepRow
           key={step.id}
-          data-slot="step-row"
-          data-visual={railVisual(step)}
-          className="flex min-h-[22px] min-w-0 items-center gap-2 text-[13px] text-muted-foreground"
-        >
-          <RailIcon visual={railVisual(step)} />
-          <span className="min-w-0 truncate font-medium text-foreground">{step.name}</span>
-          {step.stopReason ? (
-            <span data-slot="step-stop-reason" className="shrink-0 text-xs text-pending-strong">
-              stopped — no output
-            </span>
-          ) : null}
-          {step.iterations > 1 ? (
-            <span data-slot="step-iterations" className="shrink-0 text-xs text-soft-foreground tabular-nums">
-              ×{step.iterations}
-            </span>
-          ) : null}
-          <StepModel step={step} planned={planned} runRunner={runRunner} />
-          <span className="ml-auto shrink-0 pl-2 text-[11.5px] text-soft-foreground tabular-nums">
-            {step.kind} · step {index + 1} of {steps.length}
-          </span>
-          <StepClock step={step} />
-        </div>
+          runId={runId}
+          step={step}
+          index={index}
+          total={steps.length}
+          planned={planned}
+          runRunner={runRunner}
+        />
       ))}
       <div data-slot="step-progress" className="mt-1 h-0.5 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-pending" style={{ width: `${pct}%` }} />
       </div>
+    </div>
+  )
+}
+
+/**
+ * One rail row, plus its `×N` disclosure (spec 2026-08-29-step-retry-timing, Phase 3). Its own
+ * component — not inlined in `StepRail`'s map — because the disclosure needs `useState` for
+ * expansion, and the rail itself must stay a pure map.
+ *
+ * `useState` here, not the module-level `openByRun` map `WorkflowSteps` keeps: a `StepRail` row
+ * is not re-mounted by a tab hop the way `RunHeader`'s whole body is, so per-row expansion state
+ * collapsing on remount (R7) is an accepted, non-speculative tradeoff.
+ */
+function StepRow({
+  runId,
+  step,
+  index,
+  total,
+  planned,
+  runRunner,
+}: {
+  runId: string
+  step: StepState
+  index: number
+  total: number
+  planned?: PlannedSteps
+  runRunner?: Runner | undefined
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const attempts = stepAttempts(step, Date.now())
+  const expandable = attempts.length > 1
+  const toggle = () => {
+    const next = !expanded
+    setExpanded(next)
+    // Closed → open transition only — not on collapse, not on re-render, not on mount. An
+    // expand-and-collapse pair must produce exactly one line, or "how often is it read" turns
+    // into "how often did someone fidget" (spec §Analytics).
+    if (next) track('step.attempts_expanded', { runId, stepId: step.id, iterations: step.iterations })
+  }
+  return (
+    <>
+      <div
+        data-slot="step-row"
+        data-visual={railVisual(step)}
+        className="flex min-h-[22px] min-w-0 items-center gap-2 text-[13px] text-muted-foreground"
+      >
+        <RailIcon visual={railVisual(step)} />
+        <span className="min-w-0 truncate font-medium text-foreground">{step.name}</span>
+        {step.stopReason ? (
+          <span data-slot="step-stop-reason" className="shrink-0 text-xs text-pending-strong">
+            stopped — no output
+          </span>
+        ) : null}
+        {step.iterations > 1 ? (
+          expandable ? (
+            <button
+              type="button"
+              data-slot="step-iterations"
+              aria-expanded={expanded}
+              onClick={toggle}
+              className="shrink-0 text-xs text-soft-foreground tabular-nums underline-offset-2 hover:underline"
+            >
+              ×{step.iterations}
+            </button>
+          ) : (
+            <span data-slot="step-iterations" className="shrink-0 text-xs text-soft-foreground tabular-nums">
+              ×{step.iterations}
+            </span>
+          )
+        ) : null}
+        <StepModel step={step} planned={planned} runRunner={runRunner} />
+        <span className="ml-auto shrink-0 pl-2 text-[11.5px] text-soft-foreground tabular-nums">
+          {step.kind} · step {index + 1} of {total}
+        </span>
+        <StepClock step={step} />
+      </div>
+      {expanded ? <StepAttempts attempts={attempts} /> : null}
+    </>
+  )
+}
+
+/** The per-attempt breakdown under an expanded row (spec 2026-08-29-step-retry-timing, Phase 3).
+ *  `attempts` is `stepAttempts(step, now)` — `[]` for a pre-P1 record, which is why the badge
+ *  above is an inert `<span>` rather than a button in that case; this never renders empty. */
+function StepAttempts({ attempts }: { attempts: StepAttemptElapsed[] }) {
+  return (
+    <div data-slot="step-attempts" className="ml-5 flex flex-col gap-0.5 border-l border-border/60 pl-3">
+      {attempts.map((attempt) => (
+        <div
+          key={attempt.index}
+          data-slot="step-attempt"
+          className="flex items-center gap-1.5 text-[11px] text-soft-foreground tabular-nums"
+        >
+          <span>attempt {attempt.index} ·</span>{' '}
+          {attempt.live ? (
+            <LiveDuration since={attempt.startedAt} label={`Attempt ${attempt.index} running for`} />
+          ) : (
+            // An em-space where the duration would be — never `NaN:0-3` (R6) — for an attempt D3
+            // leaves genuinely unmeasurable (the pending-plus-open case a pre-P1 record can still
+            // produce, or an unparseable stored timestamp).
+            <time dateTime={attempt.startedAt}>{attempt.ms === undefined ? ' ' : formatDuration(attempt.ms)}</time>
+          )}
+        </div>
+      ))}
     </div>
   )
 }
@@ -243,10 +338,28 @@ function StepModel({
   )
 }
 
-/** The interval every step clock measures, said in the one place a reader can hover.
- *  `iterations > 1` overwrites `startedAt` per attempt, so it is the CURRENT attempt (risk R3),
- *  and a step parked on an ask keeps counting because it is still the live step (risk R4). */
+/** The interval `StepClock` measures on a PRE-P1 record — one with no `StepState.attempts` —
+ *  said in the one place a reader can hover. `iterations > 1` overwrote `startedAt` per attempt
+ *  on that record, so it is the CURRENT attempt only, and a step parked on an ask keeps counting
+ *  because it is still the live step (risk R4).
+ *
+ *  **Kept, not deleted, by spec 2026-08-29-step-retry-timing.** Its doc comment used to promise
+ *  this for every step; it no longer does. A step whose record carries `attempts` gets the
+ *  cumulative title from `stepClockTitle` below instead — this constant is still the honest label
+ *  for the two kinds of record that never gain that field: everything written before that spec,
+ *  and a step that was already mid-flight (`iterations > 0`) when it landed. Both render this
+ *  string forever, which is why deleting it would be wrong rather than merely stale. */
 const STEP_CLOCK_TITLE = 'Elapsed since this step started (the current attempt).'
+
+/** The clock's `title` is record-dependent (spec 2026-08-29-step-retry-timing, D4): the fallback
+ *  above survives forever for a record with no `attempts`, so a single constant either way round
+ *  would be a lie on half the board. Presence of `attempts` is the same switch `stepElapsed`
+ *  reads. */
+function stepClockTitle(step: StepState): string {
+  return step.attempts && step.attempts.length > 0
+    ? `Total elapsed across all ${step.attempts.length} attempts at this step.`
+    : STEP_CLOCK_TITLE
+}
 
 /**
  * How long this step has been going, or how long it took — right-aligned at the end of the row
@@ -259,19 +372,33 @@ const STEP_CLOCK_TITLE = 'Elapsed since this step started (the current attempt).
  * The live case delegates to `<LiveDuration/>` so the 1s tick stays inside one `<time>`; owning
  * a `useNow` here would re-render all six rows every second (spec risk R2, pinned by the design
  * guardian's `no-tick-in-thread-containers` rule).
+ *
+ * `since`/`offsetMs` (spec 2026-08-29-step-retry-timing) come straight from `stepElapsed`: absent
+ * unless the step is ACTIVE with `attempts` present, in which case they carry the open attempt's
+ * start and the ms already banked by its closed predecessors, so the live leaf reads the
+ * cumulative total instead of just the open attempt's tick.
  */
 function StepClock({ step, className }: { step: StepState; className?: string }) {
   const elapsed = stepElapsed(step, Date.now())
   if (elapsed === undefined) return null
   const tone = cn('shrink-0 text-[11.5px] text-soft-foreground tabular-nums', className)
+  const title = stepClockTitle(step)
   if (elapsed.live) {
-    return <LiveDuration since={step.startedAt} label="Running for" title={STEP_CLOCK_TITLE} className={tone} />
+    return (
+      <LiveDuration
+        since={elapsed.since ?? step.startedAt}
+        offsetMs={elapsed.offsetMs}
+        label="Running for"
+        title={title}
+        className={tone}
+      />
+    )
   }
   return (
     <time
       data-slot="step-duration"
       dateTime={step.finishedAt}
-      title={STEP_CLOCK_TITLE}
+      title={title}
       className={tone}
     >
       {formatDuration(elapsed.ms)}
@@ -401,7 +528,7 @@ export function WorkflowSteps({
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="pt-2">
-          <StepRail steps={steps} planned={planned} runRunner={runRunner} />
+          <StepRail runId={runId} steps={steps} planned={planned} runRunner={runRunner} />
         </div>
       </CollapsibleContent>
     </Collapsible>

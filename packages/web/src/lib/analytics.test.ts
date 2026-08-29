@@ -1,73 +1,114 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { trackEvent } from '@/lib/analytics'
+import { __flushAnalyticsForTests, __resetAnalyticsForTests, track } from './analytics'
 
 /**
- * `trackEvent` (`.ai/specs/2026-08-29-filed-task-detail-page.md`): the one client entry point for
- * `POST /workspace/analytics/events`. Fail-open and silent is the whole contract — these tests
- * exist to prove a broken sink can never surface as a thrown error or a toast.
+ * `lib/analytics.ts` (`.ai/specs/2026-08-25-split-active-backlog-tables.md`, D7, verification
+ * step 7). What is worth pinning is not that events reach the server — it is that NOTHING a
+ * caller does can make a component wait on, or fail because of, the sink.
  */
+
+let posted: { events: { name: string; props: Record<string, unknown> }[] }[] = []
+
+const captureFetch = () =>
+  vi.fn(async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+    posted.push(JSON.parse(String(init.body)))
+    return new Response(JSON.stringify({ accepted: 1 }), {
+      status: 202,
+      headers: { 'content-type': 'application/json' },
+    })
+  })
+
+beforeEach(() => {
+  posted = []
+  __resetAnalyticsForTests()
+  // `requestIdleCallback` is absent under jsdom, so `track` already falls back to a macrotask;
+  // the tests drive the flush explicitly rather than waiting on either.
+  vi.stubGlobal('fetch', captureFetch())
+})
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  __resetAnalyticsForTests()
 })
 
-const jsonResponse = (body: unknown, status = 202) =>
-  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+describe('track', () => {
+  it('batches several events into ONE request', async () => {
+    track('todo.filed_sorted', { partition: 'active', column: 'task', dir: 'asc' })
+    track('todo.filed_show_more', { partition: 'backlog', from: 30, to: 40 })
+    expect(posted).toHaveLength(0) // nothing has left the buffer yet — `track` returns immediately
 
-describe('trackEvent', () => {
-  it('POSTs the built event once, to the analytics route', async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ accepted: 1 }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    trackEvent('todo.detail_opened', { project: 'api', todo: 'todo-1', status: 'todo', archived: false, surface: 'direct' })
-    // Fire-and-forget: give the microtask queue a turn to let the request go out.
-    await Promise.resolve()
-    await Promise.resolve()
-
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    const [input, init] = fetchMock.mock.calls[0]!
-    expect(String(input)).toBe('/api/v1/workspace/analytics/events')
-    expect(init?.method).toBe('POST')
-    expect(JSON.parse(String(init?.body))).toEqual({
-      events: [
-        {
-          name: 'todo.detail_opened',
-          props: { project: 'api', todo: 'todo-1', status: 'todo', archived: false, surface: 'direct' },
-        },
-      ],
-    })
+    await __flushAnalyticsForTests()
+    expect(posted).toHaveLength(1)
+    expect(posted[0]?.events.map((event) => event.name)).toEqual([
+      'todo.filed_sorted',
+      'todo.filed_show_more',
+    ])
+    expect(posted[0]?.events[0]?.props).toEqual({ partition: 'active', column: 'task', dir: 'asc' })
   })
 
-  it('a rejected POST resolves and throws nothing — fail-open, no toast, no retry', async () => {
-    const fetchMock = vi.fn(async () => {
-      throw new Error('network down')
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    expect(() =>
-      trackEvent('todo.detail_opened', { project: 'api', todo: 'todo-1', status: 'todo', archived: false, surface: 'direct' }),
-    ).not.toThrow()
-
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
-
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+  it('sends an empty props object rather than omitting the key the sink requires', async () => {
+    track('todo.filed_sorted')
+    await __flushAnalyticsForTests()
+    expect(posted[0]?.events[0]?.props).toEqual({})
   })
 
-  it('a non-2xx answer is swallowed the same way as a rejection', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ error: 'bad request' }, 400))
-    vi.stubGlobal('fetch', fetchMock)
+  it('never stamps a client timestamp — the server owns `ts`', async () => {
+    track('todo.filed_sorted', { partition: 'active' })
+    await __flushAnalyticsForTests()
+    expect(Object.keys(posted[0]?.events[0] ?? {}).sort()).toEqual(['name', 'props'])
+  })
 
-    expect(() =>
-      trackEvent('todo.detail_opened', { project: 'api', todo: 'todo-1', status: 'todo', archived: false, surface: 'direct' }),
-    ).not.toThrow()
+  it('splits a batch over the sink cap and sends the rest next time', async () => {
+    for (let i = 0; i < 25; i += 1) track(`todo.filed_e${i}`)
+    await __flushAnalyticsForTests()
+    expect(posted[0]?.events).toHaveLength(20)
+    await __flushAnalyticsForTests()
+    expect(posted[1]?.events).toHaveLength(5)
+  })
 
-    await Promise.resolve()
-    await Promise.resolve()
-    await Promise.resolve()
+  it('drops a failed POST silently and never throws — and the next batch still goes out', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('offline')
+      }),
+    )
+    track('todo.filed_lost')
+    await expect(__flushAnalyticsForTests()).resolves.toBeUndefined()
 
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // Recovery: a later event is not held hostage by the dropped one.
+    vi.stubGlobal('fetch', captureFetch())
+    track('todo.filed_kept')
+    await __flushAnalyticsForTests()
+    expect(posted.at(-1)?.events.map((event) => event.name)).toEqual(['todo.filed_kept'])
+  })
+
+  it('a server error status is dropped just as silently as a network failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: 'nope' }), { status: 500 })),
+    )
+    track('todo.filed_boom')
+    await expect(__flushAnalyticsForTests()).resolves.toBeUndefined()
+  })
+
+  it('flushing an empty buffer sends nothing', async () => {
+    await __flushAnalyticsForTests()
+    expect(posted).toHaveLength(0)
+  })
+
+  it('the buffer is bounded — a cockpit that can never reach its server does not grow forever', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('offline')
+      }),
+    )
+    for (let i = 0; i < 1_000; i += 1) track(`todo.filed_e${i}`)
+    // Newest-wins: the events a reader would be asking about are the recent ones.
+    vi.stubGlobal('fetch', captureFetch())
+    await __flushAnalyticsForTests()
+    expect(posted[0]?.events[0]?.name).toBe('todo.filed_e920') // 1000 - (20 * 4)
   })
 })

@@ -353,6 +353,12 @@ export interface ServerDeps {
    *  context is seeded from `deps.{store,manager}` (which src/index.ts already
    *  recovered/pruned at startup) and the resolver short-circuits to it. */
   contexts?: ProjectContexts;
+  /** Handed the resolver as soon as it exists, so a caller that must reach OTHER projects can.
+   *  `serveCommand`'s post-boot manual-deploy sweep is the reason this seam exists: it holds only
+   *  the BOOT manager, and on a box whose boot project is not the one that parks (production's
+   *  boot project is `workspace`; every cezar deploy park is in `cezar`) that sweep could never
+   *  reach a single park. Read-only — nothing here may mutate the map. */
+  onContextsReady?: (contexts: ProjectContexts) => void;
   /** Boot project's shared automation store. `startServer` injects the
    *  coordinator-owned instance so HTTP routes and the scheduler never cache
    *  separate views of the same project files. */
@@ -7748,6 +7754,9 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     // registered project whose root equals `deps.repoRoot`; see that spec's Risks.
     bootRoot: deps.repoRoot,
   });
+  // Published as soon as it exists — `serveCommand`'s manual-deploy sweep needs to reach projects
+  // other than the boot one, and this is the only handle on them.
+  deps.onContextsReady?.(sharedContexts);
   // #801: GitHub automations are opt-in. Off, the flag must remove the BEHAVIOR and not merely
   // the UI — no scheduler, no GitHub polling, no launched runs — so every entry point into the
   // workspace scheduler below is gated on it. Read per call rather than captured, for the same
