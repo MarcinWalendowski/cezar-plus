@@ -7,8 +7,10 @@ cezar, not an agent.
 
 ## TLDR
 
-Three defects kept four runs parked on `needs you` for three to four days and made the Resolve
-button look dead. All three are fixed here, none of them by weakening a gate.
+Four defects kept four runs parked on `needs you` for three to four days and made the Resolve
+button look dead. All four are fixed here, none of them by weakening a gate. The fourth was found
+BY the fix for the other three: the first activation deployed cleanly and the parks still did not
+clear.
 
 1. **The button swallowed its own refusal.** `POST /handoff/resolve` answers **200** with
    `resolved: false` when the re-probe is still red. The web client typed that body `unknown` and
@@ -20,6 +22,9 @@ button look dead. All three are fixed here, none of them by weakening a gate.
    reports "unknown object" as "not deployed" — permanently.
 3. **The activation runbook could not run on the box it was written for.** `activate-main.sh`
    defaulted to the SSH remote; the `cezar` user has no SSH key for GitHub.
+4. **The post-restart sweep swept the wrong project.** It ran on the BOOT project's manager alone.
+   Production's boot project is `workspace`; every cezar deploy park is in the separately-registered
+   `cezar` project. The feature could never have cleared a single one of these runs.
 
 ## Problem
 
@@ -77,6 +82,20 @@ through `gh auth git-credential`), falling back to the HTTPS GitHub URL. The old
 only ever consulted on the **first** activation — the one where the deploy checkout does not exist
 yet — so it failed exactly when there was nothing to fall back on.
 
+**S5 — the sweep covers every project that has a park, not just the boot one.**
+`recheckManualDeployParksEverywhere()` (`workflows/recheck-parks-workspace.ts`) sweeps the boot
+manager, then every registered project whose `runs.json` shows a `manual-deploy` park. `startServer`
+publishes its `ProjectContexts` through a new `onContextsReady` dep, because that resolver is the
+only handle on a non-boot project's manager.
+
+**Laziness is the constraint, not a nicety.** Building a `ProjectContext` opens a `RunStore`,
+activates knowledge/source stores and starts sweeps — the cost lazy watchers exist to avoid — so a
+project is opened only when a **cheap raw read** of its `runs.json` shows a park. The raw read is
+also the only safe way to look: opening a second `RunStore` over a data dir that may later get a
+real context is the two-in-memory-copies data-loss bug `project-context.ts` documents at its
+`boot-root-conflict` guard. Failures are contained per project, and the boot root is skipped by
+normalized-path comparison so a registry row pointing at it cannot double-count.
+
 ## Architecture
 
 ```
@@ -88,9 +107,15 @@ Resolve press ─▶ POST /runs/:id/handoff/resolve
                    │                                            └─▶ toast(danger), note kept       ← S1
                    └─ no waiter (restart) ─▶ requeueHandoff
 
-boot, after startServer ─▶ recheckManualDeployParks()
-                             └─ per park: refreshParkedWorktree(worktreePath) ─▶ probe ─▶ requeue on green
+boot, after startServer ─▶ recheckManualDeployParksEverywhere()                        ← S5
+                             ├─ boot project's manager
+                             └─ every OTHER registered project whose runs.json shows a park
+                                  (cheap raw read first — a quiet project is never opened)
+                                   └─ per park: refreshParkedWorktree(worktreePath)      ← S3
+                                                 └─▶ probe ─▶ requeue on green
 ```
+
+The old boot line was `manager.recheckManualDeployParks()` — the boot manager, and only it.
 
 ## Data models
 
@@ -132,6 +157,17 @@ Executed 2026-08-29 unless marked otherwise.
    `onSuccess` fails both. ✅ The pre-existing green-path test stubbed only `resolved: true`,
    which is why this shipped.
 3. Full gates on the box (`typecheck`, `lint`, `test`, `test:unit`, `test:package`, `build`). ✅
-4. Production E2E: activate `origin/main`, confirm `/api/v1/ready` reports the new sha, and
-   confirm the parked runs clear **without** a Resolve press (S4 of the 2026-08-26 spec, which
-   has never actually run on this box because the release that carries it was never deployed). ✅
+4. `recheck-parks-workspace.test.ts` — six cases: a non-boot project with a park IS swept (the
+   production case); a project with no park is **never opened** (the laziness control, without
+   which "sweep everything" would pass while opening every project on every restart); the boot root
+   is not swept twice however the registry spells it; one un-buildable project costs only itself; a
+   malformed `runs.json` reads as "no park"; and no resolver degrades to boot-only.
+   **Mutation-checked**: returning after the boot manager — the old behaviour — fails two. ✅
+   Note that every pre-existing test drove `recheckManualDeployParks()` on a manager directly, so
+   nothing covered *which managers the boot path calls it on*. That is where the feature was lost.
+5. **Production E2E, 2026-08-29.** First activation (`a04cda25`) took live from `dc64b741` to
+   `origin/main` with a 95 ms cutover — and the parks did **not** clear, which is how S5 was found.
+   Verified at that moment: the parked run's own probe, run by hand in its worktree, exited **0**
+   while the run was still `waiting` on `manual-deploy`. The deploy was right and the probe was
+   right; nothing asked. Second activation carries S5, and the parks clearing on its restart with
+   no Resolve press is the acceptance test. ✅
