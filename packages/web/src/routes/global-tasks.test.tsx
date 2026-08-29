@@ -1568,7 +1568,7 @@ describe('the Filed section', () => {
     expect(await screen.findByText('Add a rate limit to /checkout')).toBeTruthy()
   })
 
-  it('starts a filed task in ITS OWN project and follows it to the run', async () => {
+  it('starts a filed task in its own project without leaving the board', async () => {
     stubFetch({ todos: TODOS })
     renderPage()
     await screen.findByText('Ship the storefront banner')
@@ -1583,6 +1583,7 @@ describe('the Filed section', () => {
     )
     // Never against `api` (the boot project, and the first row) — the row's project is the truth.
     expect(sent.some((r) => r.path.startsWith('/api/v1/p/api/todos/'))).toBe(false)
+    await waitFor(() => expect(pathname()).toBe('/tasks'))
   })
 
   const selectBoxes = () =>

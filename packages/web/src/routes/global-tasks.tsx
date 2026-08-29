@@ -828,7 +828,7 @@ function FiledArchivedSection({
   onSortChange: (sort: FiledSort) => void
 }) {
   const todos = useWorkspaceTodos()
-  const start = useStartFiledTask()
+  const start = useStartFiledTask({ followRun: false })
   const startMany = useStartFiledTasks()
   const update = useUpdateFiledTodo()
   const now = useNow(30_000)
@@ -1079,7 +1079,7 @@ function FiledActiveSection({
   onActiveSortChange: (sort: FiledTableSort) => void
   onBacklogSortChange: (sort: FiledTableSort) => void
 }) {
-  const start = useStartFiledTask()
+  const start = useStartFiledTask({ followRun: false })
   const startMany = useStartFiledTasks()
   const update = useUpdateFiledTodo()
   const now = useNow(30_000)

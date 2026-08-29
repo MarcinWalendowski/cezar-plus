@@ -20,9 +20,9 @@ import { scopeTo, useNavigate } from '@/lib/project-router'
  * the Filed table needs those.
  */
 
-/** Start one filed task in its own project and follow it into the run — the `startTodo` mutation
- *  the Inbox card already uses, with the project named explicitly rather than taken from scope. */
-export function useStartFiledTask() {
+/** Start one filed task in its own project. Filed-board play controls stay in place; the standalone
+ *  task detail page follows the created run. */
+export function useStartFiledTask({ followRun = true }: { followRun?: boolean } = {}) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   return useMutation({
@@ -32,7 +32,7 @@ export function useStartFiledTask() {
       // The todo is now a run: it leaves this list and joins the table below it.
       void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.workspaceTodos })
       void queryClient.invalidateQueries({ queryKey: workspaceQueryKeys.runsIndex })
-      void navigate(scopeTo(projectId, `/tasks/${result.run.id}`))
+      if (followRun) void navigate(scopeTo(projectId, `/tasks/${result.run.id}`))
     },
     onError: (error) => toast(error.message, { tone: 'danger' }),
   })
