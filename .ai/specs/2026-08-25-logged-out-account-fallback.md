@@ -2139,6 +2139,15 @@ Instead, boot a **second, fully isolated cezar process** beside the live one:
    deadline is what stops a *live but never-ready* server from hanging the run instead of failing
    it. `/api/v1/health` is read **separately**, once, and its body kept as an artifact.
 
+**CORRECTED 2026-08-29.** V6 no longer uses `CODEX_FIXTURE_HOME` or `LIVE_CODEX_HOME`. This box
+has no dedicated Codex fixture home, and it has two live Codex homes, so the scalar
+`LIVE_CODEX_HOME` guard would fail open by allowing the other live home as the fixture. The
+connected half is now staged with `CEZ_CODEX_BIN`, a provider shim that answers the account probe
+and delegates the run branch to the repository's mock app server. The disconnected Claude half
+continues to use `CEZ_CLAUDE_BIN` under the isolated environment. This exercises the selection and
+dispatch contract without copying, reading or refreshing any live credential. The original
+credential-fixture instructions remain below unchanged as historical context.
+
 4. **A real connected credential fixture, and a real disconnected one.** `disconnected` is easy: an
    empty config dir probes as not connected. `connected` cannot be faked by a file whose shape we
    guessed, because the provider CLI decides. So the connected half comes from a **dedicated** Codex

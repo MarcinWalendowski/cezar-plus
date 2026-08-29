@@ -25,7 +25,7 @@ import {
  * one), and it is why that assertion comes first rather than the simpler tiering table.
  */
 
-const NOW = Date.parse('2026-08-25T12:00:00.000Z');
+const NOW = Date.now();
 
 function profile(provider: 'claude' | 'codex', id: string): ResolvedAgentProfile {
   return {
