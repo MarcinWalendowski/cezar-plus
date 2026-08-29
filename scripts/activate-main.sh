@@ -19,7 +19,8 @@
 #   Env:    DEPLOY_CHECKOUT  (default /var/lib/cezar/deploy/cezar)
 #           CEZAR_CLI        (default /opt/cezar/packages/cezar/dist/index.js)
 #           CEZAR_URL        (default http://127.0.0.1:4321)
-#           REPO_URL         (default git@github.com:MarcinWalendowski/cezar.git)
+#           REPO_URL         (default: origin of REFERENCE_CHECKOUT, else the HTTPS GitHub URL)
+#           REFERENCE_CHECKOUT (default /var/lib/cezar/loki-labs/cezar — read for its remote only)
 #
 # Run it as `cezar`, never as root: a root-owned file under /var/lib/cezar indexes fine and reads
 # as a success while the services that must read it get EACCES forever.
@@ -29,7 +30,20 @@ set -uo pipefail
 DEPLOY_CHECKOUT="${DEPLOY_CHECKOUT:-/var/lib/cezar/deploy/cezar}"
 CEZAR_CLI="${CEZAR_CLI:-/opt/cezar/packages/cezar/dist/index.js}"
 CEZAR_URL="${CEZAR_URL:-http://127.0.0.1:4321}"
-REPO_URL="${REPO_URL:-git@github.com:MarcinWalendowski/cezar.git}"
+# The clone URL is READ FROM A CHECKOUT THAT ALREADY WORKS, never hardcoded to a scheme.
+#
+# This defaulted to `git@github.com:MarcinWalendowski/cezar.git`, and the one box it exists for
+# cannot use it: the `cezar` user has no SSH key for GitHub (`Permission denied (publickey)`,
+# measured 2026-08-29) and reaches the remote over HTTPS through `gh auth git-credential`. The
+# default is only consulted on the FIRST activation — the one where the deploy checkout does not
+# exist yet — so it would have failed at the clone precisely when there was nothing to fall back
+# on, which is the state prod-host was actually in. Asking a checkout that demonstrably
+# fetches keeps this right on a box configured either way.
+REFERENCE_CHECKOUT="${REFERENCE_CHECKOUT:-/var/lib/cezar/loki-labs/cezar}"
+if [ -z "${REPO_URL:-}" ]; then
+  REPO_URL=$(git -C "$REFERENCE_CHECKOUT" remote get-url origin 2>/dev/null) || REPO_URL=''
+fi
+REPO_URL="${REPO_URL:-https://github.com/MarcinWalendowski/cezar.git}"
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 

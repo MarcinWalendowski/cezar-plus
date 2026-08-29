@@ -1502,7 +1502,19 @@ export async function requestRunChanges(id: string, notes: string): Promise<unkn
   )
 }
 
-export async function resolveRunHandoff(id: string, note?: string): Promise<unknown> {
+/**
+ * Ask the server to re-probe a manual handoff.
+ *
+ * The return type is load-bearing, and it used to be `unknown`. This endpoint answers **200 with
+ * `resolved: false`** when the probes ran and still say no — a refusal, not an error — so a caller
+ * that discards the body treats every refusal as a success. That is exactly what the handoff card
+ * did: five presses on a red deploy park produced five server-side "still red" notes and nothing
+ * on screen (measured 2026-08-29, run cc25d636). Read `resolved` before you believe it worked.
+ */
+export async function resolveRunHandoff(
+  id: string,
+  note?: string,
+): Promise<{ resolved: boolean; verdict: string }> {
   return unwrap(
     await cez.api.v1.p[':projectId'].runs[':id'].handoff.resolve.$post({
       param: { projectId: queryScope(), id: encodeURIComponent(id) },

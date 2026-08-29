@@ -455,6 +455,12 @@ export const QUEUE_WATCHDOG_MS = 60_000;
 /** How often a brokered run's consumed byte offset is written to `runs.json`. */
 const OFFSET_PERSIST_MS = 1_000;
 
+/** Bound on the `git fetch` that lets a parked worktree resolve the sha a deploy made live
+ *  (`refreshParkedWorktree`). A person is waiting on this — on the Resolve path it is inside
+ *  their request — and the fetch is an optimization, not the answer: when it runs out of time
+ *  the probe still gets to speak. Well under the 60s probe budget that follows it. */
+const PARKED_FETCH_TIMEOUT_MS = 20_000;
+
 const NO_HOLDS: AccountHolds = { deadline: new Set(), inFlight: new Set() };
 
 /**
@@ -6220,6 +6226,10 @@ export class RunManager {
           once({ kind: 'skipped' });
           return { resolved: true, verdict: 'manual handoff skipped' };
         }
+        // Same reason as the boot recheck (`refreshParkedWorktree`): a manual-deploy park is
+        // answered by an activation of a branch this worktree has never fetched, so without this
+        // the probe cannot tell "not deployed" from "I have never heard of that commit".
+        if (pending.kind === 'manual-deploy') await this.refreshParkedWorktree(state.cwd);
         const checked = await recheck();
         if (checked.ok) {
           once({ kind: 'resolved', verdict: checked });
@@ -6236,7 +6246,9 @@ export class RunManager {
         };
         this.store.updateRun(runId, { pendingHandoff: next, status: 'waiting', waitingReason: 'handoff' });
         emit({ type: 'note', stepId: step.id, message: `handoff recheck is still red: ${checked.detail}` });
-        return { resolved: false, verdict: checked.detail };
+        // `summary` over `detail` HERE only: this value is the answer to a button press, and
+        // `detail` carries every probe's source. The full text is already in the note above.
+        return { resolved: false, verdict: checked.summary ?? checked.detail };
       };
       const parkedInterrupt = state.interrupt;
       state.interrupt = () => {
@@ -6673,9 +6685,45 @@ export class RunManager {
     return requeued;
   }
 
+  /**
+   * Let a parked worktree ANSWER the deploy probe. Changes nothing about what the probe asks.
+   *
+   * A deploy probe compares what this worktree built against the sha the running process reports.
+   * The activation that satisfies it deploys `origin/main`, whose commits did not exist when the
+   * worktree was cut — so the live sha is not in this worktree's object db at all, and every git
+   * question about it errors "unknown object" instead of answering "no". A probe that folds those
+   * two into one red (`git merge-base --is-ancestor … 2>/dev/null`, which is what every worktree
+   * cut before 2026-08-26 carries) then reports a CORRECT activation as "the running server is
+   * NOT serving this HEAD" — permanently, since nothing later brings the object in.
+   *
+   * Measured 2026-08-29 on prod-host: run `cc25d636`'s worktree could not resolve
+   * `origin/main`'s tip (`ABSENT (unknown object)`), and its operator had pressed Resolve five
+   * times against five honest-looking reds.
+   *
+   * **Why here and not in the probe.** The probe WAS taught to fetch
+   * (`.ai/deploy-targets.json`, 2026-08-26) — but that repair ships in the REPO, while the probe
+   * that runs for a parked run is the copy in the run's OWN worktree, cut before the fix existed.
+   * A worktree-side fix cannot reach a run that is already parked, which is every run it is for.
+   * Engine-side is the only side that reaches them.
+   *
+   * Best-effort and side-effect-free where it matters: a failed or slow fetch leaves the probe to
+   * answer exactly as it would have, and this touches the object db and remote-tracking refs
+   * only — never HEAD, the index, or the working tree.
+   */
+  private async refreshParkedWorktree(cwd: string | undefined): Promise<void> {
+    // A MISSING cwd must not become "the process's own directory". `execFile` with `cwd:
+    // undefined` inherits the server's, so a run with no worktree would have this reaching the
+    // network from the cezar checkout itself — a real fetch, on someone else's repository, on
+    // every Resolve press. Caught by `handoff-gate.test.ts`, whose parked runs have no worktree
+    // at all: two tests went from instant to a 5s network timeout.
+    if (!cwd || !existsSync(cwd)) return;
+    await runGit(cwd, ['fetch', '--quiet', 'origin'], undefined, PARKED_FETCH_TIMEOUT_MS);
+  }
+
   private async manualDeployNowLive(run: RunRecord): Promise<boolean> {
     const cwd = run.worktreePath;
     if (!cwd || !existsSync(cwd)) return false;
+    await this.refreshParkedWorktree(cwd);
     try {
       const result = await evaluatePostcondition('all-services-deployed', {
         cwd,
@@ -8262,11 +8310,27 @@ function runGit(
   cwd: string,
   args: string[],
   env?: NodeJS.ProcessEnv,
+  /** Wall-clock bound, for the git commands that talk to a REMOTE — the local ones cannot hang.
+   *  `killSignal: 'SIGKILL'` rather than the default SIGTERM because a timeout that only sends a
+   *  signal has not ended anything: a child that ignores it leaves this promise pending forever,
+   *  and the caller here is an HTTP request a person is waiting on. */
+  timeoutMs?: number,
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile('git', args, { cwd, env, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' }, (error, stdout, stderr) => {
-      resolve({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' });
-    });
+    execFile(
+      'git',
+      args,
+      {
+        cwd,
+        env,
+        maxBuffer: 32 * 1024 * 1024,
+        encoding: 'utf8',
+        ...(timeoutMs ? { timeout: timeoutMs, killSignal: 'SIGKILL' as const } : {}),
+      },
+      (error, stdout, stderr) => {
+        resolve({ ok: !error, stdout: stdout ?? '', stderr: stderr ?? '' });
+      },
+    );
   });
 }
 
