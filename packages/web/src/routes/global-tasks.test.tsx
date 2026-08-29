@@ -2049,10 +2049,10 @@ describe('the Filed section', () => {
           await __flushAnalyticsForTests()
         })
         return sent
-          .filter((call) => call.path === '/api/v1/workspace/analytics')
+          .filter((call) => call.path === '/api/v1/workspace/analytics/events')
           .flatMap(
             (call) =>
-              (call.body as { events: { event: string; props?: Record<string, unknown> }[] }).events,
+              (call.body as { events: { name: string; props: Record<string, unknown> }[] }).events,
           )
       }
 
@@ -2063,20 +2063,20 @@ describe('the Filed section', () => {
         await waitFor(() => expect(rowIdsIn(backlogTable())).toHaveLength(30))
 
         const events = await analyticsEvents()
-        const viewed = events.filter((event) => event.event === 'filed_tasks.partition_viewed')
-        expect(viewed.map((event) => event.props?.partition).sort()).toEqual(['active', 'backlog'])
-        expect(viewed.find((event) => event.props?.partition === 'active')?.props).toEqual({
+        const viewed = events.filter((event) => event.name === 'todo.filed_partition_viewed')
+        expect(viewed.map((event) => event.props.partition).sort()).toEqual(['active', 'backlog'])
+        expect(viewed.find((event) => event.props.partition === 'active')?.props).toEqual({
           partition: 'active',
           rows: 20,
           total: 60,
           sort: 'age',
           dir: 'desc',
         })
-        expect(viewed.find((event) => event.props?.partition === 'backlog')?.props?.rows).toBe(30)
+        expect(viewed.find((event) => event.props.partition === 'backlog')?.props.rows).toBe(30)
         // No task summary, project name or search string is ever a prop value — that is a property
         // of these three events, not of a filter in the sink.
         for (const event of events) {
-          expect(JSON.stringify(event.props ?? {})).not.toContain('Active task')
+          expect(JSON.stringify(event.props)).not.toContain('Active task')
         }
       })
 
@@ -2090,7 +2090,7 @@ describe('the Filed section', () => {
         expect(
           events.filter(
             (event) =>
-              event.event === 'filed_tasks.partition_viewed' && event.props?.partition === 'active',
+              event.name === 'todo.filed_partition_viewed' && event.props.partition === 'active',
           ),
         ).toHaveLength(1)
       })
@@ -2101,7 +2101,7 @@ describe('the Filed section', () => {
         await waitFor(() => expect(activeTable()).toBeTruthy())
         fireEvent.click(within(activeTable()).getByRole('button', { name: 'Priority' }))
         const events = await analyticsEvents()
-        expect(events.filter((event) => event.event === 'filed_tasks.sorted').at(-1)?.props).toEqual({
+        expect(events.filter((event) => event.name === 'todo.filed_sorted').at(-1)?.props).toEqual({
           partition: 'active',
           column: 'priority',
           dir: 'asc',
@@ -2119,7 +2119,7 @@ describe('the Filed section', () => {
           ),
         )
         const events = await analyticsEvents()
-        expect(events.filter((event) => event.event === 'filed_tasks.show_more').at(-1)?.props).toEqual({
+        expect(events.filter((event) => event.name === 'todo.filed_show_more').at(-1)?.props).toEqual({
           partition: 'backlog',
           from: 30,
           to: 40,

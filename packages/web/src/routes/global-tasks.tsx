@@ -1262,7 +1262,7 @@ function FiledActiveSection({
             sort={activeSort}
             onSortChange={onActiveSortChange}
             onShowMore={() => {
-              track('filed_tasks.show_more', {
+              track('todo.filed_show_more', {
                 partition: 'active',
                 from: activeLimit,
                 to: activeLimit + FILED_SHOW_MORE_INCREMENT,
@@ -1280,7 +1280,7 @@ function FiledActiveSection({
             sort={backlogSort}
             onSortChange={onBacklogSortChange}
             onShowMore={() => {
-              track('filed_tasks.show_more', {
+              track('todo.filed_show_more', {
                 partition: 'backlog',
                 from: backlogLimit,
                 to: backlogLimit + FILED_SHOW_MORE_INCREMENT,
@@ -1380,12 +1380,12 @@ function FiledPartitionTable({
       // Before the request, not after: the event is about what the reader asked for, and an
       // answer that never arrives is still a sort somebody performed.
       const next = cycleFiledTableSort(sort, column)
-      track('filed_tasks.sorted', { partition, column: next.column, dir: next.dir })
+      track('todo.filed_sorted', { partition, column: next.column, dir: next.dir })
       onSortChange(next)
     },
   })
 
-  // `filed_tasks.partition_viewed` — once per partition per DISTINCT PARAMETER SET, after its
+  // `todo.filed_partition_viewed` — once per partition per DISTINCT PARAMETER SET, after its
   // rows render. The signature is the dep, and a ref of what has already been sent guards the
   // case a dep array cannot: a remount (a tab switch, a filter that empties and refills the
   // section) would otherwise re-announce a view the reader never returned to.
@@ -1396,7 +1396,7 @@ function FiledPartitionTable({
     if (viewSignature === null || page === undefined) return
     if (seenViews.current.has(viewSignature)) return
     seenViews.current.add(viewSignature)
-    track('filed_tasks.partition_viewed', {
+    track('todo.filed_partition_viewed', {
       partition: page.partition,
       rows: page.returned,
       total: page.total,

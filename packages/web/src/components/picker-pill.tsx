@@ -160,11 +160,14 @@ export function parseChoiceValue(value: string): { runner: Runner; account: stri
  * Two separate mechanisms make it advisory, and a person reading the pill can see neither:
  * a wildcard pool (`pool:*`) lets the balancer choose the PROVIDER at dispatch, over
  * `input.runner`; and `fallbackAcrossAccountsWhenLimited` — ON by default since spec
- * 2026-08-23-never-block-a-task — starts a task on another agent rather than parking it behind a
- * rate limit. Without this line the next person picks codex to dodge a Claude limit, watches it
- * run on Claude anyway, and files it as a bug (todo `81ab4ebd` is exactly that report).
+ * 2026-08-23-never-block-a-task, and widened by spec 2026-08-25-logged-out-account-fallback to
+ * the same rescue when the account is simply logged out rather than out of quota — starts a task
+ * on another agent rather than parking it behind a rate limit or refusing on a stale login.
+ * Without this line the next person picks codex to dodge a Claude limit, watches it run on Claude
+ * anyway, and files it as a bug (todo `81ab4ebd` is exactly that report).
  */
-export const ADVISORY_NOTE = 'Preference, not a pin — a rate-limited agent is skipped for the next available one.'
+export const ADVISORY_NOTE =
+  'Preference, not a pin — a rate-limited or logged-out agent is skipped for the next available one.'
 
 /**
  * Which agent — and, when there is more than one login for it, which account — in ONE flat list:
@@ -217,7 +220,9 @@ export function RunnerPill({
   /**
    * Say, inside the menu, that this pick is a PREFERENCE rather than a guarantee — see
    * `ADVISORY_NOTE`. On when `resources.fallbackAcrossAccountsWhenLimited` is on, which is the
-   * default since spec 2026-08-23-never-block-a-task.
+   * default since spec 2026-08-23-never-block-a-task and, since spec
+   * 2026-08-25-logged-out-account-fallback, also covers rerouting off a logged-out account, not
+   * only a rate-limited one.
    */
   advisory?: boolean
 }) {

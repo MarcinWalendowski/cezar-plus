@@ -1,9 +1,12 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContentBlock } from './core/agent-runner.ts';
+import { RunStore } from './runs/store.ts';
+import type { ProjectContext, ProjectContexts } from './server/project-context.ts';
+import { startServer, type ServerProjectAccess } from './server/server.ts';
 import type { RunManager } from './workflows/run.ts';
 import {
   appendReopenRequests,
@@ -217,5 +220,129 @@ describe('watchReopenRequests', () => {
     cleanups.push(second);
     // The superseded subscription's own unsubscribe must be a safe no-op.
     expect(() => first()).not.toThrow();
+  });
+});
+
+describe('cold-project reopen discovery', () => {
+  it('boots the real server path and wakes a non-resident project only after a pending request', async () => {
+    const bootRoot = mkdtempSync(join(tmpdir(), 'cez-reopen-cold-boot-'));
+    const targetRoot = mkdtempSync(join(tmpdir(), 'cez-reopen-cold-target-'));
+    const home = mkdtempSync(join(tmpdir(), 'cez-reopen-cold-home-'));
+    const bootDataDir = join(bootRoot, '.ai/cezar');
+    const targetDataDir = join(targetRoot, '.ai/cezar');
+    mkdirSync(bootDataDir, { recursive: true });
+    const bootStore = RunStore.open(bootDataDir);
+    const calls: ContinueCall[] = [];
+    const listeners = new Set<(ctx: ProjectContext) => void>();
+    let targetStore: RunStore | undefined;
+    let targetContext: ProjectContext | undefined;
+    let builds = 0;
+    let loadCalls = 0;
+    let resident = false;
+    const manager = {
+      continueRun: (
+        runId: string,
+        opts: { text?: string; images?: ContentBlock[] } = {},
+        deferForCapacity?: boolean,
+      ) => {
+        calls.push({ runId, opts, deferForCapacity });
+        return { ok: true };
+      },
+    } as unknown as RunManager;
+    const contexts = {
+      ids: () => resident ? ['cold-reopen'] : [],
+      peek: (id: string) => id === 'cold-reopen' && resident ? targetContext : undefined,
+      onStoreCreated: () => () => undefined,
+      onContextBuilt: (listener: (ctx: ProjectContext) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      context: async (id: string) => {
+        if (id !== 'cold-reopen') throw new Error(`unexpected project ${id}`);
+        builds += 1;
+        mkdirSync(targetDataDir, { recursive: true });
+        targetStore = RunStore.open(targetDataDir);
+        const built = {
+          id,
+          root: targetRoot,
+          dataDir: targetDataDir,
+          store: targetStore,
+          manager,
+        } as unknown as ProjectContext;
+        targetContext = built;
+        resident = true;
+        // Deliberately does NOT arm the watcher itself, see the twin comment in
+        // `todo-autostart.test.ts`. The only path from a woken context to a live
+        // `reopen-requests.json` watch must be `createApp`'s `contexts.onContextBuilt(...)`.
+        for (const listener of listeners) listener(built);
+        return built;
+      },
+    } as unknown as ProjectContexts;
+    const projectAccess: ServerProjectAccess = {
+      resolveBootProject: async () => 'boot',
+      listVisibleProjects: async () => {
+        loadCalls += 1;
+        return [{
+          id: 'cold-reopen',
+          root: targetRoot,
+          name: 'cold-reopen',
+          addedAt: '',
+          lastOpenedAt: '',
+          source: 'local',
+          status: 'not-git',
+        }];
+      },
+    };
+    const savedHome = process.env.CEZ_HOME;
+    const savedCluster = process.env.CEZ_CLUSTER;
+    const savedAutomations = process.env.CEZ_AUTOMATIONS;
+    const savedBackup = process.env.CEZ_BACKUP;
+    process.env.CEZ_HOME = home;
+    delete process.env.CEZ_CLUSTER;
+    delete process.env.CEZ_AUTOMATIONS;
+    delete process.env.CEZ_BACKUP;
+    const server = startServer({
+      repoRoot: bootRoot,
+      store: bootStore,
+      manager: {} as RunManager,
+      version: '0.0.0-test',
+      bootProjectId: 'boot',
+      contexts,
+      projectAccess,
+      lazyProjectIntentIntervalMs: 10,
+    }, 0);
+    const stopBootWatch = watchReopenRequests({ dataDir: bootDataDir, manager });
+    try {
+      await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+      await waitFor(() => expect(loadCalls).toBeGreaterThan(0));
+      expect(contexts.ids()).toEqual([]);
+      expect(existsSync(targetDataDir)).toBe(false);
+
+      await appendReopenRequests(targetDataDir, [{ runId: 'run-cold', prompt: 'read only' }]);
+      await waitFor(() => expect(builds).toBe(1), 6000);
+      await waitFor(() => expect(calls.map((call) => call.runId)).toEqual(['run-cold']), 6000);
+      const [request] = await readReopenRequests(targetDataDir);
+      expect(request?.startedAt).toBeTruthy();
+      expect(builds).toBe(1);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      // Same teardown-by-resubscribe as the autostart twin: one subscription per dataDir, so
+      // re-subscribing stops what `onContextBuilt` armed and stopping the replacement leaves none.
+      if (targetContext) watchReopenRequests({ dataDir: targetDataDir, manager })();
+      stopBootWatch();
+      bootStore.flush();
+      targetStore?.flush();
+      rmSync(bootRoot, { recursive: true, force: true });
+      rmSync(targetRoot, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+      if (savedHome === undefined) delete process.env.CEZ_HOME;
+      else process.env.CEZ_HOME = savedHome;
+      if (savedCluster === undefined) delete process.env.CEZ_CLUSTER;
+      else process.env.CEZ_CLUSTER = savedCluster;
+      if (savedAutomations === undefined) delete process.env.CEZ_AUTOMATIONS;
+      else process.env.CEZ_AUTOMATIONS = savedAutomations;
+      if (savedBackup === undefined) delete process.env.CEZ_BACKUP;
+      else process.env.CEZ_BACKUP = savedBackup;
+    }
   });
 });

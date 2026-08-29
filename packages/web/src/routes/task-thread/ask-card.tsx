@@ -2,7 +2,6 @@ import { useState } from 'react'
 
 import type { ApiRun } from '@loki-labs/better-cezar-api-client'
 import { Button } from '@/components/ui/button'
-import { Link as WorkspaceLink } from 'react-router'
 import { Link } from '@/lib/project-router'
 import { cn } from '@/lib/utils'
 
@@ -123,14 +122,6 @@ function PendingAsk({ ask, run }: { ask: ThreadAsk; run: ApiRun }) {
           </span>
         </div>
       )}
-      {delivery.blockedBy === 'provider' ? (
-        <div data-slot="ask-provider-gate" className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-          <span>{delivery.reason}</span>
-          <WorkspaceLink to="/settings/providers" className="font-medium text-foreground underline underline-offset-4">
-            Configure providers
-          </WorkspaceLink>
-        </div>
-      ) : null}
       {delivery.blockedBy === 'no-session' ? (
         <p data-slot="ask-no-session" className="mt-3 text-xs text-muted-foreground">
           {delivery.reason}

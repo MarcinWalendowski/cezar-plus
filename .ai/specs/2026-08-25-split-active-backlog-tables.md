@@ -263,6 +263,30 @@ so a URL hand-edited from muscle memory resolves instead of silently falling bac
 
 Nothing to extend, so the smallest honest thing:
 
+**CORRECTED 2026-08-29 on merge to `main`. The route, the contract and the store described below
+were never shipped; the event names changed.** `.ai/specs/2026-08-26-filed-task-detail-page.md`
+built a workspace analytics sink on a parallel branch over the same days, and it landed on `main`
+first. Two sinks could not coexist: both `export *`ed an `analyticsEventSchema` from
+`packages/contract/src/index.ts`, so the barrel dropped both as ambiguous and the build broke. This
+spec's half was deleted (`contract/src/workspace-analytics.ts`, `server/analytics-routes.ts`,
+`workspace/analytics-store.ts` and their tests) and `packages/web/src/lib/analytics.ts` was
+repointed at the surviving one. What actually ships:
+
+- **`POST /api/v1/workspace/analytics/events`**, body `{events: [{name, props}]}`, at most 20 per
+  batch, appended to `<CEZ_HOME>/analytics/events.ndjson` (one file, rotated once at 5 MB), `202
+  {accepted}`.
+- **The server stamps `ts` and `v`**, so `track()` no longer sends a client timestamp. The reason
+  the client used to stamp it — a batched flush collapsing several actions onto one arrival time —
+  is a real cost, accepted: the landed sink's contract says the client cannot set `ts`, and one
+  sink beats a better timestamp.
+- **Names follow the sink's `noun.verb_past` grammar**, which forbids an underscore in the first
+  segment: `todo.filed_partition_viewed`, `todo.filed_sorted`, `todo.filed_show_more`. The props,
+  the firing rules and the "no task content in a prop" property are unchanged from the table below.
+- **An over-long prop value is now REJECTED, not truncated**, and rejection drops the whole batch.
+  Every call site here is bounded by construction, so nothing this spec emits can trip it.
+
+The original text follows unchanged.
+
 - **`packages/web/src/lib/analytics.ts`** exports `track(event: string, props: Record<string, string | number | boolean>)`.
   It buffers events in memory and flushes on an idle callback (batched, at most one request in
   flight, dropped silently on failure). It never blocks a render and never throws into a

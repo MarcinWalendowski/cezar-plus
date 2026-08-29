@@ -29,6 +29,35 @@
 
 ## 🛠 Fixed
 
+- **Cold-project intent discovery is now verified on production, and its verification runbook
+  no longer lies.** The runtime fix (`809c8220`) shipped on 2026-08-25 and reached production
+  on 2026-08-29; both cold-project canaries were run against the live service and passed. A
+  todo marked `autostart` in a registered but **non-resident** project started a run **4 s**
+  later, and a reopen request filed against a non-resident project was continued **6 s** later,
+  each in a project measured non-resident from the server process in the same invocation as a
+  passing positive control. Eight untouched cold projects gained no directory, no file and no
+  watch, so discovery still never creates `.ai/cezar` as a side effect.
+
+  Three things were wrong in the verification chain rather than in the runtime, and all three
+  are fixed. **The residency probe could never pass its own positive control**, it compared
+  `stat -Lc %D` (`major<<8|minor`) against fdinfo's `sdev:` (`major<<20|minor`), so it
+  reported "not watched" for every path including the running server's own boot project; run as
+  written it would have manufactured a false proof of non-residency for the canary that is the
+  entire point. It also has to `cat` each `fdinfo` file rather than glob them into one `awk`,
+  because a descriptor closing mid-scan kills `awk` and prints an empty count that reads as
+  cold. **Both twin regression tests passed without the wiring they exist to pin**, each stub
+  armed the live watcher itself, so deleting `server.ts`'s `onContextBuilt` lines left them
+  green; the stubs no longer do that, and cutting either line now fails the matching test.
+  **The source-removal control the spec predicted does not hold**: removing
+  `lazyProjectIntentDiscovery.refresh()` leaves both tests green, because `refresh()` is only
+  the immediate boot pass and the interval poll reaches the same file anyway. The load-bearing
+  line is `lazy-project-intents.ts`'s `await deps.contexts.context(row.id)`, and cutting that
+  fails both. See `.ai/specs/2026-08-25-cold-watcher-production-verification.md`.
+
+  Known gap this surfaced: cezar has **no headless cancel** (`POST /runs/:id/cancel` is 401 by
+  design, and the CLI has no cancel verb), so the disposable run an autostart canary creates
+  cannot be cleaned up without the cockpit.
+
 - **Workspace revision checks now follow the project worktrees.** `tested-revision-shipped`
   captures and verifies every persisted workspace project against its own tested tree. Scratch
   control files such as `.cezar-control-path` and gate logs no longer reject a valid project
@@ -71,7 +100,11 @@
   `BACKWARD_COMPATIBILITY.md` §2 protected surface. The Archived tab still reads it and still
   renders one unsplit, client-sorted table.
 
-- 📊 **A local analytics sink** (`POST /api/v1/workspace/analytics`, same spec, D7). There was no
+- 📊 **The Filed board reports itself** to the local analytics sink (`POST /api/v1/workspace/analytics/events`), with three events: `todo.filed_partition_viewed`, `todo.filed_sorted` and `todo.filed_show_more`. Events are buffered in the browser, flushed on idle at most one request at a time, dropped silently on failure, and appended **on your own machine**; nothing leaves it. `CEZ_ANALYTICS=0` turns it off.
+
+  <!-- The bullet below described a SECOND sink, written in parallel and deleted on merge (2026-08-29); see BACKWARD_COMPATIBILITY.md §2. It is kept only so the correction has something to point at. -->
+
+- ~~📊 **A local analytics sink** (`POST /api/v1/workspace/analytics`, same spec, D7).~~ There was no
   analytics anywhere in this repository before this — a grep for
   `analytics|telemetry|posthog|logEvent|emitEvent` found only aspirational `TODO(analytics):`
   markers in prose — so the Filed board's three events (`filed_tasks.partition_viewed`,

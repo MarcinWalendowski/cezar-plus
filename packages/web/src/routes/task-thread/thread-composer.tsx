@@ -5,7 +5,6 @@ import { useSendMessage } from '@/api/queries'
 import type { ApiRun } from '@loki-labs/better-cezar-api-client'
 import { Composer } from '@/components/composer/composer'
 
-import { useActiveProviderAvailability } from './active-provider'
 import { useContinueAction } from './follow-up-engine'
 import { reapTaskDrafts, readTaskDraft, writeTaskDraft } from './task-drafts'
 
@@ -39,17 +38,14 @@ export function ThreadComposer({
   // The fourth authorable state: a closed run whose last session can be reopened. Continue takes a
   // prompt, so the composer stays live and its send IS that Continue.
   const continueAction = useContinueAction(run)
-  const hasContinuation = !sessionOpen && !queued && continueAction.available
-  const continuable = hasContinuation && continueAction.canContinue
+  // Reroutable (site 3 for a live/queued send, site 4/5 for a continuation): the CLIENT cannot see
+  // the accounts store or the project route, so no client-side predicate over provider status is
+  // right — the server's answer to the submission is authoritative
+  // (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 6). A closed run with a
+  // recorded session to reopen stays continuable regardless of what provider discovery currently
+  // reports; the composer attempts the submission and renders the server's own refusal, if any.
+  const continuable = !sessionOpen && !queued && continueAction.available
   const sendMessage = useSendMessage(run.id)
-  const activeProvider = useActiveProviderAvailability(run)
-  // A queued send only amends the persisted prompt; it invokes no provider and therefore remains
-  // available even when provider discovery cannot authorize a live session. Once the session is
-  // open, mirror the server's active-backend gate as before.
-  const activeProviderBlocked = sessionOpen && !activeProvider.usable
-  const continuationProviderBlocked = hasContinuation && !continueAction.canContinue
-  const providerBlocked = activeProviderBlocked || continuationProviderBlocked
-  const providerReason = activeProviderBlocked ? activeProvider.reason : continueAction.reason
 
   // Mount-time read: this component is keyed by run id, so a task switch is a real mount and the
   // first painted frame already carries the right task's words.
@@ -76,22 +72,28 @@ export function ThreadComposer({
           ? (submitted, images) => continueAction.continueWith(submitted, images)
           : (submitted, images) => sendMessage.mutateAsync({ text: submitted, images })
       }
-      disabled={providerBlocked || (!sessionOpen && !queued && !continuable)}
+      disabled={!sessionOpen && !queued && !continuable}
       // Only reachable now by a closed run with NO session to resume — which is exactly the one
       // case where Continue is not on offer either. Left honest rather than rewritten: "closed" is
       // all such a run can be told.
-      disabledReason={providerBlocked ? providerReason : 'Session closed — no session to resume.'}
+      disabledReason="Session closed — no session to resume."
       // The engine pills ride the enabled footer, so the picked runner/model and the typed prompt
-      // reach `POST /continue` in one request.
+      // reach `POST /continue` in one request. `continueAction.reason` is ADVISORY now, not a
+      // gate: it names a provider problem the server may still route around (a pool member, a
+      // fallback), so it replaces the pills with a way to fix it rather than blocking the send.
       footerEnd={
-        providerBlocked && !continueAction.providerPending ? (
-          <WorkspaceLink
-            to="/settings/providers"
-            className="text-xs font-medium text-foreground underline underline-offset-4"
-          >
-            Configure providers
-          </WorkspaceLink>
-        ) : continuable ? continueAction.pills : undefined
+        continuable ? (
+          continueAction.reason && !continueAction.providerPending ? (
+            <WorkspaceLink
+              to="/settings/providers"
+              className="text-xs font-medium text-foreground underline underline-offset-4"
+            >
+              Configure providers
+            </WorkspaceLink>
+          ) : (
+            continueAction.pills
+          )
+        ) : undefined
       }
       // Continuing with nothing typed is the legacy one-click Continue.
       allowEmptySubmit={continuable}

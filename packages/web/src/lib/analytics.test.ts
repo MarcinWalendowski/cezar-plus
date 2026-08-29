@@ -8,23 +8,23 @@ import { __flushAnalyticsForTests, __resetAnalyticsForTests, track } from './ana
  * caller does can make a component wait on, or fail because of, the sink.
  */
 
-let posted: { events: { event: string; ts: string; props?: Record<string, unknown> }[] }[] = []
+let posted: { events: { name: string; props: Record<string, unknown> }[] }[] = []
+
+const captureFetch = () =>
+  vi.fn(async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+    posted.push(JSON.parse(String(init.body)))
+    return new Response(JSON.stringify({ accepted: 1 }), {
+      status: 202,
+      headers: { 'content-type': 'application/json' },
+    })
+  })
 
 beforeEach(() => {
   posted = []
   __resetAnalyticsForTests()
   // `requestIdleCallback` is absent under jsdom, so `track` already falls back to a macrotask;
   // the tests drive the flush explicitly rather than waiting on either.
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (_input: RequestInfo | URL, init: RequestInit = {}) => {
-      posted.push(JSON.parse(String(init.body)))
-      return new Response(JSON.stringify({ accepted: 1 }), {
-        status: 202,
-        headers: { 'content-type': 'application/json' },
-      })
-    }),
-  )
+  vi.stubGlobal('fetch', captureFetch())
 })
 
 afterEach(() => {
@@ -34,34 +34,37 @@ afterEach(() => {
 
 describe('track', () => {
   it('batches several events into ONE request', async () => {
-    track('filed_tasks.sorted', { partition: 'active', column: 'task', dir: 'asc' })
-    track('filed_tasks.show_more', { partition: 'backlog', from: 30, to: 40 })
+    track('todo.filed_sorted', { partition: 'active', column: 'task', dir: 'asc' })
+    track('todo.filed_show_more', { partition: 'backlog', from: 30, to: 40 })
     expect(posted).toHaveLength(0) // nothing has left the buffer yet — `track` returns immediately
 
     await __flushAnalyticsForTests()
     expect(posted).toHaveLength(1)
-    expect(posted[0]?.events.map((event) => event.event)).toEqual([
-      'filed_tasks.sorted',
-      'filed_tasks.show_more',
+    expect(posted[0]?.events.map((event) => event.name)).toEqual([
+      'todo.filed_sorted',
+      'todo.filed_show_more',
     ])
     expect(posted[0]?.events[0]?.props).toEqual({ partition: 'active', column: 'task', dir: 'asc' })
   })
 
-  it('stamps each event with its own time, so a batched flush does not collapse them', async () => {
-    track('a')
-    track('b')
+  it('sends an empty props object rather than omitting the key the sink requires', async () => {
+    track('todo.filed_sorted')
     await __flushAnalyticsForTests()
-    for (const event of posted[0]?.events ?? []) {
-      expect(Number.isNaN(Date.parse(event.ts))).toBe(false)
-    }
+    expect(posted[0]?.events[0]?.props).toEqual({})
   })
 
-  it('splits a batch over 50 events and sends the rest next time', async () => {
-    for (let i = 0; i < 60; i += 1) track(`e${i}`)
+  it('never stamps a client timestamp — the server owns `ts`', async () => {
+    track('todo.filed_sorted', { partition: 'active' })
     await __flushAnalyticsForTests()
-    expect(posted[0]?.events).toHaveLength(50)
+    expect(Object.keys(posted[0]?.events[0] ?? {}).sort()).toEqual(['name', 'props'])
+  })
+
+  it('splits a batch over the sink cap and sends the rest next time', async () => {
+    for (let i = 0; i < 25; i += 1) track(`todo.filed_e${i}`)
     await __flushAnalyticsForTests()
-    expect(posted[1]?.events).toHaveLength(10)
+    expect(posted[0]?.events).toHaveLength(20)
+    await __flushAnalyticsForTests()
+    expect(posted[1]?.events).toHaveLength(5)
   })
 
   it('drops a failed POST silently and never throws — and the next batch still goes out', async () => {
@@ -71,23 +74,14 @@ describe('track', () => {
         throw new Error('offline')
       }),
     )
-    track('lost')
+    track('todo.filed_lost')
     await expect(__flushAnalyticsForTests()).resolves.toBeUndefined()
 
     // Recovery: a later event is not held hostage by the dropped one.
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (_input: RequestInfo | URL, init: RequestInit = {}) => {
-        posted.push(JSON.parse(String(init.body)))
-        return new Response(JSON.stringify({ accepted: 1 }), {
-          status: 202,
-          headers: { 'content-type': 'application/json' },
-        })
-      }),
-    )
-    track('kept')
+    vi.stubGlobal('fetch', captureFetch())
+    track('todo.filed_kept')
     await __flushAnalyticsForTests()
-    expect(posted.at(-1)?.events.map((event) => event.event)).toEqual(['kept'])
+    expect(posted.at(-1)?.events.map((event) => event.name)).toEqual(['todo.filed_kept'])
   })
 
   it('a server error status is dropped just as silently as a network failure', async () => {
@@ -95,7 +89,7 @@ describe('track', () => {
       'fetch',
       vi.fn(async () => new Response(JSON.stringify({ error: 'nope' }), { status: 500 })),
     )
-    track('boom')
+    track('todo.filed_boom')
     await expect(__flushAnalyticsForTests()).resolves.toBeUndefined()
   })
 
@@ -111,19 +105,10 @@ describe('track', () => {
         throw new Error('offline')
       }),
     )
-    for (let i = 0; i < 1_000; i += 1) track(`e${i}`)
+    for (let i = 0; i < 1_000; i += 1) track(`todo.filed_e${i}`)
     // Newest-wins: the events a reader would be asking about are the recent ones.
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (_input: RequestInfo | URL, init: RequestInit = {}) => {
-        posted.push(JSON.parse(String(init.body)))
-        return new Response(JSON.stringify({ accepted: 1 }), {
-          status: 202,
-          headers: { 'content-type': 'application/json' },
-        })
-      }),
-    )
+    vi.stubGlobal('fetch', captureFetch())
     await __flushAnalyticsForTests()
-    expect(posted[0]?.events[0]?.event).toBe('e800') // 1000 - (50 * 4)
+    expect(posted[0]?.events[0]?.name).toBe('todo.filed_e920') // 1000 - (20 * 4)
   })
 })

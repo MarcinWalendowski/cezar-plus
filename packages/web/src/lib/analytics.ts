@@ -2,11 +2,15 @@ import { postAnalytics } from '@/api/client'
 import { ANALYTICS_MAX_EVENTS_PER_BATCH } from '@loki-labs/better-cezar-api-client'
 
 /**
- * Product-usage events (`.ai/specs/2026-08-25-split-active-backlog-tables.md`, D7).
+ * Product-usage events for the Filed board (`.ai/specs/2026-08-25-split-active-backlog-tables.md`,
+ * D7), delivered to the workspace analytics sink
+ * (`.ai/specs/2026-08-26-filed-task-detail-page.md`) — `POST /workspace/analytics/events`, one
+ * NDJSON line per event under `<CEZ_HOME>/analytics/`.
  *
- * **The first analytics in this cockpit.** A grep for `analytics|telemetry|posthog|logEvent|
- * emitEvent` across `packages/web/src` found nothing before this file, so there was no sink to
- * wire into and "analytics ship" had to mean building the smallest honest one.
+ * **There is one sink, deliberately.** This file and that sink were built in parallel on separate
+ * branches and each shipped its own contract, route and store; they were converged onto the
+ * landed one when the branches merged (2026-08-29). Anything measuring a cross-project board goes
+ * through here — do not add a second route.
  *
  * Three rules, and they are the whole design:
  *
@@ -22,16 +26,18 @@ import { ANALYTICS_MAX_EVENTS_PER_BATCH } from '@loki-labs/better-cezar-api-clie
  *    unbounded array. Newest-wins is the right side to keep: the recent events are the ones a
  *    reader is asking about.
  *
- * The sink is local (`~/.cezar/analytics/`) and nothing here leaves the machine — see
- * `BACKWARD_COMPATIBILITY.md` §9.
+ * Event names follow the sink's `noun.verb_past` grammar (`todo.filed_sorted`, not
+ * `filed_tasks.sorted`): the server's schema rejects an underscore in the first segment, and it
+ * rejects the WHOLE batch, so an invalid name here silently costs every event beside it.
+ *
+ * The sink is local and nothing here leaves the machine — see `BACKWARD_COMPATIBILITY.md` §9.
  */
 
 export type AnalyticsProps = Record<string, string | number | boolean>
 
 interface BufferedEvent {
-  event: string
-  ts: string
-  props?: AnalyticsProps
+  name: string
+  props: AnalyticsProps
 }
 
 /** Four batches' worth. Past this the buffer drops from the front. */
@@ -81,10 +87,15 @@ function scheduleFlush(): void {
 /**
  * Record one event. Fire-and-forget: it returns immediately, and nothing a caller does with the
  * return value can make a component wait on the sink.
+ *
+ * `props` defaults to `{}` because the sink's schema requires the key — an event with nothing to
+ * say still carries an empty object rather than being rejected with the batch around it. The
+ * timestamp is NOT set here: the server stamps `ts` on every line, so a client clock cannot write
+ * into the log.
  */
-export function track(event: string, props?: AnalyticsProps): void {
+export function track(name: string, props: AnalyticsProps = {}): void {
   try {
-    buffer.push({ event, ts: new Date().toISOString(), ...(props === undefined ? {} : { props }) })
+    buffer.push({ name, props })
     if (buffer.length > MAX_BUFFERED) buffer = buffer.slice(buffer.length - MAX_BUFFERED)
     scheduleFlush()
   } catch {
