@@ -1,6 +1,18 @@
 # Spec tab review feed
 
-- **Status:** Specified, not implemented. Written 2026-08-29 by step 2 of run
+- **Status:** Implemented, QA Needed. Phase 1 (P1 persistence + P2 contract/route + P3 tab)
+  landed in one commit, `2a16bb72` ("feat: implement spec tab review feed
+  (2026-08-29-spec-tab-review-feed)"), merged to `main` via PR #14 (merge commit `9665fbac`).
+  Repository gates re-run on the fully merged tree (step 7 of this run): `npm run typecheck`
+  green across all four workspaces; `npm test` — 642 passed / 2 skipped test files, 12142
+  passed / 4 skipped tests, exit 0. The five pre-existing failures this run's earlier gate runs
+  saw (`workflows/step-runner-account.test.ts`, `workspace/account-viability.test.ts`,
+  `workspace/agent-route-step-provider.test.ts`) are unrelated account/quota-routing tests this
+  branch never touched (confirmed by empty `git diff --stat` on those files) and are tracked
+  separately as todo `8cc9e7b3-36c6-479d-b981-3bd2def07dac`. **Not yet run: the Runtime E2E**
+  below (line ~1133), which requires the owner's explicit approval to boot the cockpit and
+  drive real `spec`/`review-spec` agent runs through the approval gate twice — until that
+  passes and is quoted here, this is QA Needed, not Done. Written 2026-08-29 by step 2 of run
   `44ac315d-737f-484c-a405-9e1939e7fa3d`.
 - **Date:** 2026-08-29
 - **Owner instruction, verbatim:** "When 'write spec' is ready, show a tab with written spec to
