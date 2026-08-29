@@ -2,6 +2,22 @@
 
 ## Added
 
+- 📄 **Task detail gets a Spec tab, rendered as a feed: spec, then review, then spec again, until
+  a review passes** (spec `.ai/specs/2026-08-29-spec-tab-review-feed.md`, merged via PR #14,
+  commit `2a16bb72`). Before this, the reviewer's verdict and report lived only in memory on
+  `ActiveRun` and were cleared after one use, and the `spec` step overwrote the same file on
+  every retry, so revision 1's text was already gone from disk by the time revision 2 existed:
+  the loop was real but unwatchable. Now every `spec` write and every `review` verdict (agent or
+  human) is appended to a new per-run file, `<dataDir>/runs/<runId>.spec-review.ndjson`, and
+  `GET /api/v1/runs/:id/spec` (additive, `BACKWARD_COMPATIBILITY.md`) serves it as an ordered
+  feed: a clean `pass` renders just the spec (the owner's "if review was passed, don't show"),
+  a `revise` renders the full argument in order, and a run mid-approval-gate renders a neutral
+  "awaiting human approval" line rather than a premature accepted state. A run with no recorded
+  log but a `declaredSpecPath` still gets one synthetic entry read live off the worktree, so an
+  older or finished run isn't left with an empty tab. **QA Needed**: the spec's own Runtime E2E
+  (real agent runs through the approval gate twice) has not been executed pending the owner's
+  approval to run it.
+
 - ⚡ **`spec-to-deploy` reworks a spec in the session that wrote it, and reviews it twice** (spec
   `.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`). Measured on run `872b396a`: the
   `review-spec` step took **14:02** — of which tool execution was 33.5s — and the `spec` rework it
