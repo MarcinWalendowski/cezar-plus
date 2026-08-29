@@ -4,6 +4,14 @@ import type { WorkspaceTodoEntry } from '@loki-labs/better-cezar-api-client'
 
 import {
   DEFAULT_FILED_SORT,
+  DEFAULT_FILED_TABLE_SORT,
+  FILED_SORTABLE_COLUMNS,
+  cycleFiledTableSort,
+  filedAriaSort,
+  filedPartitionOf,
+  formatFiledTableSort,
+  isDefaultFiledTableSort,
+  parseFiledTableSort,
   FILED_PRIORITY_VALUES,
   FILED_STATUS_VALUES,
   NO_FILED_FILTERS,
@@ -260,5 +268,70 @@ describe('filed task selection', () => {
     expect(filedSelectionState(keys, new Set(['api:todo-1']))).toBe('some')
     expect(filedSelectionState(keys, new Set(keys))).toBe('all')
     expect(filedSelectionState([], new Set(['api:todo-1']))).toBe('none')
+  })
+})
+
+/**
+ * Per-table sorting (`.ai/specs/2026-08-25-split-active-backlog-tables.md`, D3/D6, verification
+ * step 5). The ORDER itself is the server's and is tested there
+ * (`workspace/todo-ordering.test.ts`); what these cover is the vocabulary the URL and the header
+ * cells speak, and the forgiveness a pasted or hand-edited URL needs.
+ */
+describe('filed table sorts', () => {
+  it('formats and parses the composite grammar', () => {
+    expect(formatFiledTableSort({ column: 'priority', dir: 'asc' })).toBe('priority:asc')
+    expect(parseFiledTableSort('priority:asc')).toEqual({ column: 'priority', dir: 'asc' })
+  })
+
+  it('accepts the LEGACY created-desc / created-asc spellings as aliases for age', () => {
+    // Muscle memory from the Archived table's own `fsort`, and from the dropdown this replaced.
+    expect(parseFiledTableSort('created-desc')).toEqual({ column: 'age', dir: 'desc' })
+    expect(parseFiledTableSort('created-asc')).toEqual({ column: 'age', dir: 'asc' })
+  })
+
+  it('anything unrecognised falls back to the default WHOLE, never half-applied', () => {
+    for (const raw of ['', 'garbage', 'garbage:sideways', 'age:sideways', 'node:asc', 'age', ':asc', null, undefined]) {
+      expect(parseFiledTableSort(raw)).toEqual(DEFAULT_FILED_TABLE_SORT)
+    }
+  })
+
+  it('`node` is not a sortable column — it means nothing on a single-node cockpit', () => {
+    expect(FILED_SORTABLE_COLUMNS).not.toContain('node')
+    expect([...FILED_SORTABLE_COLUMNS].sort()).toEqual(['age', 'author', 'priority', 'project', 'status', 'task'])
+  })
+
+  it('the click cycle is asc -> desc -> asc on the sorted column, and asc on any other', () => {
+    const start = DEFAULT_FILED_TABLE_SORT // age:desc
+    const first = cycleFiledTableSort(start, 'age')
+    expect(first).toEqual({ column: 'age', dir: 'asc' })
+    expect(cycleFiledTableSort(first, 'age')).toEqual({ column: 'age', dir: 'desc' })
+    // A different column always starts ascending — there is no third "unsorted" state, because
+    // the server must always be asked for SOME order.
+    expect(cycleFiledTableSort(first, 'project')).toEqual({ column: 'project', dir: 'asc' })
+  })
+
+  it('aria-sort names the sorted column and says `none` for every other sortable one', () => {
+    const sort = { column: 'task', dir: 'asc' } as const
+    expect(filedAriaSort(sort, 'task')).toBe('ascending')
+    expect(filedAriaSort({ column: 'task', dir: 'desc' }, 'task')).toBe('descending')
+    expect(filedAriaSort(sort, 'age')).toBe('none')
+  })
+
+  it('isDefaultFiledTableSort is what keeps a bare /tasks bare', () => {
+    expect(isDefaultFiledTableSort(DEFAULT_FILED_TABLE_SORT)).toBe(true)
+    expect(isDefaultFiledTableSort({ column: 'age', dir: 'asc' })).toBe(false)
+    expect(isDefaultFiledTableSort({ column: 'task', dir: 'desc' })).toBe(false)
+  })
+
+  it('filedPartitionOf: todo (and absent) is Backlog, everything else is Active', () => {
+    const entry = (status?: 'todo' | 'in-progress' | 'blocked' | 'done'): WorkspaceTodoEntry => ({
+      project: 'api',
+      todo: { id: 't', summary: 'x', ...(status === undefined ? {} : { status }) },
+    })
+    expect(filedPartitionOf(entry())).toBe('backlog')
+    expect(filedPartitionOf(entry('todo'))).toBe('backlog')
+    expect(filedPartitionOf(entry('in-progress'))).toBe('active')
+    expect(filedPartitionOf(entry('blocked'))).toBe('active')
+    expect(filedPartitionOf(entry('done'))).toBe('active')
   })
 })

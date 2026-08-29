@@ -452,6 +452,12 @@ export const providerStatusSchema = z.object({
    *  provider — the discovered default — so an older client sees no change at all. Per-account
    *  rows are carried by `GET /api/v1/workspace/agent-profiles` instead. */
   profileId: z.string().optional(),
+  /** Whether this provider has at least one NON-default account that is connected — additive,
+   *  advisory only, `.ai/specs/2026-08-25-logged-out-account-fallback.md`. `undefined` means "no
+   *  pool information", never "no pool accounts": a cold cache must not read as `false`. Nothing
+   *  gates on this field; it exists so the engine picker and the Settings dots stop lying about a
+   *  provider whose default is dead but whose pool is healthy. */
+  poolConnected: z.boolean().optional(),
 });
 export type ProviderStatus = z.infer<typeof providerStatusSchema>;
 

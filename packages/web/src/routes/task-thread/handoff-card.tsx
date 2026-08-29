@@ -22,9 +22,24 @@ export function HandoffCard({ run }: { run: ApiRun }) {
   const invalidate = () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
   const resolve = useMutation({
     mutationFn: () => resolveRunHandoff(run.id, note.trim() || undefined),
-    onSuccess: () => {
-      updateNote('')
+    /**
+     * A 200 is not a yes. The server re-probes on Resolve and answers `resolved: false` when the
+     * targets are still red — the handoff stays parked, and the run does not move. This branch
+     * used to be missing entirely: `onSuccess` cleared the note and showed nothing, so a refusal
+     * and a success looked identical and the button read as broken. Measured 2026-08-29: the
+     * operator pressed it five times on run cc25d636 against five honest reds.
+     *
+     * On a refusal, KEEP the note — it is the operator's, they may still want it on the record,
+     * and wiping what someone typed is the second half of what made this feel dead.
+     */
+    onSuccess: (result) => {
       void invalidate()
+      if (!result.resolved) {
+        toast(result.verdict || 'the deploy targets are still red — nothing was deployed', { tone: 'danger' })
+        return
+      }
+      updateNote('')
+      toast('handoff resolved — the run is continuing')
     },
     onError: (error: Error) => toast(error.message || 'could not resolve the handoff', { tone: 'danger' }),
   })

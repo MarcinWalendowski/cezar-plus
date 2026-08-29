@@ -14,8 +14,11 @@ import { DrainController, resolveDrainMs } from './server/drain.ts';
 import {
   ProviderAuthService,
   providerAuthChecksDisabled,
+  type ProviderId,
 } from './core/provider-auth.ts';
 import { applyProviderEnablement } from './core/provider-availability.ts';
+import { accountAuthFromService, assessAccountViability, loadViabilityInput } from './workspace/account-viability.ts';
+import { defaultAgentAccountStore, loadAgentAccounts } from './workspace/agent-accounts.ts';
 import { canonicalPath, pruneOrphans } from './git-worktree.ts';
 import { getRepoInfo } from './server/git.ts';
 import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from './config.ts';
@@ -25,9 +28,11 @@ import { findForeignWorkspaceOwner, loadForeignWorkspaceRunSources } from './run
 import { runRunStatsCommand } from './runs/stats-cli.ts';
 import { runRunsCommand } from './runs/reopen-cli.ts';
 import { RunManager } from './workflows/run.ts';
+import { recheckManualDeployParksEverywhere } from './workflows/recheck-parks-workspace.ts';
 import { loadWorkflows } from './workflows/load.ts';
 import { DEFAULT_WORKFLOW_NAME } from './workflows/types.ts';
 import { startServer, WorkspaceEventBus, type SessionResolver } from './server/server.ts';
+import type { ProjectContexts } from './server/project-context.ts';
 import { runAuthBootGate } from './auth-boot-gate.ts';
 import { buildLocalModeRoutes } from './local-mode-boot.ts';
 import type { Hono } from 'hono';
@@ -35,15 +40,12 @@ import {
   ProviderRuntimeAuthObserver,
   recoverWithProviderRuntimeAuthObservation,
 } from './server/provider-auth-runtime.ts';
-import {
-  providersRequiredByWorkflow,
-  unavailableProviderMessage,
-} from './server/provider-action-gate.ts';
+import { disabledProviderMessage, requirementsForWorkflowRun, viabilityRefusalMessage } from './server/provider-action-gate.ts';
 import { checkForUpdate } from './update-check.ts';
 import { ensureBootRepo, holdsOnlyRuntimeState } from './workspace/boot-repo.ts';
 import { loadWorkspaceConfig } from './workspace/config.ts';
 import { runMigrations } from './workspace/migrations.ts';
-import { shouldRegisterProject } from './workspace/projects.ts';
+import { listProjects, shouldRegisterProject } from './workspace/projects.ts';
 import { runProjectsCommand } from './workspace/projects-cli.ts';
 import { runBackupCommand } from './backup/cli.ts';
 import { runKnowledgeCommand } from './knowledge/cli.ts';
@@ -788,8 +790,15 @@ async function serveCommand(
   // keepLive + recover() (#367): runs that were queued/running/waiting when
   // the previous process exited are re-queued or resumed instead of failed.
   const store = openStore(repoRoot, { keepLive: true });
-  const manager = new RunManager(store, repoRoot, { semaphore, bootScratchRoot });
+  // Built BEFORE the manager so its dispatch pickers can be handed a real credentials read from
+  // the moment they exist, rather than the seam's `'unknown'` default
+  // (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1).
   const providerAuth = new ProviderAuthService();
+  const manager = new RunManager(store, repoRoot, {
+    semaphore,
+    bootScratchRoot,
+    accountAuth: accountAuthFromService(providerAuth),
+  });
   const workspaceEvents = new WorkspaceEventBus();
   const providerRuntimeAuth = new ProviderRuntimeAuthObserver(providerAuth, (status) => {
     workspaceEvents.emit('provider-status', status);
@@ -874,9 +883,16 @@ async function serveCommand(
     );
   }
 
+  // The project-context resolver, captured from `startServer` below. It is the only way to reach
+  // a NON-boot project's manager, which the manual-deploy sweep at the end of this function needs:
+  // production's boot project is `workspace` and every cezar deploy park lives in `cezar`.
+  let sharedContexts: ProjectContexts | undefined;
   startServer({
     repoRoot,
     listenFd,
+    onContextsReady: (contexts) => {
+      sharedContexts = contexts;
+    },
     // P3: the same controller the signal handlers below drain. Without it the server counts
     // nothing and registers nothing, and the drain has no work to do — which is exactly the state
     // this wiring was missing.
@@ -908,6 +924,32 @@ async function serveCommand(
   }
   if (port !== preferredPort) console.log(`  (port ${preferredPort} was busy — using ${port})`);
   console.log(`\n  cockpit → ${url}\n`);
+
+  // An ACTIVATION IS A RESTART on a blue-green box, so THIS is the moment every run parked on a
+  // `manual-deploy` handoff may have just been satisfied by the deploy that restarted us. It runs
+  // here, after `startServer`, and not in `manager.recover()` above, because a deploy probe asks
+  // THIS server which sha it is serving: from `recover()` it would interrogate a socket that is
+  // not accepting yet and report red for every run. `/api/v1/ready` is the gate rather than
+  // `/api/v1/health` because it is uncached by construction and 503s until the server really is
+  // ready — `waitForHealth` polls until `res.ok`, which is exactly that condition.
+  void waitForHealth(`${url}/api/v1/ready`, 30_000)
+    .then(async (ready) => {
+      if (!ready) return;
+      // EVERY project, not just the boot one. Calling `manager.recheckManualDeployParks()` here
+      // swept the boot project alone, and on prod-host the boot project is `workspace` while
+      // every deploy park is in the separately-registered `cezar` project — so the sweep ran, found
+      // nothing, and two runs stayed parked across an activation that had satisfied both of them
+      // (measured 2026-08-29; their own probes exited 0 by hand). A project is opened only when a
+      // cheap read of its `runs.json` shows a park, so this keeps the lazy-watcher cost at zero.
+      const requeued = await recheckManualDeployParksEverywhere({
+        bootManager: manager,
+        bootRoot: repoRoot,
+        ...(sharedContexts ? { contexts: sharedContexts } : {}),
+        listProjects,
+      });
+      if (requeued > 0) console.log(`  rechecked ${requeued} run(s) parked on a manual deploy\n`);
+    })
+    .catch(() => undefined);
   // Graceful drain (spec `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md`, P3).
   //
   // This used to be `store.flush(); process.exit(0)` — immediate and unconditional, cutting
@@ -1024,21 +1066,44 @@ async function runCommand(
   }
 
   const providerAuth = new ProviderAuthService();
-  const requiredProviders = providersRequiredByWorkflow(
+  // Shares the one module `providerActionError` (server.ts) and the RunManager pickers read too —
+  // `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Architecture: `providerActionError` is
+  // a closure declared inside `createApp` and this package cannot call it, so the headless
+  // preflight calls `assessAccountViability` directly instead of reimplementing its decision.
+  const fallback = (await loadConfig(repoRoot)).defaultRunner;
+  const [accounts, workspace] = await Promise.all([
+    loadAgentAccounts().catch(() => defaultAgentAccountStore()),
+    loadWorkspaceConfig(),
+  ]);
+  const requirements = requirementsForWorkflowRun({
     workflow,
-    (await loadConfig(repoRoot)).defaultRunner,
-  );
-  if (requiredProviders.length > 0 && !providerAuthChecksDisabled()) {
-    const [discovered, workspace] = await Promise.all([
-      providerAuth.status(),
-      loadWorkspaceConfig(),
-    ]);
-    const blocked = unavailableProviderMessage(
-      requiredProviders,
-      applyProviderEnablement(discovered, workspace.disabledProviders),
-    );
-    if (blocked) {
-      console.error(blocked);
+    accounts,
+    repoRoot,
+    fallback,
+    overrideAgentProfile: undefined,
+    fallbackAcrossAccountsWhenLimited: workspace.resources.fallbackAcrossAccountsWhenLimited,
+  });
+  if (requirements.length > 0 && !providerAuthChecksDisabled()) {
+    const discovered = await providerAuth.status();
+    const providerRows = applyProviderEnablement(discovered, workspace.disabledProviders).providers;
+    // Disabled is a settings fact, terminal regardless of what else is authorized — checked FIRST,
+    // same as `providerActionError`'s own first rung, and unlike that rung this preflight has no
+    // `poolHasConnectedAccount` behind it to fall through to, so this must not be skipped.
+    const pinned = [...new Set(requirements.map((r) => r.provider).filter((p): p is ProviderId => p !== undefined))];
+    const disabledMessage = disabledProviderMessage(pinned, { providers: providerRows });
+    if (disabledMessage) {
+      console.error(disabledMessage);
+      process.exitCode = 1;
+      return;
+    }
+    const input = await loadViabilityInput(repoRoot, providerAuth, {
+      requirements,
+      disabledProviders: workspace.disabledProviders,
+      providerRows,
+    });
+    const viability = assessAccountViability(input);
+    if (!viability.placeable) {
+      console.error(viabilityRefusalMessage(viability));
       process.exitCode = 1;
       return;
     }
@@ -1054,7 +1119,11 @@ async function runCommand(
   // 2.5) — one refreshed semaphore, even with just one manager in play.
   const semaphore = new WorkspaceSemaphore();
   await semaphore.refresh();
-  const manager = new RunManager(store, repoRoot, { semaphore, bootScratchRoot });
+  const manager = new RunManager(store, repoRoot, {
+    semaphore,
+    bootScratchRoot,
+    accountAuth: accountAuthFromService(providerAuth),
+  });
 
   store.on('event', ({ event }) => {
     switch (event.type) {

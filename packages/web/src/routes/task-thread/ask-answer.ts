@@ -4,10 +4,6 @@ import { ApiError } from '@/api/client'
 import { useContinueRun, useSendMessage } from '@/api/queries'
 import type { ApiRun, RunRecord } from '@loki-labs/better-cezar-api-client'
 
-import {
-  useActiveProviderAvailability,
-  useExistingProviderAvailability,
-} from './active-provider'
 import { isRunActive, lastSessionId, runActionFlags } from './run-actions'
 
 /**
@@ -25,9 +21,12 @@ import { isRunActive, lastSessionId, runActionFlags } from './run-actions'
  */
 export type AskDeliveryMode = 'live' | 'resume' | 'unavailable'
 
-/** Why an answer cannot be delivered right now — `provider` is recoverable from
- *  Settings, `no-session` is terminal for this run. */
-export type AskBlockedReason = 'provider' | 'no-session'
+/** Why an answer cannot be delivered right now. `no-session` is terminal for this run — there is
+ *  nothing reroutable about it. A provider problem is no longer a client-side block: for both
+ *  `live` and `resume`, delivery is reroutable (site 3, site 4/5), so the server is the only thing
+ *  that may refuse it, and it does so on the attempt rather than on render
+ *  (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 6). */
+export type AskBlockedReason = 'no-session'
 
 /** The idle timer closes the backend before the RunManager has finished settling
  *  the run record and releasing its active-run entry. A stale ask card can therefore
@@ -88,10 +87,14 @@ export interface AskAnswerDelivery {
  * question the agent asked stays answerable after its session ends — answering
  * reopens the session with the answers as its prompt.
  *
- * The provider gate follows the seam: a live message is gated on the provider the
- * server would use for `POST /messages` (`useActiveProviderAvailability`), while a
- * resume is gated on the run's recorded provider. Unlike the composer's explicit
- * runner picker, an Ask answer never falls back to another connected engine silently.
+ * Both seams are reroutable (`live` is site 3, `resume` is site 4/5), so neither is gated
+ * client-side: the client cannot see the accounts store or the project route, and no
+ * client-side predicate over provider status is right
+ * (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 6). The answer is always
+ * attempted; the server's own refusal, if any, is what `error` renders. Only `unavailable`
+ * blocks — there is genuinely no session to reopen, and no submission would change that.
+ * Unlike the composer's explicit runner picker, an Ask answer never sends a runner override, so a
+ * server-side reroute is never a silent engine switch the user did not ask for.
  *
  * A `409` from the live path is not a dead end but a stale cache: the record claimed a
  * session the server no longer has (a dropped SSE frame, a long-open tab). When the run
@@ -102,36 +105,20 @@ export interface AskAnswerDelivery {
 export function useAskAnswer(run: ApiRun): AskAnswerDelivery {
   const sendMessage = useSendMessage(run.id)
   const resume = useContinueRun(run.id)
-  const activeProvider = useActiveProviderAvailability(run)
-  const existingProvider = useExistingProviderAvailability(run)
   const [error, setError] = useState<string | undefined>(undefined)
   const [delivering, setDelivering] = useState(false)
   const deliveringRef = useRef(false)
 
   const mode = askDeliveryMode(run)
-  const providerBlocked =
-    mode === 'resume' ? !existingProvider.usable
-    : mode === 'live' ? !activeProvider.usable
-    : false
-  const blockedBy: AskBlockedReason | undefined =
-    mode === 'unavailable' ? 'no-session'
-    : providerBlocked ? 'provider'
-    : undefined
+  const blockedBy: AskBlockedReason | undefined = mode === 'unavailable' ? 'no-session' : undefined
   const reason =
     blockedBy === 'no-session'
       ? 'This session has ended and no agent session was recorded, so the answer cannot be delivered.'
-      : blockedBy === 'provider'
-        ? (mode === 'resume' ? existingProvider.reason : activeProvider.reason)
-        : undefined
+      : undefined
 
-  const resumeWith = (text: string) => {
-    if (!existingProvider.usable) {
-      return Promise.reject(new Error(existingProvider.reason ?? 'The run provider is unavailable.'))
-    }
-    // No runner override: the server keeps the run's own backend and model, so answering a
-    // question cannot silently switch engines when another provider happens to be connected.
-    return resume.mutateAsync({ text })
-  }
+  // No runner override: the server keeps the run's own backend and model, so answering a
+  // question cannot silently switch engines when another provider happens to be connected.
+  const resumeWith = (text: string) => resume.mutateAsync({ text })
 
   const send = async (text: string): Promise<void> => {
     // Defense in depth — every entry point is already disabled while blocked, and the card

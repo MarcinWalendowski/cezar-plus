@@ -87,6 +87,8 @@ import type {
   RunHistoryContext,
   RunHistoryPage,
   RepoResponse,
+  SpecReviewFeedResponse,
+  AnalyticsEvent,
   Runner,
   ModelDiscoveryRunner,
   RunnerModelCatalogResponse,
@@ -148,6 +150,13 @@ import type {
   RejectNoteInput,
   WorkspaceRunsResponse,
   WorkspaceTodosResponse,
+  FiledPartition,
+  FiledSortColumn,
+  FiledSortDir,
+  FiledViewValue,
+  WorkspaceTodosQuery,
+  AnalyticsEventsRequest,
+  AnalyticsEventsResponse,
   WorkspaceGitResponse,
   WorkspaceKnowledgeSearchResponse,
   WorkspaceKnowledgeDomainsResponse,
@@ -939,6 +948,19 @@ export async function getRunCommit(
   )
 }
 
+/** The Spec tab's feed (spec `.ai/specs/2026-08-29-spec-tab-review-feed.md`, P3): the recorded
+ *  spec/review side log when there is one, else the worktree fallback, else the empty answer.
+ *  No 409 for a missing worktree — the recorded log alone is still worth serving. */
+export async function getRunSpec(id: string, opts?: ReadOptions): Promise<SpecReviewFeedResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].spec.$get(
+      { param: { projectId: queryScope(), id: encodeURIComponent(id) } },
+      init(opts),
+    ),
+    runPath(id, '/spec'),
+  )
+}
+
 /** Issues + PRs via the logged-in `gh`. Degrades to `{ available: false, reason }` server-side —
  *  an unreachable forge is a hint in the tab, not an ApiError. */
 export async function getGithub(
@@ -1502,7 +1524,19 @@ export async function requestRunChanges(id: string, notes: string): Promise<unkn
   )
 }
 
-export async function resolveRunHandoff(id: string, note?: string): Promise<unknown> {
+/**
+ * Ask the server to re-probe a manual handoff.
+ *
+ * The return type is load-bearing, and it used to be `unknown`. This endpoint answers **200 with
+ * `resolved: false`** when the probes ran and still say no — a refusal, not an error — so a caller
+ * that discards the body treats every refusal as a success. That is exactly what the handoff card
+ * did: five presses on a red deploy park produced five server-side "still red" notes and nothing
+ * on screen (measured 2026-08-29, run cc25d636). Read `resolved` before you believe it worked.
+ */
+export async function resolveRunHandoff(
+  id: string,
+  note?: string,
+): Promise<{ resolved: boolean; verdict: string }> {
   return unwrap(
     await cez.api.v1.p[':projectId'].runs[':id'].handoff.resolve.$post({
       param: { projectId: queryScope(), id: encodeURIComponent(id) },
@@ -2687,8 +2721,73 @@ export async function getWorkspaceRuns(
  * The ungating stands on its own reason, above: a default install has no other surface for a
  * filed todo, whatever wrote it.
  */
-export async function getWorkspaceTodos(opts?: ReadOptions): Promise<WorkspaceTodosResponse> {
-  return unwrap(await cez.api.v1.workspace.todos.$get({}, init(opts)), '/workspace/todos')
+/**
+ * One partition's page of the Filed board (`.ai/specs/2026-08-25-split-active-backlog-tables.md`).
+ * **Omit it entirely and the request carries no query at all** — the legacy path, whose payload is
+ * `BACKWARD_COMPATIBILITY.md` §2 protected and which the Archived table still reads.
+ */
+export interface WorkspaceTodosParams {
+  partition?: FiledPartition
+  sort?: FiledSortColumn
+  dir?: FiledSortDir
+  /** The page's Active/Archived tab. */
+  view?: FiledViewValue
+  limit?: number
+  status?: readonly string[]
+  priority?: readonly string[]
+  q?: string
+}
+
+/**
+ * Params → the `hc` query object, dropping every absent key so a partitionless call sends a bare
+ * URL rather than `?partition=&sort=` — which is what keeps the legacy path legacy.
+ *
+ * Typed as the schema's OUTPUT (`limit` a number, the facets arrays) rather than as the wire
+ * strings, because `queryZodValidator` publishes the output as the route's REQUEST type — a known
+ * property of that helper, documented in `server/validators.ts`: Hono declares a validator's
+ * request parameter as a conditional type, which is not an inference site, so the request falls
+ * back to the schema's output. `hc` stringifies through `URLSearchParams` on the way out and the
+ * server parses strings on the way in, so the wire is unaffected either way.
+ */
+function toWorkspaceTodosQuery(params: WorkspaceTodosParams | undefined): WorkspaceTodosQuery {
+  if (params === undefined) return {}
+  return {
+    ...(params.partition !== undefined ? { partition: params.partition } : {}),
+    ...(params.sort !== undefined ? { sort: params.sort } : {}),
+    ...(params.dir !== undefined ? { dir: params.dir } : {}),
+    ...(params.view !== undefined ? { view: params.view } : {}),
+    ...(params.limit !== undefined ? { limit: params.limit } : {}),
+    ...(params.q !== undefined && params.q !== '' ? { q: params.q } : {}),
+    ...(params.status !== undefined && params.status.length > 0 ? { status: [...params.status] } : {}),
+    ...(params.priority !== undefined && params.priority.length > 0
+      ? { priority: [...params.priority] }
+      : {}),
+  }
+}
+
+export async function getWorkspaceTodos(
+  params?: WorkspaceTodosParams,
+  opts?: ReadOptions,
+): Promise<WorkspaceTodosResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.todos.$get({ query: toWorkspaceTodosQuery(params) }, init(opts)),
+    '/workspace/todos',
+  )
+}
+
+/**
+ * `POST /workspace/analytics/events` — the workspace analytics sink
+ * (`.ai/specs/2026-08-26-filed-task-detail-page.md`, reused by
+ * `.ai/specs/2026-08-25-split-active-backlog-tables.md` D7). Answers `202 {accepted}` and never
+ * 404s or 409s, including with `CEZ_ANALYTICS=0`, so the caller has nothing to branch on. See
+ * `lib/analytics.ts`, which is the only thing that should call this: events are buffered and
+ * batched there, never posted per action.
+ */
+export async function postAnalytics(input: AnalyticsEventsRequest): Promise<AnalyticsEventsResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.analytics.events.$post({ json: input }, init()),
+    '/workspace/analytics/events',
+  )
 }
 
 /** `GET /backup` (`.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`) — the backup
@@ -2850,5 +2949,19 @@ export async function getWorkspaceNotificationsLog(
       init(opts),
     ),
     '/workspace/notifications/log',
+  )
+}
+
+/** `POST /workspace/analytics/events` — the browser-reachable half of the workspace analytics
+ *  sink (`.ai/specs/2026-08-26-filed-task-detail-page.md`, `.ai/specs/2026-08-29-spec-tab-review-
+ *  feed.md` P3). Workspace-level and single-mount, never `/p/:projectId`-scoped. Every emitter
+ *  (`api/analytics.ts`) goes through THIS function rather than its own `fetch`, so it inherits
+ *  `credentials: 'include'`, `redirect: 'manual'` and the identity-gate handling every other call
+ *  in this module gets — a second transport would report a Cloudflare Access bounce as a plain
+ *  network failure instead of a sign-out. */
+export async function postAnalyticsEvents(events: AnalyticsEvent[]): Promise<AnalyticsEventsResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.analytics.events.$post({ json: { events } }),
+    '/workspace/analytics/events',
   )
 }

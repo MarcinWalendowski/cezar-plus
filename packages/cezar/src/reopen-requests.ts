@@ -163,25 +163,45 @@ async function withReopenLease<T>(dataDir: string, fn: () => Promise<T>): Promis
 
 // ---- read / write ---------------------------------------------------------------------------
 
-/** Parse + validate. Broken JSON / non-array → `[]` with one warning; bad entries are skipped
- *  with a warning, never fatal — external data, the `readTodos` contract. */
-async function readRaw(dataDir: string): Promise<ReopenRequest[]> {
-  let raw: string;
+export interface ReopenReadSnapshot {
+  requests: ReopenRequest[];
+  /** A non-absence filesystem failure. Missing state is represented by an empty request list. */
+  error?: Error;
+}
+
+type ReopenFileRead =
+  | { raw: string }
+  | { absent: true }
+  | { error: Error };
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function isAbsentFileError(error: unknown): boolean {
+  const code = (error as { code?: unknown })?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+async function readReopenFile(dataDir: string): Promise<ReopenFileRead> {
   try {
-    raw = await fs.readFile(reopenRequestsPath(dataDir), 'utf8');
-  } catch {
-    return []; // no file yet — an empty inbox, and reading NEVER creates one
+    return { raw: await fs.readFile(reopenRequestsPath(dataDir), 'utf8') };
+  } catch (error) {
+    return isAbsentFileError(error) ? { absent: true } : { error: asError(error) };
   }
+}
+
+function parseReopenFile(raw: string): ReopenRequest[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[cez] reopen-requests.json is not valid JSON — treating it as empty (${message})`);
+    console.warn(`[cez] reopen-requests.json is not valid JSON - treating it as empty (${message})`);
     return [];
   }
   if (!Array.isArray(parsed)) {
-    console.warn('[cez] reopen-requests.json is not a JSON array — treating it as empty');
+    console.warn('[cez] reopen-requests.json is not a JSON array - treating it as empty');
     return [];
   }
   const items: ReopenRequest[] = [];
@@ -196,6 +216,22 @@ async function readRaw(dataDir: string): Promise<ReopenRequest[]> {
     items.push(result.data);
   }
   return items;
+}
+
+/** Read and parse reopen requests without taking a lease, subscribing, or creating a directory. */
+export async function readReopenRequestsSnapshot(dataDir: string): Promise<ReopenReadSnapshot> {
+  const file = await readReopenFile(dataDir);
+  if ('error' in file) return { requests: [], error: file.error };
+  if ('absent' in file) return { requests: [] };
+  return { requests: parseReopenFile(file.raw) };
+}
+
+/** Parse + validate. Broken JSON / non-array -> `[]` with one warning; bad entries are skipped
+ *  with a warning, never fatal, external data follows the `readTodos` contract. */
+async function readRaw(dataDir: string): Promise<ReopenRequest[]> {
+  const file = await readReopenFile(dataDir);
+  if ('error' in file || 'absent' in file) return [];
+  return parseReopenFile(file.raw);
 }
 
 async function writeAtomic(dataDir: string, items: ReopenRequest[]): Promise<void> {

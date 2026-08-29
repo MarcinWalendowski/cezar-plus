@@ -1,4 +1,5 @@
 import {
+  keepPreviousData,
   useMutation,
   useMutationState,
   useQueries,
@@ -43,6 +44,7 @@ import {
   getRepo,
   getRunCommit,
   getRunCommits,
+  getRunSpec,
   getRepoChanges,
   getRepoCommit,
   getRun,
@@ -89,6 +91,7 @@ import {
   rejectWorkspaceNote,
   getWorkspaceRuns,
   getWorkspaceTodos,
+  type WorkspaceTodosParams,
   getWorkspaceBackup,
   getWorkspaceBackupSnapshots,
   runWorkspaceBackup,
@@ -191,6 +194,7 @@ export const queryKeys = {
     handoff: (id: string) => [queryScope(), 'runs', 'handoff', id] as const,
     commits: (id: string) => [queryScope(), 'runs', 'commits', id] as const,
     commit: (id: string, sha: string) => [queryScope(), 'runs', 'commit', id, sha] as const,
+    spec: (id: string) => [queryScope(), 'runs', 'spec', id] as const,
   },
   groups: {
     detail: (groupId: string) => [queryScope(), 'groups', groupId] as const,
@@ -372,6 +376,32 @@ export const workspaceQueryKeys = {
    *  **CORRECTED 2026-08-16:** this also named "a completed fan-out" as an invalidator. The
    *  fan-out is deleted — the composer starts one cross-project run and files no todos. */
   workspaceTodos: ['workspace', 'todos'] as const,
+  /**
+   * `GET /workspace/todos?partition=…` — ONE partition's page (2026-08-25-split-active-backlog-
+   * tables.md, D2). Prefixed with `workspaceTodos`, so every existing
+   * `invalidateQueries({queryKey: workspaceTodos})` and the `queryKey[1] === 'todos'` predicate
+   * both already reach it; nothing that invalidates the board needed changing.
+   *
+   * **Every parameter is in the key, and the two partitions get two keys.** That is the load-
+   * bearing part of "expansion preserves partitions": expanding Active mutates only the Active
+   * key, so the Backlog request is not re-issued and its rows cannot move. Facet arrays are
+   * sorted before joining, so `?status=a&status=b` and `?status=b&status=a` are one cache entry
+   * rather than two identical fetches.
+   */
+  workspaceTodosPage: (params: WorkspaceTodosParams) =>
+    [
+      'workspace',
+      'todos',
+      'page',
+      params.partition ?? null,
+      params.view ?? null,
+      params.sort ?? null,
+      params.dir ?? null,
+      params.limit ?? null,
+      [...(params.status ?? [])].sort().join(','),
+      [...(params.priority ?? [])].sort().join(','),
+      params.q ?? '',
+    ] as const,
   /** `GET /backup` — the backup overview the Settings → Backup section gates its own visibility
    *  on (`enabled`). No parameters. */
   backup: ['workspace', 'backup'] as const,
@@ -1279,6 +1309,19 @@ export function useRunCommits(id: string | undefined, live = false) {
   return useQuery({
     queryKey: queryKeys.runs.commits(id ?? ''),
     queryFn: ({ signal }) => getRunCommits(id as string, { signal }),
+    enabled: Boolean(id),
+    retry: false,
+    refetchInterval: live ? 5000 : false,
+  })
+}
+
+/** The Spec tab's feed (spec 2026-08-29-spec-tab-review-feed.md, P3) — polls while the run is
+ *  active, exactly like the Commits tab, since the tab itself already appears from the record
+ *  fan-out (`run.specReview`) with no poll needed. */
+export function useRunSpec(id: string | undefined, live = false) {
+  return useQuery({
+    queryKey: queryKeys.runs.spec(id ?? ''),
+    queryFn: ({ signal }) => getRunSpec(id as string, { signal }),
     enabled: Boolean(id),
     retry: false,
     refetchInterval: live ? 5000 : false,
@@ -2480,7 +2523,28 @@ export function useWorkspaceRuns(filters: { projects?: string; view?: 'active' |
 export function useWorkspaceTodos() {
   return useQuery({
     queryKey: workspaceQueryKeys.workspaceTodos,
-    queryFn: ({ signal }) => getWorkspaceTodos({ signal }),
+    queryFn: ({ signal }) => getWorkspaceTodos(undefined, { signal }),
+  })
+}
+
+/**
+ * One partition's ordered, filtered page of the Filed board
+ * (`.ai/specs/2026-08-25-split-active-backlog-tables.md`).
+ *
+ * Ungated for the same reason as `useWorkspaceTodos` above — this is the same route, asked a
+ * narrower question.
+ *
+ * `placeholderData: keepPreviousData` is deliberate and is what makes Show more feel like an
+ * expansion rather than a reload: the limit change is a NEW query key, so without it the table
+ * would blank to a spinner and repaint. With it the current rows stay on screen until the wider
+ * page arrives, and the prefix property guarantees the wider page STARTS with exactly those rows
+ * — so nothing the reader is looking at moves.
+ */
+export function useWorkspaceTodoPage(params: WorkspaceTodosParams) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.workspaceTodosPage(params),
+    queryFn: ({ signal }) => getWorkspaceTodos(params, { signal }),
+    placeholderData: keepPreviousData,
   })
 }
 

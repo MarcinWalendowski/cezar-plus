@@ -75,11 +75,12 @@ export function useContinueAction(run: ApiRun): ContinueAction {
   const model = resolveModel(effectivePickedModel, runner, modelDefaults, catalog.data)
 
   const mutation = useMutation({
-    mutationFn: ({ text, images }: { text: string; images: ImageInput[] }) => {
-      if (!canContinue) {
-        return Promise.reject(new Error(continuation.reason ?? 'Connect an agent provider to continue.'))
-      }
-      return continueRun(run.id, {
+    // Reroutable (site 4/5): the server is the one that knows the accounts store and the
+    // project's route, so it is the only thing that may refuse this. `canContinue` stays an
+    // ADVISORY signal for the pills/hint above, not a pre-flight gate on the request itself
+    // (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Solution 6).
+    mutationFn: ({ text, images }: { text: string; images: ImageInput[] }) =>
+      continueRun(run.id, {
         // An empty draft posts no `text` at all, so the server's default opening prompt
         // ("Continue.") still applies — one-click Continue, unchanged.
         text: text.trim() ? text : undefined,
@@ -89,8 +90,7 @@ export function useContinueAction(run: ApiRun): ContinueAction {
         // connected fallback must be explicit even when the pills were untouched.
         runner: continuation.runnerOverride,
         model: !modelsLocked && pickedModel !== null ? model : undefined,
-      })
-    },
+      }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
   })
 

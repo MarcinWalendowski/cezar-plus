@@ -74,3 +74,19 @@ new aggregate event is introduced because the server receives independent existi
 
    > 5. On production, select two disposable filed tasks, run the batch, verify both runs appear and the
    >    browser remains on `/tasks`, then cancel or clean up the disposable runs.
+
+## Release record, 2026-08-25
+
+- Implementation shipped in feature commit `7932cf4d`, already present on `origin/main` via PR #11.
+- Targeted feature verification passed 107/107 with `npm run typecheck:web` exit 0. A fresh clean-tree
+  verification run also recorded all five repository gates green on shipped HEAD `b5e9b4a8`, including
+  a rerun of the full test gate at 630 files and 11,856 tests.
+- No agent-run `cezar server-deploy --strategy=blue-green` was performed. Both deploy targets are
+  manual by owner decision, so deployment is not claimed here.
+- The production browser E2E at 2026-08-25 08:18 reached the post-start assertion but failed on row
+  removal. Its cleanup left two live runs. Artifacts remain at
+  `/var/lib/cezar/e2e-artifacts/bulk-start-480e0282/`. No successful PASS verdict exists.
+- The feature remains **Implemented, QA needed** until a person completes the manual deployment and
+  a passing production E2E. The corpus outcome is filed as proposal `seq: 0` for run
+  `480e0282-a967-4936-a12e-3c4e56450586`; `cez kb search` cannot find it until a supported applier
+  applies that proposal.

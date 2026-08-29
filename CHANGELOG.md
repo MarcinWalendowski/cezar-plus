@@ -1,5 +1,80 @@
 # Unreleased
 
+## Added
+
+- 📄 **Task detail gets a Spec tab, rendered as a feed: spec, then review, then spec again, until
+  a review passes** (spec `.ai/specs/2026-08-29-spec-tab-review-feed.md`, merged via PR #14,
+  commit `2a16bb72`). Before this, the reviewer's verdict and report lived only in memory on
+  `ActiveRun` and were cleared after one use, and the `spec` step overwrote the same file on
+  every retry, so revision 1's text was already gone from disk by the time revision 2 existed:
+  the loop was real but unwatchable. Now every `spec` write and every `review` verdict (agent or
+  human) is appended to a new per-run file, `<dataDir>/runs/<runId>.spec-review.ndjson`, and
+  `GET /api/v1/runs/:id/spec` (additive, `BACKWARD_COMPATIBILITY.md`) serves it as an ordered
+  feed: a clean `pass` renders just the spec (the owner's "if review was passed, don't show"),
+  a `revise` renders the full argument in order, and a run mid-approval-gate renders a neutral
+  "awaiting human approval" line rather than a premature accepted state. A run with no recorded
+  log but a `declaredSpecPath` still gets one synthetic entry read live off the worktree, so an
+  older or finished run isn't left with an empty tab. **QA Needed**: the spec's own Runtime E2E
+  (real agent runs through the approval gate twice) has not been executed pending the owner's
+  approval to run it.
+
+- ⚡ **`spec-to-deploy` reworks a spec in the session that wrote it, and reviews it twice** (spec
+  `.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`). Measured on run `872b396a`: the
+  `review-spec` step took **14:02** — of which tool execution was 33.5s — and the `spec` rework it
+  sent back took **11:39 and $5.92**, more than the 9:24/$3.74 spec it was reworking, because a
+  `revise` verdict restarted the writer in a **cold session** that re-derived 373k tokens of file
+  dumps still sitting in the window the engine had just thrown away.
+
+  - **New optional workflow-step key `onFail.resume`.** When set, a loop-back re-enters the target
+    step's own session and hands it the review as feedback instead of re-templating its opening
+    prompt. Absent = today's cold restart, so no workflow already on disk changes behaviour. Four
+    guards (target must be an agent step, must have recorded a session, must not have been moved
+    off its runner by a quota downgrade, and a Claude transcript must exist) each fall back to a
+    cold session and name themselves on the new `run.step.looped_back` metric — an optimization
+    that can fail a run is not one.
+  - **New step `review-spec-local`,** between `spec` and `review-spec`: the same read-only review,
+    on the same runner and model as the writer, running before the cross-provider pass. Cheap
+    defects die in a cheap loop, so the expensive reviewer sees a spec that already survived a
+    round. One warm revision of its own (`max: 1`); the human approval gate stays on exactly one
+    step.
+  - **`review-spec`'s effort drops `xhigh` → `high`,** and it is now told to check the brief and
+    the first review rather than re-sweep the record it had already been swept twice. Regressing
+    per-turn latency on output tokens over that step's 20 turns gives `4.8s + 24.5s per 1k output
+    tokens` (R² = 0.947) — 89% of its wall clock was generation, and 21,284 of its 30,390 output
+    tokens were reasoning. Total judgement applied to a spec goes **up** (two reviews, one of them
+    opus); the wall clock of the slow step goes down.
+
+  Nothing about the Claude side of the token table changed, and one thing it shows is worth
+  naming: `spec` reports **no** reasoning tokens because Anthropic's `result.usage` carries no
+  reasoning split — thinking is billed inside `output_tokens` — not because opus did not think.
+  The same run recorded `blockCounts.thinkingWithheld` of 12, 21, 23 and 29 on those steps.
+
+- ⏱️ **A retried step's clock now shows every attempt, not just the last one** (spec
+  `.ai/specs/2026-08-29-step-retry-timing.md`, closing Risk R3 that
+  `.ai/specs/2026-08-20-step-and-tool-call-durations.md` had named and deferred). Before this,
+  `startedAt` was overwritten on every iteration, so a step retried 3 times showed only its final
+  attempt's duration under the `×3` badge — the other two attempts' time vanished from the rail
+  entirely.
+
+  - **The store now accumulates `StepState.attempts[]`** (`RunStore.updateStep`, three ordered
+    rules: an explicit close, a status-exit close, and an iteration-transition mint with an
+    upgrade-boundary guard so a step mid-flight when this ships never gains a partial array the UI
+    would misread). `RunStore.open({now})` takes an injectable clock.
+  - **The rail's clock is now cumulative**: `stepElapsed` sums every closed attempt plus any open
+    one, clamped so clock skew can never make the live total dip below the banked total.
+  - **The `×N` badge is now a disclosure**: expanding it shows a per-attempt breakdown
+    (`StepRow`/`StepAttempts`), each attempt's own start and duration. A pre-upgrade step with no
+    `attempts` key falls back to today's single-duration display, unchanged.
+  - **First real caller for the workspace analytics sink**: expanding the breakdown fires
+    `step.attempts_expanded`, paying down the `CEZ_ANALYTICS` documentation debt
+    (`.env.example`, README, `BACKWARD_COMPATIBILITY.md` §1) left open by
+    `.ai/specs/2026-08-26-filed-task-detail-page.md`.
+
+  Gates: `npm run typecheck` green; `packages/web` 4179/4179, `packages/cezar` 7824 passed / 4
+  skipped / 0 failed post-merge; all 9 Verification-4b negative controls reverted-and-confirmed-red
+  then restored. **QA Needed:** the spec's own Playwright runtime E2E (Verification 5) has not run
+  yet — tracked as todo `da65120d-670e-47e0-baf8-ddbef6ab0bd4`.
+
 ## ⚠️ Breaking
 
 - 🧭 **A workspace-scoped run routes work instead of doing it** (spec
@@ -29,6 +104,35 @@
 
 ## 🛠 Fixed
 
+- **Cold-project intent discovery is now verified on production, and its verification runbook
+  no longer lies.** The runtime fix (`809c8220`) shipped on 2026-08-25 and reached production
+  on 2026-08-29; both cold-project canaries were run against the live service and passed. A
+  todo marked `autostart` in a registered but **non-resident** project started a run **4 s**
+  later, and a reopen request filed against a non-resident project was continued **6 s** later,
+  each in a project measured non-resident from the server process in the same invocation as a
+  passing positive control. Eight untouched cold projects gained no directory, no file and no
+  watch, so discovery still never creates `.ai/cezar` as a side effect.
+
+  Three things were wrong in the verification chain rather than in the runtime, and all three
+  are fixed. **The residency probe could never pass its own positive control**, it compared
+  `stat -Lc %D` (`major<<8|minor`) against fdinfo's `sdev:` (`major<<20|minor`), so it
+  reported "not watched" for every path including the running server's own boot project; run as
+  written it would have manufactured a false proof of non-residency for the canary that is the
+  entire point. It also has to `cat` each `fdinfo` file rather than glob them into one `awk`,
+  because a descriptor closing mid-scan kills `awk` and prints an empty count that reads as
+  cold. **Both twin regression tests passed without the wiring they exist to pin**, each stub
+  armed the live watcher itself, so deleting `server.ts`'s `onContextBuilt` lines left them
+  green; the stubs no longer do that, and cutting either line now fails the matching test.
+  **The source-removal control the spec predicted does not hold**: removing
+  `lazyProjectIntentDiscovery.refresh()` leaves both tests green, because `refresh()` is only
+  the immediate boot pass and the interval poll reaches the same file anyway. The load-bearing
+  line is `lazy-project-intents.ts`'s `await deps.contexts.context(row.id)`, and cutting that
+  fails both. See `.ai/specs/2026-08-25-cold-watcher-production-verification.md`.
+
+  Known gap this surfaced: cezar has **no headless cancel** (`POST /runs/:id/cancel` is 401 by
+  design, and the CLI has no cancel verb), so the disposable run an autostart canary creates
+  cannot be cleaned up without the cockpit.
+
 - **Workspace revision checks now follow the project worktrees.** `tested-revision-shipped`
   captures and verifies every persisted workspace project against its own tested tree. Scratch
   control files such as `.cezar-control-path` and gate logs no longer reject a valid project
@@ -44,6 +148,51 @@
 
 - 🧵 **`input-to-tasks`, the workflow a workspace run uses**: two or three steps: gather context
   across the whole workspace, file the tasks it implies, and retain dispatch only when selected. No step has
+- 🗂 **The Filed board splits into Active and Backlog, sorted and paged by the server** (spec
+  `.ai/specs/2026-08-25-split-active-backlog-tables.md`). `/tasks` used to render one Filed table
+  of every filed todo, ordered and paged in the browser, with in-flight work interleaved through
+  49-plus rows of never-started backlog. The Active tab now shows **Active** (every filed task
+  whose status is not `todo`) above **Backlog** (status `todo`, including the legacy rows that
+  carry no status at all), 20 rows and 30 rows to start, each with its own **Show more** (+10
+  exactly) and its own per-column sort.
+
+  **Every column header now sorts, and the backend decides the order.**
+  `GET /api/v1/workspace/todos` gains an additive optional query — `partition`, `sort`
+  (`age` · `status` · `priority` · `task` · `project` · `author`), `dir`, `view`, `limit`, `q` and
+  the repeatable `status` / `priority` facets — and answers a `page` envelope plus facet `counts`
+  alongside the rows. The order is **total by construction**: every comparator falls through to
+  the `project:id` composite key ascending regardless of direction, which gives the *prefix
+  property* — the rows at `limit = N` are exactly the first `N` at `limit = N + k` — so an
+  expansion can only append and can never reorder what is already on screen. String columns
+  compare by code unit after lowercasing, never `localeCompare`, whose ICU-dependent answer can
+  differ between the machine serving a request and the one running the test.
+
+  **Each table is its own request**, so expanding or re-sorting one cannot move a row in the
+  other: that property is structural rather than merely tested. Sorts ride the URL as `fasort` /
+  `fbsort` (`<column>:<dir>`, with `created-desc` / `created-asc` accepted as aliases for the age
+  column), composed into the page's one codec.
+
+  **A request with no query parameters answers byte-identically to what it always did** — same
+  uncapped `todos`, same `projects`, neither new key — because that payload is a
+  `BACKWARD_COMPATIBILITY.md` §2 protected surface. The Archived tab still reads it and still
+  renders one unsplit, client-sorted table.
+
+- 📊 **The Filed board reports itself** to the local analytics sink (`POST /api/v1/workspace/analytics/events`), with three events: `todo.filed_partition_viewed`, `todo.filed_sorted` and `todo.filed_show_more`. Events are buffered in the browser, flushed on idle at most one request at a time, dropped silently on failure, and appended **on your own machine**; nothing leaves it. `CEZ_ANALYTICS=0` turns it off.
+
+  <!-- The bullet below described a SECOND sink, written in parallel and deleted on merge (2026-08-29); see BACKWARD_COMPATIBILITY.md §2. It is kept only so the correction has something to point at. -->
+
+- ~~📊 **A local analytics sink** (`POST /api/v1/workspace/analytics`, same spec, D7).~~ There was no
+  analytics anywhere in this repository before this — a grep for
+  `analytics|telemetry|posthog|logEvent|emitEvent` found only aspirational `TODO(analytics):`
+  markers in prose — so the Filed board's three events (`filed_tasks.partition_viewed`,
+  `filed_tasks.sorted`, `filed_tasks.show_more`) ship with the smallest honest sink to receive
+  them. Events are buffered in the browser, flushed on idle at most one request at a time, dropped
+  silently on failure, and appended to `~/.cezar/analytics/YYYY-MM-DD.ndjson` **on your own
+  machine**; nothing leaves it, and files older than 30 days are pruned on write. On by default,
+  because an event that never fires on any real install is not shipped analytics; `CEZ_ANALYTICS=0`
+  turns it off, and the route then answers `202 {accepted: 0}` without creating so much as the
+  directory.
+
   `Edit` or `Write`, so "it does not touch your files" is structural rather than a request in a
   prompt.
 - ▶️ **`cezar todo start <id> [--project <id|path>] [--json]`** — marks an already-filed todo

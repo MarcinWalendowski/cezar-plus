@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
 
 import { railVisual } from './step-rail'
-import { ACTIVE_STEP_STATUSES, TERMINAL_STEP_STATUSES, stepElapsed } from './step-timing'
+import { ACTIVE_STEP_STATUSES, TERMINAL_STEP_STATUSES, stepAttempts, stepElapsed } from './step-timing'
 
 /** A store-shaped step (`RunRecord.steps` entry) with sensible defaults. */
 const step = (status: StepStatus, extra: Partial<StepState> = {}): StepState => ({
@@ -95,5 +95,103 @@ describe('stepElapsed — frozen totals', () => {
   it('a finishedAt before startedAt clamps to zero rather than printing a negative total', () => {
     const skewed = step('done', { startedAt: START, finishedAt: '2026-08-20T14:20:00.000Z' })
     expect(stepElapsed(skewed, NOW)).toEqual({ ms: 0, live: false })
+  })
+})
+
+// spec 2026-08-29-step-retry-timing — `stepElapsed` and `stepAttempts` become cumulative when
+// `StepState.attempts` is present, and degrade byte-identically to the suites above when it is
+// absent (which the unmodified assertions above already prove).
+describe('stepElapsed / stepAttempts — cumulative across attempts (spec 2026-08-29-step-retry-timing)', () => {
+  const at = (offsetMs: number) => new Date(Date.parse(START) + offsetMs).toISOString()
+
+  it('the headline case: three closed attempts of 4:12 / 11:03 / 2:40 sum to 17:55, live: false', () => {
+    // Deliberately gapped, not contiguous: a 100s idle gap between each attempt (the loop-back
+    // overhead a real retry has) means the naive `finishedAt - startedAt` span (21:15) does NOT
+    // equal the sum of the three attempts (17:55) — a regression to "today's math" on a present
+    // `attempts` array would read the wrong number here, which is the point of this fixture.
+    const attempts = [
+      { startedAt: at(0), finishedAt: at(252_000) }, // 4:12
+      { startedAt: at(352_000), finishedAt: at(352_000 + 663_000) }, // 11:03, after a 100s gap
+      { startedAt: at(1_115_000), finishedAt: at(1_115_000 + 160_000) }, // 2:40, after another 100s gap
+    ]
+    const done = step('done', { startedAt: attempts[0]!.startedAt, finishedAt: attempts[2]!.finishedAt, attempts })
+    expect(stepElapsed(done, NOW)).toEqual({ ms: 1_075_000, live: false })
+    expect(stepAttempts(done, NOW).map((r) => r.ms)).toEqual([252_000, 663_000, 160_000])
+  })
+
+  it('a running step with two closed attempts and one open returns the live shape', () => {
+    const attempts = [
+      { startedAt: at(0), finishedAt: at(100_000) },
+      { startedAt: at(100_000), finishedAt: at(150_000) },
+      { startedAt: at(150_000) }, // open
+    ]
+    const running = step('running', { startedAt: attempts[2]!.startedAt, attempts })
+    const elapsed = stepElapsed(running, NOW)
+    expect(elapsed).toEqual({ ms: 150_000 + (NOW - Date.parse(attempts[2]!.startedAt)), live: true, since: attempts[2]!.startedAt, offsetMs: 150_000 })
+  })
+
+  it('degradation: attempts absent returns exactly the fallback shape (unmodified existing suite is the strongest proof)', () => {
+    const done = step('done', { startedAt: START, finishedAt: '2026-08-20T14:26:58.939Z' })
+    expect(stepElapsed(done, NOW)).toEqual({ ms: 132_000, live: false })
+    expect(stepAttempts(done, NOW)).toEqual([])
+  })
+
+  it('a pending step with all-closed recorded attempts returns their sum, live: false (R5)', () => {
+    const attempts = [
+      { startedAt: at(0), finishedAt: at(60_000) },
+      { startedAt: at(60_000), finishedAt: at(120_000) },
+    ]
+    const pending = step('pending', { attempts, startedAt: undefined })
+    expect(stepElapsed(pending, NOW)).toEqual({ ms: 120_000, live: false })
+  })
+
+  it('a pending step with no attempts still returns undefined (unchanged)', () => {
+    expect(stepElapsed(step('pending'), NOW)).toBeUndefined()
+  })
+
+  it('a terminal step whose last attempt is open closes at step.finishedAt', () => {
+    const attempts = [{ startedAt: at(0), finishedAt: at(60_000) }, { startedAt: at(60_000) }]
+    const done = step('done', { attempts, startedAt: attempts[0]!.startedAt, finishedAt: at(100_000) })
+    expect(stepElapsed(done, NOW)).toEqual({ ms: 60_000 + 40_000, live: false })
+    expect(stepAttempts(done, NOW).map((r) => r.ms)).toEqual([60_000, 40_000])
+  })
+
+  it('stepAttempts on a record with no attempts returns []', () => {
+    expect(stepAttempts(step('done'), NOW)).toEqual([])
+  })
+
+  describe('no partial sum is ever returned as a total', () => {
+    it('mixed valid and invalid: the middle attempt has an unparseable startedAt', () => {
+      const attempts = [
+        { startedAt: at(0), finishedAt: at(60_000) },
+        { startedAt: 'not-a-date', finishedAt: at(120_000) },
+        { startedAt: at(120_000), finishedAt: at(180_000) },
+      ]
+      const done = step('done', { attempts, startedAt: attempts[0]!.startedAt, finishedAt: attempts[2]!.finishedAt })
+      expect(stepElapsed(done, NOW)).toBeUndefined()
+      const rows = stepAttempts(done, NOW)
+      expect(rows.map((r) => r.ms)).toEqual([60_000, undefined, 60_000])
+    })
+
+    it('the pending-plus-open case: a pending step whose last attempt has no finishedAt', () => {
+      const attempts = [{ startedAt: at(0), finishedAt: at(60_000) }, { startedAt: at(60_000) }]
+      const pending = step('pending', { attempts, startedAt: undefined })
+      expect(stepElapsed(pending, NOW)).toBeUndefined()
+      const rows = stepAttempts(pending, NOW)
+      expect(rows[1]).toEqual({ index: 2, startedAt: attempts[1]!.startedAt, ms: undefined, live: false })
+    })
+
+    it('terminal with an open last attempt and no usable step.finishedAt: undefined, not the closed sum', () => {
+      const attempts = [{ startedAt: at(0), finishedAt: at(60_000) }, { startedAt: at(60_000) }]
+      const done = step('done', { attempts, startedAt: attempts[0]!.startedAt, finishedAt: undefined })
+      expect(stepElapsed(done, NOW)).toBeUndefined()
+    })
+
+    it('nothing above is ever NaN', () => {
+      const attempts = [{ startedAt: 'garbage', finishedAt: 'also-garbage' }]
+      const broken = step('done', { attempts, startedAt: 'garbage', finishedAt: 'also-garbage' })
+      expect(stepElapsed(broken, NOW)).toBeUndefined()
+      expect(stepAttempts(broken, NOW)[0]?.ms).toBeUndefined()
+    })
   })
 })

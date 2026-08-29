@@ -14,7 +14,7 @@ function parseProviderStatusRow(
   requireEnabled: boolean,
 ): ProviderStatusEventRow | null {
   if (!isRecord(value)) return null
-  const { provider, status, enabled, hint, authFailureId } = value
+  const { provider, status, enabled, hint, authFailureId, poolConnected } = value
   if (
     typeof provider !== 'string'
     || !RUNNER_ORDER.includes(provider as Runner)
@@ -32,6 +32,7 @@ function parseProviderStatusRow(
         || status !== 'disconnected'
       )
     )
+    || (poolConnected !== undefined && typeof poolConnected !== 'boolean')
   ) return null
   return {
     provider: provider as Runner,
@@ -39,6 +40,7 @@ function parseProviderStatusRow(
     ...(typeof enabled === 'boolean' ? { enabled } : {}),
     ...(hint === undefined ? {} : { hint }),
     ...(authFailureId === undefined ? {} : { authFailureId }),
+    ...(poolConnected === undefined ? {} : { poolConnected: poolConnected as boolean }),
   }
 }
 
@@ -95,6 +97,16 @@ export function applyProviderStatusRow(
         enabled: row.enabled ?? candidate.enabled,
         ...(row.hint === undefined ? {} : { hint: row.hint }),
         ...(row.authFailureId === undefined ? {} : { authFailureId: row.authFailureId }),
+        // `poolConnected` is ADDITIVE, not replaced: the routes that emit this topic (enable
+        // toggle, connect/repoint handlers) only know about the default row and never carry a
+        // pool aggregate at all, so an absent field here means "this event says nothing about
+        // the pool", not "the pool is empty" — an unrelated enable/disable click must not flicker
+        // a healthy pool's dot off (`.ai/specs/2026-08-25-logged-out-account-fallback.md`).
+        ...(row.poolConnected !== undefined
+          ? { poolConnected: row.poolConnected }
+          : candidate.poolConnected !== undefined
+            ? { poolConnected: candidate.poolConnected }
+            : {}),
       }
     }),
   }
@@ -136,6 +148,11 @@ export function mergeProviderStatusResponse(
       if (retryClearsCurrent) {
         return { ...incoming, enabled: current.enabled }
       }
+      // poolConnected is advisory-only (see the docblock below): a cache that diverged from the
+      // request-start snapshot ONLY on that field is not the "an SSE update raced in mid-request"
+      // case the fallback below exists for — it must not make the code distrust an otherwise
+      // unchanged response.
+      if (sameProviderStatusRowIgnoringPool(before, current)) return incoming
       return current
     }),
   }
@@ -147,14 +164,30 @@ function sameProviderStatusRow(left: ProviderStatus, right: ProviderStatus): boo
     && left.enabled === right.enabled
     && left.hint === right.hint
     && left.authFailureId === right.authFailureId
+    && left.poolConnected === right.poolConnected
 }
 
+function sameProviderStatusRowIgnoringPool(left: ProviderStatus, right: ProviderStatus): boolean {
+  return left.provider === right.provider
+    && left.status === right.status
+    && left.enabled === right.enabled
+    && left.hint === right.hint
+    && left.authFailureId === right.authFailureId
+}
+
+/**
+ * ADVISORY only (spec `2026-08-25-logged-out-account-fallback.md`, Solution 6): `poolConnected`
+ * widens a provider whose discovered default is dead but whose pool has a healthy non-default
+ * login, so the picker and the provider dots stop lying about it. Nothing downstream may treat
+ * this list as a guarantee — a reroutable submission is what the server actually decides, and a
+ * pinned handoff (Terminal / Open-in-CLI) is refused server-side rather than hidden here.
+ */
 export function usableRunners(status: ProviderStatusResponse | undefined): Runner[] {
   const rows = completeProviderRows(status)
   if (rows === null) return []
   const usable = new Set(
     rows
-      .filter((row) => row.enabled && row.status === 'connected')
+      .filter((row) => row.enabled && (row.status === 'connected' || row.poolConnected === true))
       .map((row) => row.provider),
   )
   return RUNNER_ORDER.filter((runner) => usable.has(runner))

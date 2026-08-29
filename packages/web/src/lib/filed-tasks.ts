@@ -1,4 +1,14 @@
-import type { TodoItem, UpdateTodoInput, WorkspaceTodoEntry } from '@loki-labs/better-cezar-api-client'
+import {
+  DEFAULT_FILED_SORT_COLUMN,
+  DEFAULT_FILED_SORT_DIR,
+  filedSortColumnSchema,
+  type FiledPartition,
+  type FiledSortColumn,
+  type FiledSortDir,
+  type TodoItem,
+  type UpdateTodoInput,
+  type WorkspaceTodoEntry,
+} from '@loki-labs/better-cezar-api-client'
 
 /**
  * The pure half of the global Tasks page's "Filed" section (2026-08-17-filed-tasks-table-
@@ -227,9 +237,101 @@ export const FILED_ROW_PAGE_SIZE = 100
 export const FILED_SEARCH_PARAMS = {
   status: 'fstatus',
   priority: 'fpriority',
+  /** The ARCHIVED table's created-date sort, unchanged. A bookmarked `?fsort=created-desc` was
+   *  verified in the 2026-08-17 prod pass and keeps working exactly as it did. */
   sort: 'fsort',
   detail: 'fdetail',
+  /** The Active table's per-column sort, `<column>:<dir>` (2026-08-25). */
+  activeSort: 'fasort',
+  /** The Backlog table's per-column sort, same grammar. */
+  backlogSort: 'fbsort',
 } as const
+
+// ---- per-table sorting (2026-08-25-split-active-backlog-tables.md, D3/D6) --------------------
+
+/**
+ * One table's sort. The vocabulary itself (`FiledSortColumn`, `FiledSortDir`, the defaults) is
+ * the CONTRACT's, not this module's: the server decides the order now, so the column names have
+ * to be one definition rather than a client copy that can drift out of step with the enum the
+ * API validates against.
+ */
+export interface FiledTableSort {
+  column: FiledSortColumn
+  dir: FiledSortDir
+}
+
+export const DEFAULT_FILED_TABLE_SORT: FiledTableSort = {
+  column: DEFAULT_FILED_SORT_COLUMN,
+  dir: DEFAULT_FILED_SORT_DIR,
+}
+
+/** Every column a header may sort by. `node` is absent on purpose — it renders only on a
+ *  clustered cockpit, so a URL naming it would mean something on one install and nothing on the
+ *  next. */
+export const FILED_SORTABLE_COLUMNS: readonly FiledSortColumn[] = filedSortColumnSchema.options
+
+export function isFiledSortColumn(value: string): value is FiledSortColumn {
+  return (FILED_SORTABLE_COLUMNS as readonly string[]).includes(value)
+}
+
+export function isFiledSortDir(value: string): value is FiledSortDir {
+  return value === 'asc' || value === 'desc'
+}
+
+/** `age:desc`. Both halves always present, so a hand-edited URL is either valid or falls back
+ *  whole rather than half-applying. */
+export function formatFiledTableSort(sort: FiledTableSort): string {
+  return `${sort.column}:${sort.dir}`
+}
+
+/**
+ * Parse `<column>:<dir>`, FORGIVINGLY — anything unrecognised is the default, never a throw and
+ * never a blank table, the same discipline `urlStateFromSearchParams` applies to every other key.
+ *
+ * The legacy `created-desc` / `created-asc` spellings are accepted as aliases for `age:desc` /
+ * `age:asc`, so a URL hand-edited from muscle memory (or copied off the Archived table's own
+ * `fsort`) resolves instead of silently falling back to something else.
+ */
+export function parseFiledTableSort(raw: string | null | undefined): FiledTableSort {
+  if (!raw) return DEFAULT_FILED_TABLE_SORT
+  if (raw === 'created-desc') return { column: 'age', dir: 'desc' }
+  if (raw === 'created-asc') return { column: 'age', dir: 'asc' }
+  const [column = '', dir = ''] = raw.split(':')
+  if (!isFiledSortColumn(column) || !isFiledSortDir(dir)) return DEFAULT_FILED_TABLE_SORT
+  return { column, dir }
+}
+
+export function isDefaultFiledTableSort(sort: FiledTableSort): boolean {
+  return sort.column === DEFAULT_FILED_TABLE_SORT.column && sort.dir === DEFAULT_FILED_TABLE_SORT.dir
+}
+
+/**
+ * What a header click does: **asc → desc → asc** on the column already sorted, and `asc` on any
+ * other column.
+ *
+ * Deliberately NOT the asc → desc → unsorted cycle of `routes/task-thread/sortable-table.tsx`.
+ * That component sorts a markdown table whose file order is meaningful, so "unsorted" is a real
+ * third state; here the server must always be asked for SOME order, so a third click would have
+ * to mean "back to age:desc" — which the Age header already says, more clearly.
+ */
+export function cycleFiledTableSort(current: FiledTableSort, column: FiledSortColumn): FiledTableSort {
+  if (current.column !== column) return { column, dir: 'asc' }
+  return { column, dir: current.dir === 'asc' ? 'desc' : 'asc' }
+}
+
+/** `aria-sort`'s value for one header cell. `none` on every column that is not the sorted one —
+ *  the attribute is on every sortable `<th>`, so a reader can tell "sortable, not sorted" from
+ *  "not sortable at all". */
+export function filedAriaSort(sort: FiledTableSort, column: FiledSortColumn): 'ascending' | 'descending' | 'none' {
+  if (sort.column !== column) return 'none'
+  return sort.dir === 'asc' ? 'ascending' : 'descending'
+}
+
+/** Which table a row belongs to. The client twin of the server's `filedPartitionOf` — used for
+ *  the optimistic cache patch, never to decide what to render (the server decides that). */
+export function filedPartitionOf(entry: WorkspaceTodoEntry): FiledPartition {
+  return filedStatus(entry) === 'todo' ? 'backlog' : 'active'
+}
 
 // Selection for 2026-08-24-bulk-start-filed-tasks.md.
 

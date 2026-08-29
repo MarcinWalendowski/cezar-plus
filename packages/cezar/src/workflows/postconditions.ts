@@ -45,6 +45,13 @@ export interface PostconditionResult {
     reason: string;
     targets?: string[];
   };
+  /** The red verdict at the length a BUTTON can answer with: the failing targets' names and
+   *  their probes' own output, and nothing else. `detail` embeds every probe's SOURCE and
+   *  `handoff.reason` embeds the whole `manualReason` runbook — both are pages long, which is
+   *  fine for a step card or an event note and useless as the answer to a click. Set only where
+   *  a person is waiting on the answer (the manual-deploy park); absent everywhere else, so a
+   *  caller that wants the full story keeps reading `detail`. */
+  summary?: string;
   retryMax?: number;
 }
 
@@ -362,9 +369,12 @@ export async function allServicesDeployed(ctx: PostconditionContext): Promise<Po
     const reason = `manual deployment required for ${names.join(', ')}:\n${manualFailed
       .map(({ target, outcome }) => `${target.name}${target.manualReason ? `: ${target.manualReason}` : ''}\n${outcome.output}`)
       .join('\n\n')}`;
+    // What a person who just pressed Resolve needs: which target refused, in its own words.
+    const summary = manualFailed.map(({ target, outcome }) => `${target.name}\n${outcome.output}`).join('\n\n');
     return {
       ok: false,
       detail,
+      summary,
       handoff: { kind: 'manual-deploy', reason, targets: names },
     };
   }

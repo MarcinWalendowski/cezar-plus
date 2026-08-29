@@ -1,9 +1,11 @@
 # Verify Bulk Start Release
 
-**Status:** **spec written** 2026-08-25. Nothing in this document has been executed yet. This is
-step 2/9 of run `480e0282-a967-4936-a12e-3c4e56450586` (`spec-to-deploy`), re-entered after the
-earlier pass of the same chain already performed the reconcile, commit and push phases, and ran the
-gates on a tree that the commit then moved away from (§ P-A).
+**Status:** **Partial, QA needed** as of 2026-08-25. The shipped feature commit and clean-tree
+gate attestation are recorded, while the manual deploy, successful production browser E2E, and
+searchable corpus record remain incomplete. This is step 2/9 of run
+`480e0282-a967-4936-a12e-3c4e56450586` (`spec-to-deploy`), re-entered after the earlier pass of
+the same chain already performed the reconcile, commit and push phases, and ran the gates on a tree
+that the commit then moved away from (§ P-A).
 
 **Repo:** `cezar`. Worktree `/var/lib/cezar/loki-labs/cezar/.ai/cezar/worktrees/480e0282-a967-4936-a12e-3c4e56450586`,
 HEAD `7932cf4d83ff6a4f263ae7181ec0d8e9fa81ea7f`, branch `cez/480e0282`.
@@ -21,10 +23,9 @@ sequence. Its P1 (reconcile), P1.5 (the `sorted` to `rows` defect fix) and P3 (t
 **done and provable from git**, as is the push half of its P4; this spec does not replay them and
 explicitly forbids replaying them. Its **P2 (the five gates) was run, but on a pre-merge tree**, so
 this spec re-runs it as P1.5 (§ P-A). The deploy half of its P4 is `manual: true` and correctly did
-not happen (§ P-D). Its own status header still says "Nothing in this document has been executed
-yet", which is now false. **This spec does not correct it**, because that edit is a second commit
-its own P6 explicitly reserved for the owner to ask for; the correction is filed as a follow-up
-instead (§ P4).
+not happen (§ P-D). Its own status header was stale and is corrected above. The deploy, E2E, and
+corpus-search gaps remain open and are not converted into a success claim by this documentation
+update (§ P4).
 
 **Feature spec (the thing being verified):** `.ai/specs/2026-08-24-bulk-start-filed-tasks.md`,
 written by parent task `e6592588-1628-40e0-b31a-8fe26c8b2220`, now on `main` inside `7932cf4d`.
@@ -79,8 +80,8 @@ identity, **P1.5** five gates on a clean checkout of `7932cf4d`, **P2** re-run t
 and record its verdict, **P3** file the corpus proposal, **P4** leave the worktree clean and commit
 nothing. **No phase edits a tracked file, and this run makes no second commit:** its one commit is
 already `7932cf4d`, and the predecessor spec explicitly left a post-release status edit to the owner
-to ask for (§ P4). Correcting the three stale spec headers is therefore a **deferred follow-up**,
-filed as a todo, not work this run does.
+to ask for (§ P4). Correcting the stale status headers is part of this documentation step. The
+remaining release gaps stay open in the feature status and tracker.
 
 ## Problem
 

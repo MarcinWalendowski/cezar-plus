@@ -219,6 +219,17 @@ export function identityDir(): string {
 }
 
 /**
+ * The workspace-scoped analytics sink (`.ai/specs/2026-08-26-filed-task-detail-page.md`) — one
+ * NDJSON line per browser-emitted event (`todo.detail_opened` and friends). Its OWN directory
+ * under `cezarHomeDir()`, on the `notesLogPath()`/`agentAccountUsagePath()` precedent: per-user,
+ * not per-project, because the events it records (opening a cross-project board page) have no
+ * single project to belong to.
+ */
+export function analyticsLogPath(): string {
+  return join(cezarHomeDir(), 'analytics', 'events.ndjson');
+}
+
+/**
  * Expand a leading `~` to the user's home. Lives here with the other homedir
  * logic (see the module note above — one place owns `homedir()`): the
  * workspace browse/checkout roots are stored as the user wrote them (a literal `~`), so
