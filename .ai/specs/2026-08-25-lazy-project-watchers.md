@@ -480,6 +480,50 @@ Before each write, establish non-residency from the server process, not from the
    directory's device and inode to the hexadecimal representation used by inotify fdinfo, and
    scans every inotify descriptor owned by that process:
 
+   **CORRECTED 2026-08-29 by `.ai/specs/2026-08-25-cold-watcher-production-verification.md`, the
+   probe printed below compares two different kernel device encodings, so it reports `matches=0`
+   for every path, including its own positive control.** `stat -Lc %D` prints the old `dev_t`
+   encoding (`major << 8 | minor`), while `/proc/<pid>/fdinfo/*` prints `sdev:` in the newer
+   `kdev_t` encoding (`major << 20 | minor`). On `prod-host` the same device is `801` from
+   `stat` and `800001` in fdinfo, so the equality can never hold. Measured 2026-08-25 against
+   `MainPID=2384818`, the running server's OWN boot project reported `matches=0`. Run as written,
+   this step manufactures a false proof of non-residency, it calls every project cold, which is
+   the exact direction that reads as a valid canary. Derive the fdinfo encoding instead:
+
+   ```sh
+   probe_inotify_dir() {
+     label=$1; path=$2
+     [ -e "$path" ] || { printf '%s path=%s ABSENT\n' "$label" "$path"; return; }
+     dev_dec=$(( 16#$(stat -Lc %D "$path") ))                              # stat: major<<8 | minor
+     sdev=$(printf '%x' $(( ((dev_dec >> 8) << 20) | (dev_dec & 255) )))   # fdinfo: major<<20 | minor
+     ino=$(printf '%x' "$(stat -Lc %i "$path")")
+     matches=$(awk -v dev="$sdev" -v ino="$ino" '
+       $1 == "inotify" {
+         gd = gi = ""
+         for (i = 1; i <= NF; i++) {
+           if ($i ~ /^sdev:/) gd = substr($i, 6)
+           if ($i ~ /^ino:/)  gi = substr($i, 5)
+         }
+         if (tolower(gd) == tolower(dev) && tolower(gi) == tolower(ino)) print FILENAME ":" $0
+       }
+     ' /proc/"$pid"/fdinfo/* 2>/dev/null)
+     printf '%s path=%s sdev=%s ino=%s matches=%s\n' \
+       "$label" "$path" "$sdev" "$ino" "$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l)"
+   }
+   ```
+
+   Scan `/proc/$pid/fdinfo/` by `cat`-ing each file in a loop rather than globbing it into one
+   `awk` invocation: descriptors open and close under a live server, and a vanished path makes
+   `awk` exit fatally mid-scan, which prints an empty `matches=` that reads like a cold project.
+
+   Measured with the corrected form on 2026-08-29 against `MainPID=4077888`: the boot project
+   `cezar` and `chat` reported `matches=1` while `loki-labs`, `mw-site` and eight other
+   registered projects reported `0`, the control separates, and both canaries then passed
+   against projects measured cold in that same invocation. The acceptance rule below is unchanged
+   and is now actually reachable.
+
+   The original text follows unchanged.
+
    ```sh
    resident_dir=/var/lib/cezar/loki-labs/cezar/.ai/cezar
    cold_dir=/var/lib/cezar/loki-labs/chat/.ai/cezar
