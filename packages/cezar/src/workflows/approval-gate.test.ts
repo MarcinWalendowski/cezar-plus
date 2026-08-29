@@ -3,11 +3,19 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { RunManager } from './run.ts';
 import { localCliAuthor } from '../runs/task-author.ts';
+// P1 test 10e (spec 2026-08-29-spec-tab-review-feed): `vi.fn(actual)` calls through by default, so
+// every OTHER test in this file exercises the real write path unchanged; only 10e's two cases
+// override it, one call at a time.
+vi.mock('../runs/spec-review-log.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../runs/spec-review-log.ts')>();
+  return { ...actual, appendSpecReviewEntry: vi.fn(actual.appendSpecReviewEntry) };
+});
+import { appendSpecReviewEntry, readSpecReviewEntries } from '../runs/spec-review-log.ts';
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -259,6 +267,68 @@ describe('the approval gate survives a restart', () => {
     // The notes are the instructions. A rewind that dropped them would re-run `spec` blind.
     expect(job?.resumeAt?.feedback).toContain('the API contract section is wrong');
     expect(job?.resumeAt?.feedback).toContain('ada');
+  });
+
+  /**
+   * P1 test 10e (spec 2026-08-29-spec-tab-review-feed): the human-review append throws, and the
+   * approval outcome is applied first regardless — a display feature's log write must never gate
+   * a human's decision. This is the restart-recovery write site (`releaseApproval`, run.ts:~6780,
+   * "no live execute()"), which is exactly the harness this file already exercises above.
+   */
+  it('10e. fail-open: the human-review append throws, and the request is still honoured', async () => {
+    const id = parkedRun();
+    vi.mocked(appendSpecReviewEntry).mockImplementationOnce(() => {
+      throw Object.assign(new Error('ENOSPC: no space left on device, write /secret/path/x.md'), { code: 'ENOSPC' });
+    });
+
+    const result = await manager.requestChanges(id, 'ada', 'the API contract section is wrong');
+    expect(result.ok).toBe(true); // the approval outcome is applied first — never rejected
+
+    const after = store.getRun(id);
+    expect(after?.pendingApproval).toBeUndefined();
+    expect(after?.steps.find((s) => s.id === 'spec')?.status).toBe('pending');
+    expect(after?.steps.find((s) => s.id === 'review-spec')?.status).toBe('pending');
+
+    const notes = store.readEvents(id).filter((e) => e.type === 'note');
+    const failureNote = notes.find((n) => String(n.message).includes('spec-review log unavailable'));
+    expect(failureNote?.message).toBe('spec-review log unavailable (ENOSPC)');
+    expect(String(failureNote?.message)).not.toContain('/secret/path/x.md');
+    // Nothing reached the log for this attempt at all.
+    expect(readSpecReviewEntries(join(repoRoot, '.ai/cezar'), id)).toEqual([]);
+  });
+
+  it('10e. fail-open: updateRun failing on the specReview summary write has the same outcome', async () => {
+    const id = parkedRun();
+    const realUpdateRun = store.updateRun.bind(store);
+    const updateRunSpy = vi
+      .spyOn(store, 'updateRun')
+      .mockImplementation((...args: Parameters<typeof store.updateRun>) => {
+        const [, patch] = args;
+        if (patch && typeof patch === 'object' && 'specReview' in patch) {
+          throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+        }
+        return realUpdateRun(...args);
+      });
+
+    try {
+      const result = await manager.requestChanges(id, 'ada', 'the API contract section is wrong');
+      expect(result.ok).toBe(true);
+
+      const after = store.getRun(id);
+      expect(after?.pendingApproval).toBeUndefined();
+      expect(after?.steps.find((s) => s.id === 'spec')?.status).toBe('pending');
+
+      // The append itself succeeded (only the SEPARATE summary write was injected) — the entry is
+      // on the log even though `run.specReview` never got its cache refreshed.
+      const entries = readSpecReviewEntries(join(repoRoot, '.ai/cezar'), id);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({ kind: 'review', actor: 'human', verdict: 'revise' });
+
+      const notes = store.readEvents(id).filter((e) => e.type === 'note');
+      expect(notes.some((n) => String(n.message) === 'spec-review log unavailable (EBUSY)')).toBe(true);
+    } finally {
+      updateRunSpy.mockRestore();
+    }
   });
 
   it('refuses a decision on a run that is not parked, and says so distinctly from "not found"', async () => {

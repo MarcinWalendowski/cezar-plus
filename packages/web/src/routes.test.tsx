@@ -229,6 +229,9 @@ const ROUTE_CASES: Array<[url: string, route: string, title: string]> = [
   // The real R5 tab routes: with fetch never answering they are honestly loading.
   ['/tasks/abc123/changes', 'task-changes', 'Loading changes…'],
   ['/tasks/abc123/files', 'task-files', 'Loading files…'],
+  // The Spec tab (spec .ai/specs/2026-08-29-spec-tab-review-feed.md, P3 test 21): same
+  // `GitTabLoading` fallback as its siblings, so it inherits the "Loading files…" title.
+  ['/tasks/abc123/spec', 'task-spec', 'Loading files…'],
   // The real compare view (Step R3 2.3): with fetch never answering it is honestly loading.
   ['/compare/grp-1', 'compare', 'Loading variants…'],
   // The real repo view (R5 Step 1.7): with fetch never answering it is honestly loading —
@@ -683,6 +686,14 @@ describe('legacy flat URLs redirect to the boot project', () => {
     expect(currentPathname()).toBe(`/p/${BOOT}/skills`)
     expect(currentSearch()).toBe(search)
     expect(routeName()).toBe('skills')
+  })
+
+  it('preserves query and hash on the legacy flat Spec tab link (P3 test 21)', () => {
+    renderAt('/tasks/run-2/spec?rev=2#section')
+    expect(currentPathname()).toBe(`/p/${BOOT}/tasks/run-2/spec`)
+    expect(currentSearch()).toBe('?rev=2')
+    expect(currentHash()).toBe('#section')
+    expect(routeName()).toBe('task-spec')
   })
 
   it('preserves the hash too — /settings/skills through both hops', () => {
