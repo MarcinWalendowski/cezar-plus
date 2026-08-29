@@ -3,6 +3,8 @@ import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   CheckIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
   EyeIcon,
   EyeOffIcon,
   LayersIcon,
@@ -22,16 +24,24 @@ import {
   useHealth,
   useProjects,
   useRunsIndex,
+  useWorkspaceTodoPage,
   useWorkspaceTodos,
   workspaceQueryKeys,
 } from '@/api/queries'
 import type {
+  FiledSortColumn,
   ProjectListEntry,
   RunIndexEntry,
   RunsIndexResponse,
   UpdateTodoInput,
   WorkspaceTodoEntry,
+  WorkspaceTodosPage,
   WorkspaceTodosResponse,
+} from '@loki-labs/better-cezar-api-client'
+import {
+  FILED_ACTIVE_INITIAL_ROWS,
+  FILED_BACKLOG_INITIAL_ROWS,
+  FILED_SHOW_MORE_INCREMENT,
 } from '@loki-labs/better-cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { FacetFilter, SegmentedControl, ToggleChip } from '@/components/facet-filter'
@@ -54,6 +64,7 @@ import {
   type TaskNodeRoster,
 } from '@/components/task-node-cell'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { track } from '@/lib/analytics'
 import { deriveAttention } from '@/lib/attention'
 import {
   FILED_PRIORITY_VALUES,
@@ -67,6 +78,8 @@ import {
   filedTaskKey,
   filedTasksExcludingFacet,
   filterFiledTasks,
+  cycleFiledTableSort,
+  filedAriaSort,
   selectedFiledEntries,
   setFiledSelection,
   sortFiledTasks,
@@ -75,6 +88,7 @@ import {
   type FiledPriority,
   type FiledSort,
   type FiledStatus,
+  type FiledTableSort,
   type FiledTaskFilters,
 } from '@/lib/filed-tasks'
 import { shortAge } from '@/lib/format'
@@ -283,7 +297,7 @@ export function GlobalTasksRoute() {
   // source of truth means a refresh, a pasted link and the Back button all land on the same
   // filtered view, with no effect syncing two copies that can disagree.
   const [searchParams, setSearchParams] = useSearchParams()
-  const { filters, groupBy, view, filedFilters, filedSort } = React.useMemo(
+  const { filters, groupBy, view, filedFilters, filedSort, filedActiveSort, filedBacklogSort } = React.useMemo(
     () => urlStateFromSearchParams(searchParams),
     [searchParams],
   )
@@ -322,6 +336,13 @@ export function GlobalTasksRoute() {
   const setFiledFilters = (next: (current: FiledTaskFilters) => FiledTaskFilters) =>
     commit((state) => ({ ...state, filedFilters: next(state.filedFilters) }))
   const setFiledSort = (nextSort: FiledSort) => commit((state) => ({ ...state, filedSort: nextSort }))
+  // One setter per table. A sort change in Active is not a state change in Backlog — which is why
+  // they are two URL keys and two setters rather than one shared `filedSort` with a partition
+  // argument, and why expanding one table cannot reset the other's row count.
+  const setFiledActiveSort = (nextSort: FiledTableSort) =>
+    commit((state) => ({ ...state, filedActiveSort: nextSort }))
+  const setFiledBacklogSort = (nextSort: FiledTableSort) =>
+    commit((state) => ({ ...state, filedBacklogSort: nextSort }))
 
   /**
    * The search box types locally and reaches the URL on a delay.
@@ -552,11 +573,15 @@ export function GlobalTasksRoute() {
           query={filters.query}
           filedFilters={filedFilters}
           filedSort={filedSort}
+          filedActiveSort={filedActiveSort}
+          filedBacklogSort={filedBacklogSort}
           onToggleFacet={(facet, value) =>
             setFiledFilters((current) => ({ ...current, [facet]: toggleFacetValue(current[facet], value) }))
           }
           onClearFacet={(facet) => setFiledFilters((current) => ({ ...current, [facet]: [] }))}
           onSortChange={setFiledSort}
+          onActiveSortChange={setFiledActiveSort}
+          onBacklogSortChange={setFiledBacklogSort}
         />
 
         {/* The empty state keys on `visible`, not on `settled`: a page whose only rows are in the
@@ -725,6 +750,71 @@ const FILED_SORT_OPTIONS: readonly { value: FiledSort; label: string }[] = [
  * inline "no match" message, since the section itself is not what emptied it.
  */
 function FiledTasks({
+  view,
+  query,
+  filedFilters,
+  filedSort,
+  filedActiveSort,
+  filedBacklogSort,
+  onToggleFacet,
+  onClearFacet,
+  onSortChange,
+  onActiveSortChange,
+  onBacklogSortChange,
+}: {
+  view: ListView
+  /** The page's own search box (`?q=`) — one box narrows both the runs table and this one. */
+  query: string
+  filedFilters: FiledTaskFilters
+  filedSort: FiledSort
+  filedActiveSort: FiledTableSort
+  filedBacklogSort: FiledTableSort
+  onToggleFacet: (facet: FiledFacetId, value: string) => void
+  onClearFacet: (facet: FiledFacetId) => void
+  onSortChange: (sort: FiledSort) => void
+  onActiveSortChange: (sort: FiledTableSort) => void
+  onBacklogSortChange: (sort: FiledTableSort) => void
+}) {
+  // The two splits COMPOSE (D1): the tab asks "has this left the live board", the Active/Backlog
+  // partition asks "is it in flight or waiting". Only the live board is partitioned — an archived
+  // `todo`-status row is dismissed work, not backlog, and a `done` row is neither.
+  if (view === 'archived') {
+    return (
+      <FiledArchivedSection
+        view={view}
+        query={query}
+        filedFilters={filedFilters}
+        filedSort={filedSort}
+        onToggleFacet={onToggleFacet}
+        onClearFacet={onClearFacet}
+        onSortChange={onSortChange}
+      />
+    )
+  }
+  return (
+    <FiledActiveSection
+      query={query}
+      filedFilters={filedFilters}
+      activeSort={filedActiveSort}
+      backlogSort={filedBacklogSort}
+      onToggleFacet={onToggleFacet}
+      onClearFacet={onClearFacet}
+      onActiveSortChange={onActiveSortChange}
+      onBacklogSortChange={onBacklogSortChange}
+    />
+  )
+}
+
+/**
+ * The Archived tab's Filed section: **one unsplit table, on the legacy client-side path**, byte
+ * for byte what shipped in `2026-08-17-filed-tasks-table-statuses.md`.
+ *
+ * Left alone on purpose (D1). Partitioning it would be meaningless, and it is the half of the
+ * board carrying ~540 migrated rows that the 2026-08-17 production pass signed off on — so the
+ * server-paging change keeps its blast radius off it. It still reads `GET /workspace/todos` with
+ * no query parameters, which is exactly why that payload had to stay byte-identical.
+ */
+function FiledArchivedSection({
   view,
   query,
   filedFilters,
@@ -965,6 +1055,477 @@ function FiledTasks({
   )
 }
 
+/**
+ * The Active tab's Filed section: **two tables, server-ordered and server-paged**
+ * (`.ai/specs/2026-08-25-split-active-backlog-tables.md`).
+ *
+ * **Active above Backlog**, 20 rows and 30 rows to start, each with its own Show more (+10
+ * exactly) and its own per-column sort. `Backlog` here is a table of `status: 'todo'` rows; it is
+ * NOT the `/new` composer's Backlog submit mode (`data-slot="mode-backlog"`), which is a related
+ * but different object — hence every slot below is namespaced `filed-`.
+ *
+ * **Two requests, not one.** That is what makes "expansion preserves status partitions"
+ * structural rather than merely tested: each partition has its own React Query key, so expanding
+ * Active mutates only the Active key and the Backlog request is never re-issued. A single request
+ * carrying both partitions would leave the same property resting on the determinism of the
+ * ordering alone, and a regression there would silently reshuffle the table nobody touched.
+ *
+ * **One controls row for both tables.** The page has one search box by design, and per-table
+ * facets would let a reader put the two halves of one board into contradictory states. The chips'
+ * counts are the two responses' `counts` summed — the server computes each with its own facet
+ * lifted, so unticking a value still shows what would come back.
+ */
+function FiledActiveSection({
+  query,
+  filedFilters,
+  activeSort,
+  backlogSort,
+  onToggleFacet,
+  onClearFacet,
+  onActiveSortChange,
+  onBacklogSortChange,
+}: {
+  query: string
+  filedFilters: FiledTaskFilters
+  activeSort: FiledTableSort
+  backlogSort: FiledTableSort
+  onToggleFacet: (facet: FiledFacetId, value: string) => void
+  onClearFacet: (facet: FiledFacetId) => void
+  onActiveSortChange: (sort: FiledTableSort) => void
+  onBacklogSortChange: (sort: FiledTableSort) => void
+}) {
+  const start = useStartFiledTask()
+  const startMany = useStartFiledTasks()
+  const update = useUpdateFiledTodo()
+  const now = useNow(30_000)
+  const isDesktop = useIsDesktop()
+  const nodeRoster = useTaskNodeRoster()
+  const [detail, setDetail] = React.useState<WorkspaceTodoEntry | null>(null)
+  const [selected, setSelected] = React.useState<ReadonlySet<string>>(() => new Set())
+  const [activeLimit, setActiveLimit] = React.useState(FILED_ACTIVE_INITIAL_ROWS)
+  const [backlogLimit, setBacklogLimit] = React.useState(FILED_BACKLOG_INITIAL_ROWS)
+
+  const statuses = filedFilters.statuses
+  const priorities = filedFilters.priorities
+  const activeQuery = useWorkspaceTodoPage({
+    partition: 'active',
+    view: 'active',
+    sort: activeSort.column,
+    dir: activeSort.dir,
+    limit: activeLimit,
+    status: statuses,
+    priority: priorities,
+    q: query,
+  })
+  const backlogQuery = useWorkspaceTodoPage({
+    partition: 'backlog',
+    view: 'active',
+    sort: backlogSort.column,
+    dir: backlogSort.dir,
+    limit: backlogLimit,
+    status: statuses,
+    priority: priorities,
+    q: query,
+  })
+
+  // A narrowing change re-scopes both tables, so both row counts go back to their own initial
+  // value — a stale "50 shown" carried over from a wider set would dump every row of a brand-new
+  // filter onto the screen at once (the same reasoning the single-table reset carried).
+  //
+  // **The deps are PRIMITIVES, deliberately.** The URL state object is rebuilt whenever any query
+  // param changes, so depending on `filedFilters` or on the sort OBJECT would make a Backlog
+  // re-sort reset the Active table's row count — the exact cross-table coupling this split exists
+  // to remove. Each table depends on the narrowing inputs plus ITS OWN sort, spelled as strings.
+  const facetKey = `${[...statuses].sort().join(',')}|${[...priorities].sort().join(',')}|${query}`
+  React.useEffect(() => {
+    setActiveLimit(FILED_ACTIVE_INITIAL_ROWS)
+  }, [facetKey, activeSort.column, activeSort.dir])
+  React.useEffect(() => {
+    setBacklogLimit(FILED_BACKLOG_INITIAL_ROWS)
+  }, [facetKey, backlogSort.column, backlogSort.dir])
+
+  const activeRows = activeQuery.data?.todos ?? []
+  const backlogRows = backlogQuery.data?.todos ?? []
+  const activePage = activeQuery.data?.page
+  const backlogPage = backlogQuery.data?.page
+
+  // The section's own "is there anything filed at all" question, and the count badge's
+  // denominator, both answer against the partition totals BEFORE facets and search — the same set
+  // the tab itself defines.
+  const settled = activeQuery.data !== undefined && backlogQuery.data !== undefined
+  const viewTotal = (activePage?.partitionTotal ?? 0) + (backlogPage?.partitionTotal ?? 0)
+  const matchedTotal = (activePage?.total ?? 0) + (backlogPage?.total ?? 0)
+
+  const counts = React.useMemo(() => {
+    const sum = (pick: (source: { statuses: Record<string, number>; priorities: Record<string, number> }) => Record<string, number>) => {
+      const merged = new Map<string, number>()
+      for (const source of [activeQuery.data?.counts, backlogQuery.data?.counts]) {
+        if (source === undefined) continue
+        for (const [value, count] of Object.entries(pick(source))) {
+          merged.set(value, (merged.get(value) ?? 0) + count)
+        }
+      }
+      return merged
+    }
+    return { statuses: sum((c) => c.statuses), priorities: sum((c) => c.priorities) }
+  }, [activeQuery.data?.counts, backlogQuery.data?.counts])
+
+  // The batch is the RENDERED rows of both tables and nothing wider. On this path there is no
+  // wider in-memory array to reach for by accident — `rows` IS the response — which is what makes
+  // the 2026-08-24 bulk-start bug (a batch computed from the full sorted list, starting rows the
+  // reader could not see) structurally unreachable rather than merely fixed.
+  const renderedRows = [...activeRows, ...backlogRows]
+  const batch = selectedFiledEntries(renderedRows, selected)
+  const clearSelection = () => setSelected(new Set())
+  const runSelected = () => {
+    if (batch.length === 0 || startMany.isPending) return
+    startMany.mutate(batch, { onSettled: () => setSelected(new Set()) })
+  }
+  const selectRow = (entry: WorkspaceTodoEntry) =>
+    setSelected((current) => toggleFiledSelection(current, filedTaskKey(entry)))
+  const selectKeys = (keys: readonly string[], on: boolean) =>
+    setSelected((current) => setFiledSelection(current, keys, on))
+
+  if (!settled || viewTotal === 0) return null
+
+  const rowProps = {
+    now,
+    nodeRoster,
+    isDesktop,
+    selected,
+    onOpenDetail: setDetail,
+    onStart: (entry: WorkspaceTodoEntry) => start.mutate({ projectId: entry.project, todoId: entry.todo.id }),
+    onArchive: (entry: WorkspaceTodoEntry, archived: boolean) => update.mutate({ entry, patch: { archived } }),
+    onToggleSelect: selectRow,
+    onSelectKeys: selectKeys,
+    startBusy: start.isPending,
+    archiveBusy: update.isPending,
+  }
+
+  return (
+    <section data-slot="filed-tasks" data-view="active">
+      <h2 className="mb-1.5 flex items-center gap-2 text-[12px] font-semibold tracking-[0.04em] text-soft-foreground uppercase">
+        Filed
+        <span data-slot="filed-tasks-count" className="font-mono text-[11px] font-medium tabular-nums">
+          {matchedTotal === viewTotal ? viewTotal : `${matchedTotal} of ${viewTotal}`}
+        </span>
+      </h2>
+
+      <FiledControlsRow
+        filedFilters={filedFilters}
+        counts={counts}
+        onToggleFacet={onToggleFacet}
+        onClearFacet={onClearFacet}
+      />
+
+      {batch.length > 0 ? (
+        <div
+          data-slot="filed-selection-bar"
+          className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 shadow-xs"
+        >
+          <span data-slot="filed-selection-count" className="text-[12.5px] font-medium">
+            {batch.length} selected
+          </span>
+          <span className="flex-1" aria-hidden="true" />
+          <button
+            type="button"
+            data-action="start-selected-filed-tasks"
+            disabled={startMany.isPending}
+            onClick={runSelected}
+            className="inline-flex min-h-8 items-center gap-1.5 rounded-md border border-border px-3 text-[12.5px] font-medium hover:bg-muted focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-wait disabled:opacity-50"
+          >
+            <PlayIcon className="size-3.5" aria-hidden="true" />
+            {startMany.isPending ? 'Starting...' : `Run ${batch.length} task${batch.length === 1 ? '' : 's'}`}
+          </button>
+          <button
+            type="button"
+            data-action="clear-filed-selection"
+            onClick={clearSelection}
+            className="inline-flex min-h-8 items-center rounded-md px-2.5 text-[12.5px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+          >
+            Clear
+          </button>
+        </div>
+      ) : null}
+
+      {matchedTotal === 0 ? (
+        <p data-slot="filed-tasks-empty" className="mt-2 text-[12.5px] text-soft-foreground">
+          No filed tasks match these filters.
+        </p>
+      ) : (
+        <>
+          <FiledPartitionTable
+            partition="active"
+            heading="Active"
+            rows={activeRows}
+            page={activePage}
+            sort={activeSort}
+            onSortChange={onActiveSortChange}
+            onShowMore={() => {
+              track('filed_tasks.show_more', {
+                partition: 'active',
+                from: activeLimit,
+                to: activeLimit + FILED_SHOW_MORE_INCREMENT,
+                increment: FILED_SHOW_MORE_INCREMENT,
+              })
+              setActiveLimit((current) => current + FILED_SHOW_MORE_INCREMENT)
+            }}
+            {...rowProps}
+          />
+          <FiledPartitionTable
+            partition="backlog"
+            heading="Backlog"
+            rows={backlogRows}
+            page={backlogPage}
+            sort={backlogSort}
+            onSortChange={onBacklogSortChange}
+            onShowMore={() => {
+              track('filed_tasks.show_more', {
+                partition: 'backlog',
+                from: backlogLimit,
+                to: backlogLimit + FILED_SHOW_MORE_INCREMENT,
+                increment: FILED_SHOW_MORE_INCREMENT,
+              })
+              setBacklogLimit((current) => current + FILED_SHOW_MORE_INCREMENT)
+            }}
+            {...rowProps}
+          />
+        </>
+      )}
+
+      <FiledDetailDialog
+        entry={detail}
+        nodeRoster={nodeRoster}
+        onClose={() => setDetail(null)}
+        onStart={(entry) => {
+          setDetail(null)
+          start.mutate({ projectId: entry.project, todoId: entry.todo.id })
+        }}
+        onArchive={(entry, archived) => update.mutate({ entry, patch: { archived } })}
+        startPending={start.isPending}
+        archivePending={update.isPending}
+      />
+    </section>
+  )
+}
+
+/** Which columns carry a sortable header, and what each one is called. Order matches the `<th>`
+ *  order below, so the table and the URL vocabulary cannot drift apart silently. */
+const FILED_COLUMN_LABEL: Record<FiledSortColumn, string> = {
+  status: 'Status',
+  task: 'Task',
+  project: 'Project',
+  author: 'Author',
+  priority: 'Priority',
+  age: 'Age',
+}
+
+/**
+ * One partition's table, heading and Show more control. Rendered twice by
+ * {@link FiledActiveSection} — the row components (`FiledRow`, `FiledCard`) are the ones the
+ * single table already used, moved intact rather than rewritten.
+ *
+ * `rows` IS the server's answer for this partition. There is deliberately no wider array in
+ * scope: every "which rows are on screen" question — select-all, the batch, the row keys the
+ * expansion assertions compare — can only be answered from what is rendered.
+ */
+function FiledPartitionTable({
+  partition,
+  heading,
+  rows,
+  page,
+  sort,
+  onSortChange,
+  onShowMore,
+  now,
+  nodeRoster,
+  isDesktop,
+  selected,
+  onOpenDetail,
+  onStart,
+  onArchive,
+  onToggleSelect,
+  onSelectKeys,
+  startBusy,
+  archiveBusy,
+}: {
+  partition: 'active' | 'backlog'
+  heading: string
+  rows: readonly WorkspaceTodoEntry[]
+  page: WorkspaceTodosPage | undefined
+  sort: FiledTableSort
+  onSortChange: (sort: FiledTableSort) => void
+  onShowMore: () => void
+  now: number
+  nodeRoster: TaskNodeRoster
+  isDesktop: boolean
+  selected: ReadonlySet<string>
+  onOpenDetail: (entry: WorkspaceTodoEntry) => void
+  onStart: (entry: WorkspaceTodoEntry) => void
+  onArchive: (entry: WorkspaceTodoEntry, archived: boolean) => void
+  onToggleSelect: (entry: WorkspaceTodoEntry) => void
+  onSelectKeys: (keys: readonly string[], on: boolean) => void
+  startBusy: boolean
+  archiveBusy: boolean
+}) {
+  const rowKeys = rows.map(filedTaskKey)
+  const selectAllState = filedSelectionState(rowKeys, selected)
+  const hasMore = page?.hasMore ?? false
+  const remaining = Math.max(0, (page?.total ?? 0) - rows.length)
+  const showMoreCount = Math.min(FILED_SHOW_MORE_INCREMENT, remaining)
+  const sortable = (column: FiledSortColumn) => ({
+    sortColumn: column,
+    sort,
+    onSort: () => {
+      // Before the request, not after: the event is about what the reader asked for, and an
+      // answer that never arrives is still a sort somebody performed.
+      const next = cycleFiledTableSort(sort, column)
+      track('filed_tasks.sorted', { partition, column: next.column, dir: next.dir })
+      onSortChange(next)
+    },
+  })
+
+  // `filed_tasks.partition_viewed` — once per partition per DISTINCT PARAMETER SET, after its
+  // rows render. The signature is the dep, and a ref of what has already been sent guards the
+  // case a dep array cannot: a remount (a tab switch, a filter that empties and refills the
+  // section) would otherwise re-announce a view the reader never returned to.
+  const seenViews = React.useRef<Set<string>>(new Set())
+  const viewSignature =
+    page === undefined ? null : `${page.partition}|${page.sort}|${page.dir}|${page.limit}|${page.total}`
+  React.useEffect(() => {
+    if (viewSignature === null || page === undefined) return
+    if (seenViews.current.has(viewSignature)) return
+    seenViews.current.add(viewSignature)
+    track('filed_tasks.partition_viewed', {
+      partition: page.partition,
+      rows: page.returned,
+      total: page.total,
+      sort: page.sort,
+      dir: page.dir,
+    })
+    // `page` is read only through `viewSignature`, which is the value that decides whether this
+    // is a new view at all; adding the object itself would fire on every refetch that changed
+    // nothing a reader can see.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewSignature])
+  const showMoreButton = (className: string) => (
+    <button
+      type="button"
+      data-action={`filed-${partition}-show-more`}
+      onClick={onShowMore}
+      className={className}
+    >
+      Show {showMoreCount} more
+    </button>
+  )
+
+  return (
+    <div data-slot={`filed-${partition}-section`} className="mt-3">
+      <h3 className="mb-1.5 flex items-center gap-2 text-[11px] font-semibold tracking-[0.04em] text-soft-foreground uppercase">
+        {heading}
+        <span
+          data-slot={`filed-${partition}-count`}
+          className="font-mono text-[11px] font-medium tabular-nums"
+        >
+          {page?.total ?? 0}
+        </span>
+      </h3>
+
+      {rows.length === 0 ? (
+        <p
+          data-slot={`filed-${partition}-empty`}
+          className="rounded-lg border border-border bg-card px-3 py-2.5 text-[12.5px] text-soft-foreground"
+        >
+          Nothing here.
+        </p>
+      ) : !isDesktop ? (
+        // Below `md` the filed table sideways-scrolls, so its rows render as cards — the same
+        // `useIsDesktop` (not a CSS pair) choice `TaskTable` makes, keeping one copy in the DOM.
+        <div data-slot={`filed-${partition}-cards`} className="flex flex-col gap-2.5">
+          {rows.map((entry) => (
+            <FiledCard
+              key={filedTaskKey(entry)}
+              entry={entry}
+              now={now}
+              nodeRoster={nodeRoster}
+              onOpenDetail={() => onOpenDetail(entry)}
+              onStart={() => onStart(entry)}
+              onArchive={(archived) => onArchive(entry, archived)}
+              selected={selected.has(filedTaskKey(entry))}
+              onToggleSelect={() => onToggleSelect(entry)}
+              startBusy={startBusy}
+              archiveBusy={archiveBusy}
+            />
+          ))}
+          {hasMore
+            ? showMoreButton(
+                'self-center rounded-md px-3 py-2.5 text-[12.5px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground',
+              )
+            : null}
+        </div>
+      ) : (
+        <div
+          data-slot={`filed-${partition}-table`}
+          className="overflow-x-auto rounded-lg border border-border bg-card shadow-xs"
+        >
+          <TooltipProvider>
+            <table className="w-full border-collapse">
+              <thead>
+                <tr>
+                  <Th className="w-[40px]">
+                    <SelectAllCheckbox
+                      state={selectAllState}
+                      onChange={(on) => onSelectKeys(rowKeys, on)}
+                      label={`Select every ${heading.toLowerCase()} filed task shown`}
+                    />
+                  </Th>
+                  <Th className="w-[104px]" {...sortable('status')} />
+                  <Th {...sortable('task')} />
+                  <Th className="w-[124px]" {...sortable('project')} />
+                  <Th className="hidden w-[104px] lg:table-cell" {...sortable('author')} />
+                  {/* Node is deliberately not sortable: it renders only on a clustered cockpit,
+                      so a URL naming it would mean something on one install and nothing on the
+                      next. */}
+                  {nodeRoster.clusterOn ? <Th className="hidden w-[110px] xl:table-cell">Node</Th> : null}
+                  <Th className="w-[84px]" {...sortable('priority')} />
+                  <Th className="w-[64px] text-right" {...sortable('age')} />
+                  <Th className="w-[64px] text-right">
+                    <span className="sr-only">Actions</span>
+                  </Th>
+                </tr>
+              </thead>
+              <tbody className="[&>tr:last-child>td]:border-b-0">
+                {rows.map((entry) => (
+                  <FiledRow
+                    key={filedTaskKey(entry)}
+                    entry={entry}
+                    now={now}
+                    nodeRoster={nodeRoster}
+                    onOpenDetail={() => onOpenDetail(entry)}
+                    onStart={() => onStart(entry)}
+                    onArchive={(archived) => onArchive(entry, archived)}
+                    selected={selected.has(filedTaskKey(entry))}
+                    onToggleSelect={() => onToggleSelect(entry)}
+                    startBusy={startBusy}
+                    archiveBusy={archiveBusy}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </TooltipProvider>
+          {hasMore ? (
+            <div className="flex justify-center border-t border-border p-2">
+              {showMoreButton(
+                'rounded-md px-3 py-1.5 text-[12.5px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground',
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** The Filed table's controls row: status/priority multi-select facets (with counts) and the
  *  created-date sort toggle, all URL-state — the page's `commit()` is the only writer, this row
  *  only ever calls the setters handed down from it. */
@@ -977,11 +1538,14 @@ function FiledControlsRow({
   onSortChange,
 }: {
   filedFilters: FiledTaskFilters
-  filedSort: FiledSort
+  /** The Archived table's created-date dropdown. **Omitted on the Active tab**, where each table
+   *  sorts from its own column headers instead — a dropdown that could only drive one of two
+   *  tables would be a control whose target the reader has to guess. */
+  filedSort?: FiledSort
   counts: { statuses: Map<string, number>; priorities: Map<string, number> }
   onToggleFacet: (facet: FiledFacetId, value: string) => void
   onClearFacet: (facet: FiledFacetId) => void
-  onSortChange: (sort: FiledSort) => void
+  onSortChange?: (sort: FiledSort) => void
 }) {
   return (
     <div
@@ -1017,15 +1581,19 @@ function FiledControlsRow({
         }))}
         emptyLabel="No filed tasks to filter"
       />
-      <span className="mx-1 h-5 w-px bg-border" aria-hidden="true" />
-      <span className="text-[11px] font-medium text-soft-foreground">Sort</span>
-      <SegmentedControl
-        slot="filed-sort"
-        label="Sort filed tasks by creation date"
-        value={filedSort}
-        options={FILED_SORT_OPTIONS}
-        onChange={onSortChange}
-      />
+      {filedSort !== undefined && onSortChange !== undefined ? (
+        <>
+          <span className="mx-1 h-5 w-px bg-border" aria-hidden="true" />
+          <span className="text-[11px] font-medium text-soft-foreground">Sort</span>
+          <SegmentedControl
+            slot="filed-sort"
+            label="Sort filed tasks by creation date"
+            value={filedSort}
+            options={FILED_SORT_OPTIONS}
+            onChange={onSortChange}
+          />
+        </>
+      ) : null}
     </div>
   )
 }
@@ -1548,6 +2116,11 @@ function useStartFiledTasks() {
   })
 }
 
+/** Every partitioned page of the Filed board, by prefix — `['workspace','todos','page', …]`.
+ *  Both partitions and every `(sort, dir, limit, facet)` combination sit under it, which is what
+ *  lets one `setQueriesData` reach the row wherever it is cached. */
+const FILED_PAGE_KEY_PREFIX = ['workspace', 'todos', 'page'] as const
+
 /**
  * The status/priority edit and Archive/Restore action for one filed row
  * (2026-08-17-filed-tasks-table-statuses.md) — the Filed table's twin of `useIndexedRunMutation`
@@ -1577,11 +2150,33 @@ function useUpdateFiledTodo() {
               ),
             },
       )
-      return { previous }
+      // On the PARTITIONED pages the optimistic move is a REMOVAL, not a patch
+      // (2026-08-25-split-active-backlog-tables.md, Risks). A status change can move a row from
+      // Active to Backlog or back, and no client-side patch can place it at its server-decided
+      // rank in the other table — but removal is always correct: archive removes it, and a
+      // partition-crossing change removes it from where it was. The visible half keeps the
+      // instant-archive feel; the arrival side is settled by the invalidation below.
+      const previousPages = queryClient.getQueriesData<WorkspaceTodosResponse>({
+        queryKey: FILED_PAGE_KEY_PREFIX,
+      })
+      queryClient.setQueriesData<WorkspaceTodosResponse>({ queryKey: FILED_PAGE_KEY_PREFIX }, (current) =>
+        current === undefined
+          ? current
+          : {
+              ...current,
+              todos: current.todos.filter(
+                (row) => !(row.project === entry.project && row.todo.id === entry.todo.id),
+              ),
+            },
+      )
+      return { previous, previousPages }
     },
     onError: (error: Error, _variables, context) => {
       if (context?.previous) {
         queryClient.setQueryData(workspaceQueryKeys.workspaceTodos, context.previous)
+      }
+      for (const [key, data] of context?.previousPages ?? []) {
+        queryClient.setQueryData(key, data)
       }
       toast(error.message, { tone: 'danger' })
     },
@@ -1879,16 +2474,60 @@ function TaskTable({
   )
 }
 
-function Th({ children, className }: { children: React.ReactNode; className?: string }) {
+/**
+ * A header cell, optionally SORTABLE (2026-08-25-split-active-backlog-tables.md, D6).
+ *
+ * Pass `sortColumn` + `sort` + `onSort` and the cell renders its label as a `<button>`, carries
+ * `aria-sort` (`ascending` / `descending` / `none`) and takes its text from
+ * `FILED_COLUMN_LABEL` — one place the column's name is spelled, shared with the URL vocabulary.
+ * Pass `children` alone and it is the plain cell every other table on this page uses.
+ *
+ * `aria-sort="none"` is set on every sortable column rather than left off the unsorted ones, so a
+ * screen reader can tell "sortable, not currently sorted" from "not sortable at all".
+ */
+function Th({
+  children,
+  className,
+  sortColumn,
+  sort,
+  onSort,
+}: {
+  children?: React.ReactNode
+  className?: string
+  sortColumn?: FiledSortColumn
+  sort?: FiledTableSort
+  onSort?: () => void
+}) {
+  const sortable = sortColumn !== undefined && sort !== undefined && onSort !== undefined
   return (
     <th
       scope="col"
+      aria-sort={sortable ? filedAriaSort(sort, sortColumn) : undefined}
       className={cn(
         'h-[38px] border-b border-border px-2.5 text-left text-[11px] font-semibold tracking-[0.05em] whitespace-nowrap text-soft-foreground uppercase first:pl-4 last:pr-4',
         className,
       )}
     >
-      {children}
+      {sortable ? (
+        <button
+          type="button"
+          data-slot="filed-sort-header"
+          data-column={sortColumn}
+          onClick={onSort}
+          className="inline-flex items-center gap-1 rounded-sm uppercase hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+        >
+          {FILED_COLUMN_LABEL[sortColumn]}
+          {sort.column === sortColumn ? (
+            sort.dir === 'asc' ? (
+              <ChevronUpIcon className="size-3" aria-hidden="true" />
+            ) : (
+              <ChevronDownIcon className="size-3" aria-hidden="true" />
+            )
+          ) : null}
+        </button>
+      ) : (
+        children
+      )}
     </th>
   )
 }

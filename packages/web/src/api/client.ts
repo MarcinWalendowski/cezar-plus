@@ -148,6 +148,13 @@ import type {
   RejectNoteInput,
   WorkspaceRunsResponse,
   WorkspaceTodosResponse,
+  FiledPartition,
+  FiledSortColumn,
+  FiledSortDir,
+  FiledViewValue,
+  WorkspaceTodosQuery,
+  AnalyticsIngestInput,
+  AnalyticsIngestResponse,
   WorkspaceGitResponse,
   WorkspaceKnowledgeSearchResponse,
   WorkspaceKnowledgeDomainsResponse,
@@ -2687,8 +2694,72 @@ export async function getWorkspaceRuns(
  * The ungating stands on its own reason, above: a default install has no other surface for a
  * filed todo, whatever wrote it.
  */
-export async function getWorkspaceTodos(opts?: ReadOptions): Promise<WorkspaceTodosResponse> {
-  return unwrap(await cez.api.v1.workspace.todos.$get({}, init(opts)), '/workspace/todos')
+/**
+ * One partition's page of the Filed board (`.ai/specs/2026-08-25-split-active-backlog-tables.md`).
+ * **Omit it entirely and the request carries no query at all** — the legacy path, whose payload is
+ * `BACKWARD_COMPATIBILITY.md` §2 protected and which the Archived table still reads.
+ */
+export interface WorkspaceTodosParams {
+  partition?: FiledPartition
+  sort?: FiledSortColumn
+  dir?: FiledSortDir
+  /** The page's Active/Archived tab. */
+  view?: FiledViewValue
+  limit?: number
+  status?: readonly string[]
+  priority?: readonly string[]
+  q?: string
+}
+
+/**
+ * Params → the `hc` query object, dropping every absent key so a partitionless call sends a bare
+ * URL rather than `?partition=&sort=` — which is what keeps the legacy path legacy.
+ *
+ * Typed as the schema's OUTPUT (`limit` a number, the facets arrays) rather than as the wire
+ * strings, because `queryZodValidator` publishes the output as the route's REQUEST type — a known
+ * property of that helper, documented in `server/validators.ts`: Hono declares a validator's
+ * request parameter as a conditional type, which is not an inference site, so the request falls
+ * back to the schema's output. `hc` stringifies through `URLSearchParams` on the way out and the
+ * server parses strings on the way in, so the wire is unaffected either way.
+ */
+function toWorkspaceTodosQuery(params: WorkspaceTodosParams | undefined): WorkspaceTodosQuery {
+  if (params === undefined) return {}
+  return {
+    ...(params.partition !== undefined ? { partition: params.partition } : {}),
+    ...(params.sort !== undefined ? { sort: params.sort } : {}),
+    ...(params.dir !== undefined ? { dir: params.dir } : {}),
+    ...(params.view !== undefined ? { view: params.view } : {}),
+    ...(params.limit !== undefined ? { limit: params.limit } : {}),
+    ...(params.q !== undefined && params.q !== '' ? { q: params.q } : {}),
+    ...(params.status !== undefined && params.status.length > 0 ? { status: [...params.status] } : {}),
+    ...(params.priority !== undefined && params.priority.length > 0
+      ? { priority: [...params.priority] }
+      : {}),
+  }
+}
+
+export async function getWorkspaceTodos(
+  params?: WorkspaceTodosParams,
+  opts?: ReadOptions,
+): Promise<WorkspaceTodosResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.todos.$get({ query: toWorkspaceTodosQuery(params) }, init(opts)),
+    '/workspace/todos',
+  )
+}
+
+/**
+ * `POST /workspace/analytics` (`.ai/specs/2026-08-25-split-active-backlog-tables.md`, D7) — the
+ * local product-usage sink. Answers `202 {accepted}` and never 404s or 409s, including with
+ * `CEZ_ANALYTICS=0`, so the caller has nothing to branch on. See `lib/analytics.ts`, which is the
+ * only thing that should call this: events are buffered and batched there, never posted per
+ * action.
+ */
+export async function postAnalytics(input: AnalyticsIngestInput): Promise<AnalyticsIngestResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.analytics.$post({ json: input }, init()),
+    '/workspace/analytics',
+  )
 }
 
 /** `GET /backup` (`.ai/specs/2026-08-16-provider-agnostic-platform-backup.md`) — the backup

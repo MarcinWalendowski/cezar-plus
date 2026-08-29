@@ -26,6 +26,7 @@ export * from './notes.ts';
 export * from './workspace-runs.ts';
 export * from './workspace-git.ts';
 export * from './workspace-knowledge.ts';
+export * from './workspace-analytics.ts';
 export * from './workspace-todos.ts';
 export * from './workspace-run-start.ts';
 export * from './notifications.ts';

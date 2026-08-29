@@ -1,6 +1,6 @@
 # Split filed tasks into sortable Active and Backlog tables
 
-- **Status:** Specified, not implemented
+- **Status:** Implemented (phases 1-4 landed and gated; phase 5's browser E2E is written but has not been executed here — see Implementation notes)
 - **Date:** 2026-08-25
 - **Task:** `265c2695-f524-4a40-b0e8-d613cf1a31fd`, workflow `spec-to-deploy`, branch `cez/265c2695`
 - **Brief:** `.ai/specs/briefs/2026-08-25-split-active-backlog-tables.md` (step 1 of this run;
@@ -565,3 +565,90 @@ verified by artifacts, not by assertion in prose.
 - **`placement` is settable at create only** (`skills.ts:145-152` names this as a gap, not a
   decision). Unrelated to this change, but the Node column's non-sortability above is downstream
   of the same unfinished cluster surface, so it is worth naming in one place.
+
+## Implementation notes (2026-08-29)
+
+Everything above is what shipped, with these six deviations and findings. Each is a correction to
+the spec, not a note beside it: what the code does is what this section says.
+
+1. **The worktree had no `node_modules`, and that silently defeated the gates.** `tsc` resolved
+   `@loki-labs/better-cezar-contract` by walking up to the MAIN checkout's `node_modules`, so the
+   first typecheck reported the new contract exports as "not exported" while the contract file in
+   front of it declared them. `npm ci` in the worktree fixed it. Worth naming because the failure
+   reads as a code error, not as an environment one.
+
+2. **`queryZodValidator` publishes the schema's OUTPUT as the route's REQUEST type.** The spec
+   assumed `hc` would see the wire shape (`limit` a string, facets repeatable strings); it sees
+   `limit: number` and `status: string[]`, because Hono declares a validator's request parameter
+   as a conditional type, which is not an inference site — the same trap `validators.ts`'s own
+   header documents for `jsonZodValidator`, which names both sides explicitly and which the query
+   helper does not. Not fixed here: changing `queryZodValidator` would change the published
+   request type of ~15 other routes, which is a decision of its own and outside this spec. The
+   client (`api/client.ts`'s `toWorkspaceTodosQuery`) therefore builds the output-shaped object
+   and `hc` stringifies it; the wire is unaffected either way, and
+   `contract-parity.workspace-todos.test.ts` pins which shape reaches `hc` so the next reader is
+   not surprised by it.
+
+3. **`.optional()` must be the OUTERMOST wrapper on every query key.** A `.transform()` applied
+   after `.optional()` erases the key's optionality in `z.input`, which made `hc` demand a
+   `status` and a `limit` from every caller — including the legacy no-params one, i.e. exactly the
+   compatibility promise §2 protects. The absent case is normalized in the reader
+   (`WorkspaceTodoIndex.paginate`), never in the schema.
+
+4. **The bulk-start regression test's fixture had to shrink, not just move.** Re-pointed as the
+   spec asked, but its old numbers cannot survive the new limits: it needs one row visible in the
+   expanded window under one direction AND inside the reset window under the other, which with a
+   30-row reset and a 40-row expanded window requires a set of at most 69 rows. It now uses 60,
+   and drives the sort from the Backlog table's Age header rather than the removed Newest/Oldest
+   dropdown.
+
+5. **The Active tab's controls row has no sort control at all.** The spec said the section keeps
+   one controls row; it did not settle what happens to the `FILED_SORT_OPTIONS` dropdown inside it
+   on a page with two independently sorted tables. Settled: `filedSort`/`onSortChange` became
+   OPTIONAL props on `FiledControlsRow` and the Active tab omits them, because a dropdown that can
+   only drive one of two tables is a control whose target the reader has to guess. The Archived
+   tab renders it exactly as before.
+
+6. **One component test is driven through the URL rather than the facet popover.** The facet
+   popover is `cmdk`, which needs a `ResizeObserver` that this suite's jsdom environment does not
+   provide. The URL is the page's state either way (`commit()` is the only writer), so the test
+   enters at `/tasks?fpriority=high&q=Active` and asserts both partition requests carry both — the
+   same path the click would have reached, one step later.
+
+**There is no lint gate in this repository.** The spec's step 8 listed
+`npm run typecheck && npm test && npm run test:unit && npm run build && npm run test:package`,
+which is right: there is no root `lint` script and no `eslint.config.*`. Recorded so the next
+session does not spend a round trip discovering it.
+
+### What ran, and what did not
+
+- `npm run typecheck` — clean across all four packages.
+- `npm test` — **11958 passed, 3 failed**, in `workspace/agent-route-step-provider.test.ts` and
+  `workflows/step-runner-account.test.ts`. All three were **verified failing on `main` before any
+  of this work** (run in the main checkout at `97533c88`), so they are pre-existing and unrelated:
+  they concern agent-account quota routing and touch nothing this change went near. Two further
+  failures in `core/opencode-ui-mapper.test.ts` appeared in one run and passed in the next — flaky,
+  also unrelated.
+- `npm run test:unit` — 44 passed, 0 failed. `npm run build` — `check:pack ok, 1251 files, 217
+  under web/dist`. `npm run test:package` — 25 passed, 0 failed.
+- **Step 9's browser E2E is written (`packages/web/e2e/filed-partitions.e2e.ts`) but was NOT
+  executed here, and the reason is the box, not the spec.** Attempted, and it failed at the FIRST
+  of two independent gates:
+
+  1. `.ai/scripts/test-env-up.sh` cannot boot the app on `prod-host` — `cezar serve` answers
+     `cezar refuses to boot: hosted mode with no authentication exposes shell execution to anyone
+     who can reach this port`, the `auth-boot-gate.ts` refusal. The documented escape is
+     `CEZ_ALLOW_UNAUTHENTICATED=1`, which is a security decision about a production host and not
+     one this task takes on its own.
+  2. The agent-browser provider is not installed here (`~/.cache/agent-browser` does not exist),
+     and provisioning it needs network access to the GitHub Releases and Chrome-for-Testing hosts.
+     `AgentBrowser.open()` refuses without it, so clearing (1) alone would not have produced a run.
+
+  So no artifact under `.ai/qa/artifacts_e2e` exists yet: none of the five screenshots and no
+  `filed-partitions-verdict.json`. Step 10's production runtime pass has not run either.
+  **The task is therefore QA Needed, not Done** — `.ai/scripts/e2e.sh` states that a run which
+  cannot provision the browser exits `TEST_E2E_STATUS=skipped` and that skipped is NOT a pass, and
+  a spec that says so cannot round its own skipped E2E up to one. Re-run on a machine with the
+  browser provider and without the hosted-auth gate:
+  `npx vitest run --config packages/web/e2e/vitest.config.ts filed-partitions`.
+

@@ -52,6 +52,7 @@ import { createWorkspaceRunMutationRoutes } from './workspace-run-mutations-rout
 import { createWorkspaceGitRoutes } from './workspace-git-routes.ts';
 import { createWorkspaceKnowledgeRoutes } from './workspace-knowledge-routes.ts';
 import { createWorkspaceTodosRoutes } from './workspace-todos-routes.ts';
+import { createAnalyticsRoutes } from './analytics-routes.ts';
 import { createBackupRoutes } from './backup-routes.ts';
 import { BackupScheduler } from '../backup/scheduler.ts';
 import { loadBackupConfig } from '../backup/config.ts';
@@ -7105,6 +7106,10 @@ export function createApp(deps: ServerDeps) {
   // at all — it never builds or peeks a `ProjectContext`, only derives each registered project's
   // `<root>/.ai/cezar` the same way `WorkspaceRunIndex`/`WorkspaceKnowledgeIndex` derive theirs.
   const workspaceTodosRoutes = createWorkspaceTodosRoutes();
+  // The product-usage sink (`.ai/specs/2026-08-25-split-active-backlog-tables.md`, D7). Needs no
+  // `contexts` seam either: it writes one NDJSON file under `~/.cezar/analytics/` and never opens
+  // a project.
+  const analyticsRoutes = createAnalyticsRoutes();
   // The composer's Workspace submit (`.ai/specs/2026-08-15-cross-project-workspace-run.md`): ONE
   // run, not scoped to any project, granted read/write in every registered project directory.
   //
@@ -7377,6 +7382,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceKnowledgeRoutes)
     .route('/', workspaceReportsRoutes)
     .route('/', workspaceTodosRoutes)
+    .route('/', analyticsRoutes)
     .route('/', workspaceRunRoutes)
     .route('/', notificationsRoutes)
     .route('/', backupRoutes)

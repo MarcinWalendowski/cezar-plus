@@ -13,6 +13,7 @@ import { ListViewProvider, useListView } from '@/components/list-view'
 import { __clearRememberedStatusesForTests, workspaceQueryKeys } from '@/api/queries'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { FILED_ROW_PAGE_SIZE } from '@/lib/filed-tasks'
+import { __flushAnalyticsForTests, __resetAnalyticsForTests } from '@/lib/analytics'
 
 import { GlobalTasksRoute } from './global-tasks'
 
@@ -27,6 +28,9 @@ import { GlobalTasksRoute } from './global-tasks'
 afterEach(() => {
   act(() => resetToasts())
   cleanup()
+  // One test's buffered analytics must not reach the next one's assertions — `lib/analytics.ts`
+  // buffers at module scope on purpose (one batch per burst, not one request per click).
+  __resetAnalyticsForTests()
   vi.unstubAllGlobals()
   // Reference statuses are remembered for the LIFETIME OF THE TAB, deliberately (a re-keyed batch
   // must not blank the chips) — which in vitest means one case's statuses would otherwise be
@@ -109,6 +113,113 @@ const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
 let sent: { method: string; path: string; body?: unknown }[] = []
+
+/**
+ * `GET /workspace/todos?partition=…` — a compact stand-in for the server's
+ * `WorkspaceTodoIndex.list(query)` + `todo-ordering.ts`
+ * (`.ai/specs/2026-08-25-split-active-backlog-tables.md`).
+ *
+ * Deliberately a REIMPLEMENTATION rather than an import: `packages/cezar` is the Node service and
+ * the web bundle does not reach into it. The ordering's own correctness is owned by
+ * `workspace/todo-ordering.test.ts` and `workspace/todo-index.test.ts`; this exists so the
+ * component tests below exercise the real request/render loop — two partitions, real limits, real
+ * `page` envelopes — against a server that behaves like the real one, instead of a fixture that
+ * would pass whatever the component asked for.
+ */
+function filedPage(board: readonly WorkspaceTodoEntry[], params: URLSearchParams) {
+  const partition = params.get('partition') === 'active' ? 'active' : 'backlog'
+  const view = params.get('view') ?? 'active'
+  const sort = params.get('sort') ?? 'age'
+  const dir = params.get('dir') ?? 'desc'
+  const limit = Number(params.get('limit') ?? '20')
+  const statuses = params.getAll('status')
+  const priorities = params.getAll('priority')
+  const tokens = (params.get('q') ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean)
+
+  const statusOf = (entry: WorkspaceTodoEntry) => entry.todo.status ?? 'todo'
+  const isArchived = (entry: WorkspaceTodoEntry) =>
+    entry.todo.archivedAt !== undefined || statusOf(entry) === 'done'
+  const inPartition = board.filter(
+    (entry) =>
+      entry.todo.startedTaskId === undefined &&
+      (view === 'archived' ? isArchived(entry) : !isArchived(entry)) &&
+      (statusOf(entry) === 'todo' ? 'backlog' : 'active') === partition,
+  )
+  const narrow = (withStatuses: readonly string[], withPriorities: readonly string[]) =>
+    inPartition.filter((entry) => {
+      if (withStatuses.length > 0 && !withStatuses.includes(statusOf(entry))) return false
+      const priority = entry.todo.priority
+      if (withPriorities.length > 0 && (priority === undefined || !withPriorities.includes(priority))) {
+        return false
+      }
+      const text = [entry.todo.summary, entry.todo.context ?? '', entry.todo.whatToDo ?? '']
+        .join('\n')
+        .toLowerCase()
+      return tokens.every((token) => text.includes(token))
+    })
+  const matched = narrow(statuses, priorities)
+
+  const STATUS_RANK = ['todo', 'in-progress', 'blocked', 'done']
+  const PRIORITY_RANK = ['high', 'medium', 'low']
+  const sortKey = (entry: WorkspaceTodoEntry): number | string | undefined => {
+    if (sort === 'age') {
+      if (!entry.todo.ts) return undefined
+      const parsed = Date.parse(entry.todo.ts)
+      return Number.isNaN(parsed) ? undefined : parsed
+    }
+    if (sort === 'status') return STATUS_RANK.indexOf(statusOf(entry))
+    if (sort === 'priority') {
+      return entry.todo.priority === undefined ? undefined : PRIORITY_RANK.indexOf(entry.todo.priority)
+    }
+    if (sort === 'task') return entry.todo.summary.toLowerCase()
+    if (sort === 'project') return entry.project.toLowerCase()
+    const author = entry.todo.author
+    return author === undefined ? undefined : (author.label ?? author.id).toLowerCase()
+  }
+  const rowKey = (entry: WorkspaceTodoEntry) => `${entry.project}:${entry.todo.id}`
+  const ordered = [...matched].sort((a, b) => {
+    const ka = sortKey(a)
+    const kb = sortKey(b)
+    let primary = 0
+    if (ka === undefined && kb === undefined) primary = 0
+    else if (ka === undefined) primary = 1
+    else if (kb === undefined) primary = -1
+    else primary = (ka < kb ? -1 : ka > kb ? 1 : 0) * (dir === 'asc' ? 1 : -1)
+    if (primary !== 0) return primary
+    return rowKey(a) < rowKey(b) ? -1 : rowKey(a) > rowKey(b) ? 1 : 0
+  })
+  const rows = ordered.slice(0, limit)
+  const countBy = (
+    list: readonly WorkspaceTodoEntry[],
+    valueOf: (entry: WorkspaceTodoEntry) => string | undefined,
+  ) => {
+    const counts: Record<string, number> = {}
+    for (const entry of list) {
+      const value = valueOf(entry)
+      if (value === undefined) continue
+      counts[value] = (counts[value] ?? 0) + 1
+    }
+    return counts
+  }
+  return {
+    todos: rows,
+    projects: [],
+    page: {
+      partition,
+      sort,
+      dir,
+      limit,
+      returned: rows.length,
+      total: matched.length,
+      partitionTotal: inPartition.length,
+      hasMore: matched.length > rows.length,
+    },
+    counts: {
+      statuses: countBy(narrow([], priorities), statusOf),
+      priorities: countBy(narrow(statuses, []), (entry) => entry.todo.priority),
+    },
+  }
+}
 
 function stubFetch({
   runs = RUNS,
@@ -194,11 +305,15 @@ function stubFetch({
           referenceStatuses: indexStatuses ?? {},
         })
       }
-      if (path === '/api/v1/workspace/todos') {
+      if (path === '/api/v1/workspace/todos' || path.startsWith('/api/v1/workspace/todos?')) {
         // Note what the health stub above does NOT carry: `followups` and `workspaceViews` are
         // both absent, i.e. off — the default install. The Filed section must still render, which
         // is the whole point of this route being ungated (D7a on the client).
-        return jsonResponse({ todos: todoBoard, projects: [] })
+        const params = new URLSearchParams(path.split('?')[1] ?? '')
+        // No `partition` is the LEGACY path, byte for byte what this stub always answered — which
+        // is what the Archived tab still reads.
+        if (params.get('partition') === null) return jsonResponse({ todos: todoBoard, projects: [] })
+        return jsonResponse(filedPage(todoBoard, params))
       }
       const startTodo = /^\/api\/v1\/p\/([^/]+)\/todos\/([^/]+)\/start$/.exec(path)
       if (startTodo && method === 'POST') {
@@ -1414,6 +1529,10 @@ describe('the Filed section', () => {
 
   const filedRows = () => [...document.querySelectorAll('[data-slot="filed-task-row"]')]
   const filedRowIds = () => filedRows().map((row) => row.getAttribute('data-todo-id'))
+  const activeTable = () => document.querySelector('[data-slot="filed-active-table"]') as HTMLElement
+  const backlogTable = () => document.querySelector('[data-slot="filed-backlog-table"]') as HTMLElement
+  const rowIdsIn = (table: HTMLElement) =>
+    [...table.querySelectorAll('[data-slot="filed-task-row"]')].map((row) => row.getAttribute('data-todo-id'))
 
   it('lists filed tasks above the runs, with the project each one belongs to', async () => {
     stubFetch({ todos: TODOS })
@@ -1514,39 +1633,42 @@ describe('the Filed section', () => {
 
   it('does not start a selected row hidden by pagination', async () => {
     // 2026-08-24-ship-bulk-start-filed-tasks.md P1.5: `batch` used to be computed from `sorted`
-    // (the whole set) instead of `rows` (`sorted.slice(0, shown)`, what actually renders), so a
-    // row paged into view, selected, then pushed back past `shown` by a sort change stayed in the
-    // batch and started anyway even though the user could no longer see it on the page. `shown`
-    // resets to `FILED_ROW_PAGE_SIZE` on every sort change but `selected` does not, which is what
-    // makes this reachable through ordinary use rather than a crafted state.
-    const total = FILED_ROW_PAGE_SIZE * 2 + 50 // 250
+    // (the whole set) instead of `rows` (what actually renders), so a row paged into view,
+    // selected, then pushed back out of the window by a sort change stayed in the batch and
+    // started anyway even though the user could no longer see it.
+    //
+    // **RE-POINTED at the two-table board (2026-08-25-split-active-backlog-tables.md).** The bug
+    // is now unreachable by construction — on the partitioned path `rows` IS the server's answer
+    // and there is no wider array in scope to reach for — but "unreachable by construction" is a
+    // claim a test should keep checking, so this one moved rather than being deleted. The numbers
+    // changed with the mechanism: the Backlog table opens at 30 rows, Show more adds 10, and the
+    // sort comes from the Age column header instead of a Newest/Oldest dropdown.
+    const total = 60
     const many: WorkspaceTodoEntry[] = Array.from({ length: total }, (_, i) => ({
       project: 'api',
       todo: {
         id: `filed-${i}`,
-        // Ascending ts: index `total - 1` is newest. Under the default `created-desc` sort, index
-        // `i` therefore lands at 1-indexed rank `total - i`; under `created-asc` its rank is `i + 1`.
+        // Ascending ts: index `total - 1` is newest. Under the default `age:desc` sort, index `i`
+        // lands at 1-indexed rank `total - i`; under `age:asc` its rank is `i + 1`.
         ts: new Date(2026, 0, 1, 0, 0, i).toISOString(),
         summary: `Disposable task #${i}`,
       },
     }))
-    // `hidden`: desc-rank 125, asc-rank 126 — beyond the reset 100-row window in BOTH directions,
-    // so switching sort cannot merely walk it back into view from the other end.
-    // `control`: desc-rank 200 (still within the paged 200-row window), asc-rank 51 — stays
-    // selected and visible after the switch, so the selection bar survives with a reduced count
-    // instead of vanishing (it only renders while `batch.length > 0`).
-    const hiddenIndex = total - 125
-    const hiddenId = `filed-${hiddenIndex}`
-    const controlIndex = total - 200
-    const controlId = `filed-${controlIndex}`
+    // `hidden`: desc-rank 25 (on screen from the start), asc-rank 36 — outside the reset 30-row
+    // window, so the sort flip pages it away.
+    // `control`: desc-rank 35 (reachable only AFTER one Show more), asc-rank 26 — inside the
+    // reset window, so it stays selected and visible and the selection bar survives with a
+    // reduced count instead of vanishing (it only renders while `batch.length > 0`).
+    const hiddenId = 'filed-35'
+    const controlId = 'filed-25'
 
     stubFetch({ todos: many })
     renderPage()
     await screen.findByText(`Disposable task #${total - 1}`)
-    expect(filedRows()).toHaveLength(FILED_ROW_PAGE_SIZE)
+    expect(filedRows()).toHaveLength(30)
 
-    fireEvent.click(screen.getByRole('button', { name: /Show \d+ more/ }))
-    await waitFor(() => expect(filedRows().length).toBeGreaterThan(FILED_ROW_PAGE_SIZE))
+    fireEvent.click(screen.getByRole('button', { name: 'Show 10 more' }))
+    await waitFor(() => expect(filedRows()).toHaveLength(40))
 
     const checkboxFor = (id: string) =>
       document.querySelector(`[data-slot="filed-select"][data-todo-id="${id}"]`) as HTMLInputElement
@@ -1556,17 +1678,16 @@ describe('the Filed section', () => {
     fireEvent.click(checkboxFor(controlId))
     expect(selectionCount()).toBe('2 selected')
 
-    // Reverse the sort: the `shown` reset effect fires (global-tasks.tsx:782-785). `hiddenId`'s
-    // rank moves to 126 (still outside the reset 100-row window); `controlId`'s moves to 51
-    // (inside it), so the row for `controlId` stays on screen while `hiddenId`'s does not.
-    fireEvent.click(screen.getByRole('button', { name: 'Oldest' }))
-    await waitFor(() => expect(filedRows()).toHaveLength(FILED_ROW_PAGE_SIZE))
+    // Flip the Backlog table's Age header: `age:desc` → `age:asc`, which resets THAT table's row
+    // count to 30. `hiddenId`'s rank moves to 36 (outside it); `controlId`'s to 26 (inside).
+    fireEvent.click(within(backlogTable()).getByRole('button', { name: 'Age' }))
+    await waitFor(() => expect(filedRows()).toHaveLength(30))
     expect(document.querySelector(`[data-todo-id="${hiddenId}"][data-slot="filed-task-row"]`)).toBeNull()
     expect(document.querySelector(`[data-todo-id="${controlId}"][data-slot="filed-task-row"]`)).toBeTruthy()
 
-    // `selected` still has both keys — the reset effect never touches it — but the batch that
-    // actually starts must intersect with what is rendered, so the count drops to the one row the
-    // user can still see.
+    // `selected` still has both keys — the reset never touches it — but the batch that actually
+    // starts must intersect with what is rendered, so the count drops to the one row the user can
+    // still see.
     expect(selectionCount()).toBe('1 selected')
     fireEvent.click(screen.getByRole('button', { name: 'Run 1 task' }))
     await waitFor(() => expect(startPaths()).toContain(`/api/v1/p/api/todos/${controlId}/start`))
@@ -1708,6 +1829,318 @@ describe('the Filed section', () => {
     expect(dialog.querySelector('[data-slot="filed-task-acceptance-criteria"]')).toBeNull()
     expect(dialog.querySelector('[data-slot="filed-task-knowledge-refs"]')).toBeNull()
   })
+
+  /**
+   * The Active/Backlog split (`.ai/specs/2026-08-25-split-active-backlog-tables.md`,
+   * verification step 6). What these guard is the acceptance criteria's two load-bearing claims:
+   * the initial row counts and increments, and that expanding one table cannot move a row in the
+   * other.
+   */
+  describe('Active and Backlog', () => {
+    /** `count` non-todo rows and `count` todo rows, with ascending `ts` inside each group so the
+     *  default `age:desc` order is predictable. */
+    function split(count: number): WorkspaceTodoEntry[] {
+      const rows: WorkspaceTodoEntry[] = []
+      for (let i = 0; i < count; i += 1) {
+        rows.push({
+          project: 'api',
+          todo: {
+            id: `act-${String(i).padStart(3, '0')}`,
+            ts: new Date(2026, 0, 1, 0, 0, i).toISOString(),
+            summary: `Active task #${i}`,
+            status: i % 2 === 0 ? 'in-progress' : 'blocked',
+            priority: i % 3 === 0 ? 'high' : 'low',
+          },
+        })
+        rows.push({
+          project: 'web',
+          todo: {
+            id: `bak-${String(i).padStart(3, '0')}`,
+            ts: new Date(2026, 0, 1, 0, 0, i).toISOString(),
+            summary: `Backlog task #${i}`,
+            status: 'todo',
+          },
+        })
+      }
+      return rows
+    }
+
+    const todosRequests = () => sent.filter((call) => call.path.startsWith('/api/v1/workspace/todos'))
+    const partitionRequests = (partition: string) =>
+      todosRequests().filter((call) => call.path.includes(`partition=${partition}`))
+
+    it('renders Active ABOVE Backlog, with 20 and 30 rows', async () => {
+      stubFetch({ todos: split(60) })
+      renderPage()
+      await waitFor(() => expect(activeTable()).toBeTruthy())
+      await waitFor(() => expect(backlogTable()).toBeTruthy())
+
+      // Document order, not just presence: "Active appears above Backlog" is the requirement.
+      const position = activeTable().compareDocumentPosition(backlogTable())
+      expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+      expect(rowIdsIn(activeTable())).toHaveLength(20)
+      expect(rowIdsIn(backlogTable())).toHaveLength(30)
+    })
+
+    it('a todo-status row lands in Backlog and a row with NO status lands there too', async () => {
+      stubFetch({
+        todos: [
+          { project: 'api', todo: { id: 'in-flight', summary: 'Running', status: 'in-progress' } },
+          { project: 'api', todo: { id: 'waiting', summary: 'Waiting', status: 'todo' } },
+          { project: 'api', todo: { id: 'legacy', summary: 'No status at all' } },
+        ],
+      })
+      renderPage()
+      await waitFor(() => expect(activeTable()).toBeTruthy())
+      expect(rowIdsIn(activeTable())).toEqual(['in-flight'])
+      expect(rowIdsIn(backlogTable()).sort()).toEqual(['legacy', 'waiting'])
+    })
+
+    it('Show more adds EXACTLY 10 rows to its own table and leaves the other one untouched', async () => {
+      stubFetch({ todos: split(60) })
+      renderPage()
+      await waitFor(() => expect(rowIdsIn(activeTable())).toHaveLength(20))
+      const backlogBefore = rowIdsIn(backlogTable())
+      expect(backlogBefore).toHaveLength(30)
+
+      fireEvent.click(
+        within(document.querySelector('[data-slot="filed-active-section"]') as HTMLElement).getByRole(
+          'button',
+          { name: 'Show 10 more' },
+        ),
+      )
+      await waitFor(() => expect(rowIdsIn(activeTable())).toHaveLength(30))
+      // Captured before and compared as arrays: "unchanged" has to mean the same rows in the same
+      // order, not merely the same count.
+      expect(rowIdsIn(backlogTable())).toEqual(backlogBefore)
+
+      // …and the same in reverse.
+      const activeAfter = rowIdsIn(activeTable())
+      fireEvent.click(
+        within(document.querySelector('[data-slot="filed-backlog-section"]') as HTMLElement).getByRole(
+          'button',
+          { name: 'Show 10 more' },
+        ),
+      )
+      await waitFor(() => expect(rowIdsIn(backlogTable())).toHaveLength(40))
+      expect(rowIdsIn(activeTable())).toEqual(activeAfter)
+    })
+
+    it('an expansion APPENDS — the rows already on screen keep their places (the prefix property)', async () => {
+      stubFetch({ todos: split(60) })
+      renderPage()
+      await waitFor(() => expect(rowIdsIn(activeTable())).toHaveLength(20))
+      const before = rowIdsIn(activeTable())
+
+      fireEvent.click(
+        within(document.querySelector('[data-slot="filed-active-section"]') as HTMLElement).getByRole(
+          'button',
+          { name: 'Show 10 more' },
+        ),
+      )
+      await waitFor(() => expect(rowIdsIn(activeTable())).toHaveLength(30))
+      expect(rowIdsIn(activeTable()).slice(0, 20)).toEqual(before)
+    })
+
+    it('a header click asks the backend for that column and cycles asc -> desc', async () => {
+      stubFetch({ todos: split(10) })
+      renderPage()
+      await waitFor(() => expect(activeTable()).toBeTruthy())
+
+      fireEvent.click(within(activeTable()).getByRole('button', { name: 'Priority' }))
+      await waitFor(() =>
+        expect(partitionRequests('active').at(-1)?.path).toContain('sort=priority'),
+      )
+      expect(partitionRequests('active').at(-1)?.path).toContain('dir=asc')
+
+      fireEvent.click(within(activeTable()).getByRole('button', { name: 'Priority' }))
+      await waitFor(() => expect(partitionRequests('active').at(-1)?.path).toContain('dir=desc'))
+      expect(partitionRequests('active').at(-1)?.path).toContain('sort=priority')
+    })
+
+    it('sorting Active does not re-issue the Backlog request', async () => {
+      stubFetch({ todos: split(10) })
+      renderPage()
+      await waitFor(() => expect(activeTable()).toBeTruthy())
+      const backlogCallsBefore = partitionRequests('backlog').length
+
+      fireEvent.click(within(activeTable()).getByRole('button', { name: 'Task' }))
+      await waitFor(() => expect(partitionRequests('active').at(-1)?.path).toContain('sort=task'))
+      expect(partitionRequests('backlog')).toHaveLength(backlogCallsBefore)
+    })
+
+    it('aria-sort marks exactly the sorted column of each table, independently', async () => {
+      stubFetch({ todos: split(10) })
+      renderPage()
+      await waitFor(() => expect(activeTable()).toBeTruthy())
+
+      const sortedHeaders = (table: HTMLElement) =>
+        [...table.querySelectorAll('th')]
+          .filter((th) => {
+            const value = th.getAttribute('aria-sort')
+            return value === 'ascending' || value === 'descending'
+          })
+          .map((th) => th.textContent?.trim())
+
+      // Both open on the default `age:desc`.
+      expect(sortedHeaders(activeTable())).toEqual(['Age'])
+      expect(sortedHeaders(backlogTable())).toEqual(['Age'])
+      // Every sortable column carries the attribute, so "sortable, not sorted" is distinguishable
+      // from "not sortable at all".
+      expect([...activeTable().querySelectorAll('th[aria-sort="none"]')].length).toBeGreaterThan(0)
+
+      fireEvent.click(within(activeTable()).getByRole('button', { name: 'Project' }))
+      await waitFor(() => expect(sortedHeaders(activeTable())).toEqual(['Project']))
+      // The other table is untouched — its own URL key, its own request.
+      expect(sortedHeaders(backlogTable())).toEqual(['Age'])
+    })
+
+    it('each table asks for its own partition and limit, and the two are separate requests', async () => {
+      stubFetch({ todos: split(60) })
+      renderPage()
+      await waitFor(() => expect(activeTable()).toBeTruthy())
+      expect(partitionRequests('active').at(-1)?.path).toContain('limit=20')
+      expect(partitionRequests('backlog').at(-1)?.path).toContain('limit=30')
+    })
+
+    it('the Archived tab still renders ONE unsplit table, on the legacy no-params request', async () => {
+      stubFetch({
+        todos: [
+          { project: 'api', todo: { id: 'shelved', summary: 'Shelved', archivedAt: '2026-07-14T12:00:00Z' } },
+          { project: 'api', todo: { id: 'finished', summary: 'Finished', status: 'done' } },
+        ],
+      })
+      renderPage(createQueryClient(), '/tasks?archived=1')
+      await screen.findByText('Shelved')
+      expect(activeTable()).toBeNull()
+      expect(backlogTable()).toBeNull()
+      expect(document.querySelector('[data-slot="filed-tasks-table"]')).toBeTruthy()
+      // The Archived tab must not have issued a partitioned request at all.
+      expect(partitionRequests('active')).toHaveLength(0)
+      expect(partitionRequests('backlog')).toHaveLength(0)
+      expect(todosRequests().every((call) => call.path === '/api/v1/workspace/todos')).toBe(true)
+    })
+
+    it('ONE controls row narrows BOTH tables — the facet and the search box ride on both requests', async () => {
+      // Driven through the URL rather than the facet popover: the popover is `cmdk`, which needs
+      // a `ResizeObserver` this suite's environment does not provide. The URL is the page's state
+      // either way (`commit()` is the only writer), so this exercises the same path the click
+      // would have reached, one step later.
+      stubFetch({ todos: split(10) })
+      renderPage(createQueryClient(), '/tasks?fpriority=high&q=Active')
+      await waitFor(() => expect(partitionRequests('active').length).toBeGreaterThan(0))
+      await waitFor(() => expect(partitionRequests('backlog').length).toBeGreaterThan(0))
+      for (const partition of ['active', 'backlog'] as const) {
+        const path = partitionRequests(partition).at(-1)?.path ?? ''
+        expect(path).toContain('priority=high')
+        expect(path).toContain('q=Active')
+      }
+    })
+
+    /**
+     * The three events (`.ai/specs/2026-08-25-split-active-backlog-tables.md`, D7). `track()` is
+     * fire-and-forget and buffers at module scope, so these drive the flush explicitly rather
+     * than waiting on an idle callback that jsdom does not schedule.
+     */
+    describe('analytics', () => {
+      const analyticsEvents = async () => {
+        await act(async () => {
+          await __flushAnalyticsForTests()
+        })
+        return sent
+          .filter((call) => call.path === '/api/v1/workspace/analytics')
+          .flatMap(
+            (call) =>
+              (call.body as { events: { event: string; props?: Record<string, unknown> }[] }).events,
+          )
+      }
+
+      it('reports one partition_viewed per partition, with the row counts and the sort', async () => {
+        stubFetch({ todos: split(60) })
+        renderPage()
+        await waitFor(() => expect(rowIdsIn(activeTable())).toHaveLength(20))
+        await waitFor(() => expect(rowIdsIn(backlogTable())).toHaveLength(30))
+
+        const events = await analyticsEvents()
+        const viewed = events.filter((event) => event.event === 'filed_tasks.partition_viewed')
+        expect(viewed.map((event) => event.props?.partition).sort()).toEqual(['active', 'backlog'])
+        expect(viewed.find((event) => event.props?.partition === 'active')?.props).toEqual({
+          partition: 'active',
+          rows: 20,
+          total: 60,
+          sort: 'age',
+          dir: 'desc',
+        })
+        expect(viewed.find((event) => event.props?.partition === 'backlog')?.props?.rows).toBe(30)
+        // No task summary, project name or search string is ever a prop value — that is a property
+        // of these three events, not of a filter in the sink.
+        for (const event of events) {
+          expect(JSON.stringify(event.props ?? {})).not.toContain('Active task')
+        }
+      })
+
+      it('partition_viewed fires ONCE per parameter set, not once per render', async () => {
+        stubFetch({ todos: split(60) })
+        const { rerender } = renderPage()
+        await waitFor(() => expect(rowIdsIn(activeTable())).toHaveLength(20))
+        await analyticsEvents()
+        rerender(<div />)
+        const events = await analyticsEvents()
+        expect(
+          events.filter(
+            (event) =>
+              event.event === 'filed_tasks.partition_viewed' && event.props?.partition === 'active',
+          ),
+        ).toHaveLength(1)
+      })
+
+      it('reports a sort with the column and direction the click resolved to', async () => {
+        stubFetch({ todos: split(10) })
+        renderPage()
+        await waitFor(() => expect(activeTable()).toBeTruthy())
+        fireEvent.click(within(activeTable()).getByRole('button', { name: 'Priority' }))
+        const events = await analyticsEvents()
+        expect(events.filter((event) => event.event === 'filed_tasks.sorted').at(-1)?.props).toEqual({
+          partition: 'active',
+          column: 'priority',
+          dir: 'asc',
+        })
+      })
+
+      it('reports a show_more with the row count it moved from and to', async () => {
+        stubFetch({ todos: split(60) })
+        renderPage()
+        await waitFor(() => expect(rowIdsIn(backlogTable())).toHaveLength(30))
+        fireEvent.click(
+          within(document.querySelector('[data-slot="filed-backlog-section"]') as HTMLElement).getByRole(
+            'button',
+            { name: 'Show 10 more' },
+          ),
+        )
+        const events = await analyticsEvents()
+        expect(events.filter((event) => event.event === 'filed_tasks.show_more').at(-1)?.props).toEqual({
+          partition: 'backlog',
+          from: 30,
+          to: 40,
+          increment: 10,
+        })
+      })
+    })
+
+    it('the section badge and the facet chips read the two responses summed, not one of them', async () => {
+      stubFetch({ todos: split(10) })
+      renderPage()
+      await waitFor(() => expect(activeTable()).toBeTruthy())
+      // 10 non-todo rows + 10 todo rows, none filtered out: the badge is the whole board, one
+      // number rather than a per-table count.
+      const badge = document.querySelector('[data-slot="filed-tasks-count"]')
+      expect(badge?.textContent).toBe('20')
+      expect(document.querySelector('[data-slot="filed-active-count"]')?.textContent).toBe('10')
+      expect(document.querySelector('[data-slot="filed-backlog-count"]')?.textContent).toBe('10')
+    })
+  })
+
 })
 
 // ---- "which worker is processing this?" (2026-08-22-multi-node-cezar-cluster.md) --------------

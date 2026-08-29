@@ -42,6 +42,48 @@
 
 ## ✨ Added
 
+- 🗂 **The Filed board splits into Active and Backlog, sorted and paged by the server** (spec
+  `.ai/specs/2026-08-25-split-active-backlog-tables.md`). `/tasks` used to render one Filed table
+  of every filed todo, ordered and paged in the browser, with in-flight work interleaved through
+  49-plus rows of never-started backlog. The Active tab now shows **Active** (every filed task
+  whose status is not `todo`) above **Backlog** (status `todo`, including the legacy rows that
+  carry no status at all), 20 rows and 30 rows to start, each with its own **Show more** (+10
+  exactly) and its own per-column sort.
+
+  **Every column header now sorts, and the backend decides the order.**
+  `GET /api/v1/workspace/todos` gains an additive optional query — `partition`, `sort`
+  (`age` · `status` · `priority` · `task` · `project` · `author`), `dir`, `view`, `limit`, `q` and
+  the repeatable `status` / `priority` facets — and answers a `page` envelope plus facet `counts`
+  alongside the rows. The order is **total by construction**: every comparator falls through to
+  the `project:id` composite key ascending regardless of direction, which gives the *prefix
+  property* — the rows at `limit = N` are exactly the first `N` at `limit = N + k` — so an
+  expansion can only append and can never reorder what is already on screen. String columns
+  compare by code unit after lowercasing, never `localeCompare`, whose ICU-dependent answer can
+  differ between the machine serving a request and the one running the test.
+
+  **Each table is its own request**, so expanding or re-sorting one cannot move a row in the
+  other: that property is structural rather than merely tested. Sorts ride the URL as `fasort` /
+  `fbsort` (`<column>:<dir>`, with `created-desc` / `created-asc` accepted as aliases for the age
+  column), composed into the page's one codec.
+
+  **A request with no query parameters answers byte-identically to what it always did** — same
+  uncapped `todos`, same `projects`, neither new key — because that payload is a
+  `BACKWARD_COMPATIBILITY.md` §2 protected surface. The Archived tab still reads it and still
+  renders one unsplit, client-sorted table.
+
+- 📊 **A local analytics sink** (`POST /api/v1/workspace/analytics`, same spec, D7). There was no
+  analytics anywhere in this repository before this — a grep for
+  `analytics|telemetry|posthog|logEvent|emitEvent` found only aspirational `TODO(analytics):`
+  markers in prose — so the Filed board's three events (`filed_tasks.partition_viewed`,
+  `filed_tasks.sorted`, `filed_tasks.show_more`) ship with the smallest honest sink to receive
+  them. Events are buffered in the browser, flushed on idle at most one request at a time, dropped
+  silently on failure, and appended to `~/.cezar/analytics/YYYY-MM-DD.ndjson` **on your own
+  machine**; nothing leaves it, and files older than 30 days are pruned on write. On by default,
+  because an event that never fires on any real install is not shipped analytics; `CEZ_ANALYTICS=0`
+  turns it off, and the route then answers `202 {accepted: 0}` without creating so much as the
+  directory.
+
+
 - 🧵 **`input-to-tasks`, the workflow a workspace run uses** — three steps: gather context
   across the whole workspace, file the tasks it implies, and (optionally) start them. No step has
   `Edit` or `Write`, so "it does not touch your files" is structural rather than a request in a
