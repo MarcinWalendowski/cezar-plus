@@ -89,7 +89,6 @@ import type {
   RepoResponse,
   SpecReviewFeedResponse,
   AnalyticsEvent,
-  AnalyticsEventsResponse,
   Runner,
   ModelDiscoveryRunner,
   RunnerModelCatalogResponse,
