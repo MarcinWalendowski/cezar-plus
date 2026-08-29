@@ -226,6 +226,9 @@ const ROUTE_CASES: Array<[url: string, route: string, title: string]> = [
   ['/new', 'new', 'What should the agent work on?'],
   // The real thread view (Step R3.1): with fetch never answering it is honestly loading.
   ['/tasks/abc123', 'task-thread', 'Loading task…'],
+  // The filed-task detail page (`.ai/specs/2026-08-29-filed-task-detail-page.md`): with fetch
+  // never answering `useWorkspaceTodos()` stays pending, so it is honestly loading too.
+  ['/todos/todo-1', 'filed-task-detail', 'Loading task…'],
   // The real R5 tab routes: with fetch never answering they are honestly loading.
   ['/tasks/abc123/changes', 'task-changes', 'Loading changes…'],
   ['/tasks/abc123/files', 'task-files', 'Loading files…'],
@@ -291,6 +294,9 @@ describe('scoped route map (/p/:projectId)', () => {
   const unknown = [
     '/nope-404',
     '/tasks',
+    // An id-less `/todos` (unlike `/todos/:todoId` above) names no task at all — the 404, not a
+    // page with nothing to show.
+    '/todos',
     '/settings/nope',
     '/settings/mcp',
     '/settings/keyboard',
