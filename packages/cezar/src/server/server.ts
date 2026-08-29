@@ -5481,7 +5481,14 @@ export function createApp(deps: ServerDeps) {
       const body = c.req.valid('json');
       const result = await manager.resolveHandoff(id, body.by ?? approverOf(c), body.note);
       if (!result.ok) return c.json({ error: result.error ?? 'cannot resolve handoff' }, 409);
-      return c.json({ resolved: result.resolved ?? false, verdict: result.verdict ?? '' });
+      // `activating` separates "the deploy is running, this page is about to drop" from "still
+      // red, nothing happened" — two answers that are both `resolved: false` and must not read the
+      // same to the person who just clicked.
+      return c.json({
+        resolved: result.resolved ?? false,
+        verdict: result.verdict ?? '',
+        ...(result.activating ? { activating: true as const } : {}),
+      });
     })
 
     .post('/runs/:id/handoff/skip', jsonZodValidator(handoffSkipSchema), async (c) => {

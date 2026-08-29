@@ -143,6 +143,27 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(spec?.prompt).not.toContain(RECORD_READ_RECIPE);
   });
 
+  it('the two SHIPPING steps rewind to run-tests, because their gate is about an earlier step', () => {
+    // `tested-revision-shipped` guards both, and it compares HEAD against the tree `run-tests`
+    // attested. Once the base moves under a run — six landing on `main` at once, on this repo,
+    // routinely — that diff is a fact about run-tests' output, so re-entering the shipping step
+    // recomputes it unchanged. Both steps died of exactly this on 2026-08-29: `872b396a` at
+    // commit-push (38 files) and `1909f34e` at merge (`base origin/main moved by 17 commit(s)`),
+    // each with `document` and `deploy` never run.
+    for (const id of ['commit-push', 'merge']) {
+      const step = stepById(id);
+      expect(step?.verify).toContainEqual({ builtin: 'tested-revision-shipped', max: 1 });
+      // Asserted whole, so a dropped `resume` cannot pass as configured.
+      expect(step?.onFail).toEqual({ retry: 'run-tests', max: 1, resume: true });
+    }
+    // Backwards, and to a step that actually exists — `stepsIssue` enforces the direction, this
+    // pins that the target is the ATTESTING step and not merely some earlier one.
+    const ids = SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => s.id);
+    expect(ids.indexOf('run-tests')).toBeGreaterThanOrEqual(0);
+    expect(ids.indexOf('run-tests')).toBeLessThan(ids.indexOf('commit-push'));
+    expect(ids.indexOf('commit-push')).toBeLessThan(ids.indexOf('merge'));
+  });
+
   it('review-spec cannot edit what it reviews, and loops back to the spec step', () => {
     const review = stepById('review-spec');
     // The load-bearing guarantee of the whole review: no write tools, at all. A reviewer that

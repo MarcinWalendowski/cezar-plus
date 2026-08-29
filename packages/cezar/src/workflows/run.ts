@@ -146,6 +146,14 @@ import {
   type WorkflowDef,
   type WorkflowStepDef,
 } from './types.ts';
+import {
+  activationArgv,
+  activationInFlight,
+  defaultActivationHost,
+  markActivationLaunched,
+  readActivationCommands,
+  type ActivationHost,
+} from './manual-activation.ts';
 import { classifyTask } from '../task-classifier.ts';
 
 const CHECK_OUTPUT_CAP = 20_000;
@@ -217,6 +225,34 @@ const MONITORING_MARKER_RE = /CEZ:MONITORING\s*$/;
  * newlines in `AgentRunResult`; matching that contract here prevents a
  * trailing `CEZ:TITLE=` block from absorbing later commentary (#623).
  */
+/**
+ * Combine the verdicts of a step's post-conditions into the single one the engine acts on.
+ *
+ * Exported only so the retry budget it picks can be asserted directly. That number decides whether
+ * a failing step is re-entered at all, and the engine path reaching it needs a live agent session
+ * plus `CEZ_DRY_RUN=1` — which makes every BUILT-IN post-condition pass, so the one branch that
+ * matters here is unreachable from an end-to-end test by construction.
+ *
+ * The budget comes from the GATE when the gate states one, and from the workflow otherwise. A
+ * post-condition that knows re-running the step cannot change its verdict — `tested-revision-shipped`
+ * on base drift — says `retryMax: 0` and is believed. Until this read `first.retryMax`, every
+ * verdict's own budget was silently overwritten by `entry.max`, which is why the `merge` branch's
+ * `retryMax: 1` had been dead code since it was written.
+ */
+export function combineVerdicts(results: Array<PostconditionResult & { max: number }>): PostconditionResult {
+  const failed = results.filter((result) => !result.ok);
+  if (failed.length === 0) {
+    return { ok: true, detail: results.map((result) => result.detail).filter(Boolean).join('\n') };
+  }
+  const first = failed[0] as PostconditionResult & { max: number };
+  return {
+    ok: false,
+    detail: failed.map((result) => result.detail).join('\n'),
+    ...(first.handoff ? { handoff: first.handoff } : {}),
+    retryMax: first.retryMax ?? first.max,
+  };
+}
+
 export function appendTurnText(current: string, next: string): string {
   if (!current) return next;
   if (!next) return current;
@@ -341,7 +377,7 @@ interface ActiveRun {
    *  while parked; `approve`/`requestChanges` call it, `cancel` aborts it. */
   approvalWaiter?: (outcome: ApprovalOutcome) => void;
   /** Resolver for a run parked on a manual deployment or merge handoff. */
-  handoffWaiter?: (outcome: { kind: 'resolve' | 'skip' }) => Promise<{ resolved: boolean; verdict: string }>;
+  handoffWaiter?: (outcome: { kind: 'resolve' | 'skip' }) => Promise<{ resolved: boolean; verdict: string; activating?: boolean }>;
   /**
    * A continuation ended its turn with `CEZ:DONE` while its run's CHAIN still had pending steps
    * (spec 2026-08-20, P2). The marker is a statement about the agent's OWN step, so the session
@@ -1104,6 +1140,10 @@ type PinnedPlacement =
  * The user's working tree is never touched.
  */
 export class RunManager {
+  /** How an activation escapes this process's cgroup. Replaced in tests, which must never spawn a
+   *  real deploy — the default's `spawnDetached` would otherwise run one. */
+  activationHost: ActivationHost = defaultActivationHost;
+
   private readonly active = new Map<string, ActiveRun>();
   // Queue + `starting` set (spec 006, janitor's pump() pattern): `starting`
   // covers the window between shifting a run off the queue and the run
@@ -6112,6 +6152,24 @@ export class RunManager {
             checkFailure = attempt;
             continue; // same `i` — the step re-runs to finish its own job
           }
+          // Some goals cannot be met by re-entering the step that reported them. `commit-push`
+          // merging a base that moved since the tests ran is the case that forced this: the diff
+          // against the attested tree is a fact about an EARLIER step's output, so re-running the
+          // shipping step re-computes the identical verdict forever. A check step has consulted
+          // `onFail` since it existed; an agent step never did, so its post-condition was terminal
+          // however the workflow was configured (run `872b396a`, 2026-08-29 — it died here with its
+          // work already on `origin/main`).
+          if (canLoopBack(step)) {
+            const spent = retriesUsed.get(step.id) ?? 0;
+            this.finishStep(runId, step.id, 'failed', `post-condition failed — ${verdict.detail}`, emit);
+            i = loopBackTo(
+              i,
+              step,
+              `The post-condition of a LATER step ("${step.id}") failed, so its goal was not met:\n\n${verdict.detail}`,
+              `post-condition failed — retrying from "${step.onFail?.retry}" (attempt ${spent + 1}/${step.onFail?.max})`,
+            );
+            continue;
+          }
           this.finishStep(runId, step.id, 'failed', `post-condition failed — ${verdict.detail}`, emit);
           runError = `step "${step.id}" did not meet its post-condition: ${verdict.detail}`;
           break;
@@ -6381,6 +6439,12 @@ export class RunManager {
         const checked = await recheck();
         if (checked.ok) {
           once({ kind: 'resolved', verdict: checked });
+          // One deployment satisfies every run parked on it. Without this, a person who deployed
+          // once has to press Resolve on each of the others to tell them what already happened.
+          // Deliberately NOT awaited: each sibling runs its OWN probe in its OWN worktree, bounded
+          // at 60s each, and the click must not wait for all of them. `exceptRunId` keeps this run
+          // out of it — it is still `waiting` at this instant, and would otherwise be requeued twice.
+          void this.recheckManualDeployParks(runId).catch(() => undefined);
           return { resolved: true, verdict: checked.detail };
         }
         const next: PendingHandoff = {
@@ -6394,6 +6458,15 @@ export class RunManager {
         };
         this.store.updateRun(runId, { pendingHandoff: next, status: 'waiting', waitingReason: 'handoff' });
         emit({ type: 'note', stepId: step.id, message: `handoff recheck is still red: ${checked.detail}` });
+        // The button DEPLOYS, when the repo has said how (owner decision 2026-08-29). Placed AFTER
+        // the re-probe on purpose: a service that is already live is never redeployed to satisfy a
+        // click, so the cheap answer stays cheap and only a genuine red spends a cutover.
+        if (checked.handoff?.kind === 'manual-deploy') {
+          const attempt = this.launchManualDeploy(runId, state.cwd, step.id, checked.handoff.targets ?? [], emit);
+          // `activating` only when something really started. The lock refusal is also a message,
+          // and reporting it as progress would tell someone a deploy is running that is not.
+          if (attempt) return { resolved: false, ...(attempt.launched ? { activating: true } : {}), verdict: attempt.message };
+        }
         // `summary` over `detail` HERE only: this value is the answer to a button press, and
         // `detail` carries every probe's source. The full text is already in the note above.
         return { resolved: false, verdict: checked.summary ?? checked.detail };
@@ -6731,7 +6804,7 @@ export class RunManager {
     runId: string,
     by = 'unknown',
     note?: string,
-  ): Promise<{ ok: boolean; resolved?: boolean; verdict?: string; error?: string }> {
+  ): Promise<{ ok: boolean; resolved?: boolean; verdict?: string; activating?: boolean; error?: string }> {
     const run = this.store.getRun(runId);
     if (!run) return { ok: false, error: 'not found' };
     const pending = run.pendingHandoff;
@@ -6744,7 +6817,7 @@ export class RunManager {
     const state = this.active.get(runId);
     if (state?.handoffWaiter) {
       const result = await state.handoffWaiter({ kind: 'resolve' });
-      return { ok: true, resolved: result.resolved, verdict: result.verdict };
+      return { ok: true, resolved: result.resolved, verdict: result.verdict, ...(result.activating ? { activating: true } : {}) };
     }
     return this.requeueHandoff(run, pending, 'handoff resolve requested after restart');
   }
@@ -6814,10 +6887,10 @@ export class RunManager {
    * which is an AGENT step, so requeueing unconditionally would spend a model call per parked run
    * on every restart — including the crash restarts that changed nothing.
    */
-  async recheckManualDeployParks(): Promise<number> {
+  async recheckManualDeployParks(exceptRunId?: string): Promise<number> {
     const parked = this.store
       .listRuns()
-      .filter((r) => r.status === 'waiting' && r.pendingHandoff?.kind === 'manual-deploy');
+      .filter((r) => r.id !== exceptRunId && r.status === 'waiting' && r.pendingHandoff?.kind === 'manual-deploy');
     let requeued = 0;
     for (const run of parked) {
       const pending = run.pendingHandoff;
@@ -6858,6 +6931,71 @@ export class RunManager {
    * answer exactly as it would have, and this touches the object db and remote-tracking refs
    * only — never HEAD, the index, or the working tree.
    */
+  /**
+   * Run the manual deployment this park is waiting on, and return what to tell the person who
+   * pressed the button — or `undefined` when the repo declares no way to deploy, in which case the
+   * caller reports the probe's verdict exactly as it always did.
+   *
+   * Nothing is awaited. The command restarts `cezar.service`, so this connection is about to be
+   * cut; the run is resumed by the post-restart park sweep, not by anything on this code path.
+   */
+  private launchManualDeploy(
+    runId: string,
+    cwd: string | undefined,
+    stepId: string,
+    failing: readonly string[],
+    emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
+  ): { launched: boolean; message: string } | undefined {
+    if (!cwd) return undefined;
+    // The worktree first — a branch may legitimately change how its own service is deployed.
+    //
+    // Then the PROJECT ROOT, and that fallback is the whole reason a park from last week can be
+    // deployed at all: a worktree carries `.ai/deploy-targets.json` as it was when the worktree was
+    // cut, so the runs that need this most are exactly the ones whose copy predates it. This is the
+    // same shape as the probe's own fetch repair — a fix that ships in the artefact under test
+    // cannot reach the copies already taken — and the root checkout is the copy that keeps moving.
+    const commands = ((): ReturnType<typeof readActivationCommands> => {
+      const own = readActivationCommands(cwd, failing);
+      if (own.length > 0 || cwd === this.repoRoot) return own;
+      return readActivationCommands(this.repoRoot, failing);
+    })();
+    if (commands.length === 0) return undefined;
+    const dataDir = join(this.repoRoot, '.ai', 'cezar');
+    const now = Date.now();
+    const others = this.store
+      .listRuns()
+      .filter((r) => r.id !== runId && r.status === 'waiting' && r.pendingHandoff?.kind === 'manual-deploy').length;
+    const started = activationInFlight(dataDir, now);
+    if (started !== undefined) {
+      // Two cutovers at once is the one genuinely destructive outcome here: the second flips the
+      // symlink under the first, mid-stage. A person clicking twice because the page went quiet is
+      // the EXPECTED way to reach this, since the restart is what made the page go quiet.
+      const mins = Math.max(1, Math.round((now - started) / 60_000));
+      emit({ type: 'note', stepId, message: `manual deployment NOT started — one launched ${mins} minute(s) ago is still presumed to be running` });
+      return {
+        launched: false,
+        message: `an activation started ${mins} minute(s) ago is still running — nothing new was launched. Wait for it to finish, or read the deploy log on the box.`,
+      };
+    }
+    const user = !this.activationHost.isRoot();
+    const systemdRun = this.activationHost.systemdRunAvailable();
+    for (const { name, command } of commands) {
+      const unitId = `activate-${runId.slice(0, 8)}-${name.replace(/[^A-Za-z0-9_-]+/g, '-')}`.slice(0, 60);
+      this.activationHost.spawnDetached(activationArgv({ unitId, command, cwd, user, systemdRun }), process.env, cwd);
+      emit({ type: 'note', stepId, message: `manual deployment launched for ${name}: ${command}` });
+    }
+    markActivationLaunched(dataDir, now);
+    // One deployment settles EVERY run waiting on it, so say so — otherwise the other parked runs
+    // look ignored and invite a second click, which is the one thing the lock above exists to stop.
+    const also = others > 0
+      ? ` ${others} other run${others === 1 ? '' : 's'} waiting on this deployment ${others === 1 ? 'is' : 'are'} re-checked automatically too.`
+      : '';
+    return {
+      launched: true,
+      message: `deploying ${commands.map((c) => c.name).join(', ')} now. This restarts the server, so the cockpit will drop for a moment — the run resumes by itself once the new build is live.${also}`,
+    };
+  }
+
   private async refreshParkedWorktree(cwd: string | undefined): Promise<void> {
     // A MISSING cwd must not become "the process's own directory". `execFile` with `cwd:
     // undefined` inherits the server's, so a run with no worktree would have this reaching the
@@ -8340,15 +8478,7 @@ export class RunManager {
       }
       results.push({ ...result, max: entry.max });
     }
-    const failed = results.filter((result) => !result.ok);
-    if (failed.length === 0) return { ok: true, detail: results.map((result) => result.detail).filter(Boolean).join('\n') };
-    const first = failed[0] as PostconditionResult & { max: number };
-    return {
-      ok: false,
-      detail: failed.map((result) => result.detail).join('\n'),
-      ...(first.handoff ? { handoff: first.handoff } : {}),
-      retryMax: first.max,
-    };
+    return combineVerdicts(results);
   }
 
   /**

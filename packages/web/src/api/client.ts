@@ -1521,7 +1521,7 @@ export async function requestRunChanges(id: string, notes: string): Promise<unkn
 export async function resolveRunHandoff(
   id: string,
   note?: string,
-): Promise<{ resolved: boolean; verdict: string }> {
+): Promise<{ resolved: boolean; verdict: string; activating?: boolean }> {
   return unwrap(
     await cez.api.v1.p[':projectId'].runs[':id'].handoff.resolve.$post({
       param: { projectId: queryScope(), id: encodeURIComponent(id) },

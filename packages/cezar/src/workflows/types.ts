@@ -1557,6 +1557,11 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         { builtin: 'everything-committed', max: 1 },
         { builtin: 'tested-revision-shipped', max: 1 },
       ],
+      // Shipping onto a base other runs are moving means MERGING that base, which leaves the tested
+      // tree behind — a verdict this step cannot answer by running again. Send it back to the step
+      // that can: re-test the merged tree, re-attest, ship. Bounded at 1, because a base that moves
+      // again during the re-test is a queue problem, not something to spend another full suite on.
+      onFail: { retry: 'run-tests', max: 1, resume: true },
       // Owner decision 2026-08-19 ("commit & push/merge"): a SCOPED remote-reaching grant — git
       // (incl. `git push`, branch/merge plumbing) and `gh pr` only. This is the one step that ships
       // to the remote. It is still an allowlist, NOT unrestricted bash: no arbitrary shell, only the
@@ -1590,6 +1595,12 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         { builtin: 'tested-revision-shipped', max: 1 },
         { builtin: 'merged-into-base', max: 1 },
       ],
+      // `tested-revision-shipped` has SAID the remedy here since it was written — "re-run the tests
+      // on the merged tree" — and had no way to reach it. Measured 2026-08-29 on run `1909f34e`:
+      // `base origin/main moved by 17 commit(s) since the tested revision`, and the run died with
+      // `document` and `deploy` never run. One same-step attempt still comes first, because this
+      // step's OTHER gate (`merged-into-base`) is one re-running the merge genuinely can fix.
+      onFail: { retry: 'run-tests', max: 1, resume: true },
       allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
       bashAllowlist: SHIP_BASH_ALLOWLIST,
       prompt: [
