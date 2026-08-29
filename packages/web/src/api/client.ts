@@ -87,6 +87,8 @@ import type {
   RunHistoryContext,
   RunHistoryPage,
   RepoResponse,
+  SpecReviewFeedResponse,
+  AnalyticsEvent,
   Runner,
   ModelDiscoveryRunner,
   RunnerModelCatalogResponse,
@@ -943,6 +945,19 @@ export async function getRunCommit(
       init(opts),
     ),
     runPath(id, `/commit/${encodeURIComponent(sha)}`),
+  )
+}
+
+/** The Spec tab's feed (spec `.ai/specs/2026-08-29-spec-tab-review-feed.md`, P3): the recorded
+ *  spec/review side log when there is one, else the worktree fallback, else the empty answer.
+ *  No 409 for a missing worktree — the recorded log alone is still worth serving. */
+export async function getRunSpec(id: string, opts?: ReadOptions): Promise<SpecReviewFeedResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].spec.$get(
+      { param: { projectId: queryScope(), id: encodeURIComponent(id) } },
+      init(opts),
+    ),
+    runPath(id, '/spec'),
   )
 }
 
@@ -2934,5 +2949,19 @@ export async function getWorkspaceNotificationsLog(
       init(opts),
     ),
     '/workspace/notifications/log',
+  )
+}
+
+/** `POST /workspace/analytics/events` — the browser-reachable half of the workspace analytics
+ *  sink (`.ai/specs/2026-08-26-filed-task-detail-page.md`, `.ai/specs/2026-08-29-spec-tab-review-
+ *  feed.md` P3). Workspace-level and single-mount, never `/p/:projectId`-scoped. Every emitter
+ *  (`api/analytics.ts`) goes through THIS function rather than its own `fetch`, so it inherits
+ *  `credentials: 'include'`, `redirect: 'manual'` and the identity-gate handling every other call
+ *  in this module gets — a second transport would report a Cloudflare Access bounce as a plain
+ *  network failure instead of a sign-out. */
+export async function postAnalyticsEvents(events: AnalyticsEvent[]): Promise<AnalyticsEventsResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.analytics.events.$post({ json: { events } }),
+    '/workspace/analytics/events',
   )
 }

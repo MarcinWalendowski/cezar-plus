@@ -60,6 +60,7 @@ import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.
 import { autosaveCommit, createWorktree, resolveBaseRef, worktreeDiff, worktreeShortstat } from '../git-worktree.ts';
 import { LEASE_HEARTBEAT_MS, removeWorktreeLeases, touchWorktreeLeases, writeWorktreeLease } from '../workspace/worktree-lease.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
+import { readWorktreePath } from '../server/git-changes.ts';
 import { loadWorkflows } from './load.ts';
 import { deriveBaseBranch, evaluatePostcondition, type PostconditionResult } from './postconditions.ts';
 import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/store.ts';
@@ -73,6 +74,7 @@ import {
 } from '../runs/agent-tmpdir.ts';
 import { extractTaskRefs, refineTaskRefs, titleRefNumber } from '../runs/task-refs.ts';
 import { parseTaskMarkers, stripTaskMarkers } from '../runs/task-markers.ts';
+import { appendSpecReviewEntry, readSpecReviewEntries, SPEC_SNAPSHOT_CAP, summariseSpecReview } from '../runs/spec-review-log.ts';
 import {
   autoNamingActive,
   generateRunName,
@@ -373,6 +375,17 @@ interface ActiveRun {
   reviewVerdict?: ReviewVerdict;
   /** The reviewing turn's full report — what a `revise` verdict hands to the retried step. */
   reviewReport?: string;
+  /**
+   * The spec path the CURRENT step's finished turn declared via `CEZ:SPEC_PATH=` (spec
+   * `.ai/specs/2026-08-29-spec-tab-review-feed.md`, P1) — set in the turn-end handler beside
+   * `reviewVerdict`, read and cleared by the step loop just before the review block, which
+   * snapshots the file into the spec-review side log. Read from the turn text directly rather than
+   * `RunRecord.declaredSpecPath`, because that field's own doc comment records it as NOT
+   * guaranteed to be set on the persistence path (`recordTurnEnd` is fire-and-forget), while this
+   * capture is synchronous and not gated on `interactive` — exactly the property a mid-chain
+   * `spec` step needs.
+   */
+  stepSpecPath?: string;
   /** Resolver for a run parked on a human approval gate (spec 2026-08-20, P3). Present ONLY
    *  while parked; `approve`/`requestChanges` call it, `cancel` aborts it. */
   approvalWaiter?: (outcome: ApprovalOutcome) => void;
@@ -6175,6 +6188,12 @@ export class RunManager {
           break;
         }
 
+        // The spec/review feed's snapshot (spec 2026-08-29-spec-tab-review-feed, P1): a step that
+        // declared `CEZ:SPEC_PATH=` on this attempt gets its file captured into the side log NOW,
+        // before either gate below runs — so a review of THIS attempt is always recorded after its
+        // own draft, never before it.
+        await this.recordSpecSnapshot(runId, state, step.id);
+
         // ---- the spec reviewer's verdict (spec 2026-08-20, P2) -------------------------------
         // Read and CLEAR: the verdict belongs to the step that just ran, and leaving it set would
         // let one reviewer's `revise` re-trigger on a later step that never declared anything.
@@ -6182,6 +6201,13 @@ export class RunManager {
         const report = state.reviewReport;
         state.reviewVerdict = undefined;
         state.reviewReport = undefined;
+        // Recorded for BOTH verdicts (spec 2026-08-29-spec-tab-review-feed, P1) — a clean `pass`
+        // is what lets the feed end honestly rather than simply stopping, and a `pass` immediately
+        // followed by a human `revise` (both gates can fire on one revision) is a real event the
+        // log must not throw away, even though the display suppresses the provisional card.
+        if (reviewVerdict) {
+          this.recordSpecReview(runId, step.id, 'agent', reviewVerdict, report ?? '');
+        }
         if (reviewVerdict === 'revise' && step.onFail) {
           const used = retriesUsed.get(step.id) ?? 0;
           if (canLoopBack(step)) {
@@ -6219,6 +6245,10 @@ export class RunManager {
           const outcome = await this.awaitApproval(runId, state, step, emit, config);
           if (outcome.kind === 'cancelled') break;
           if (outcome.kind === 'changes') {
+            // Spec 2026-08-29-spec-tab-review-feed, P1: recorded at the moment of the human's
+            // decision, whether or not a revision slot remains below — the request happened
+            // either way, and the terminal "no revisions left" branch is a real objection too.
+            this.recordSpecReview(runId, step.id, 'human', 'revise', outcome.notes);
             const used = retriesUsed.get(step.id) ?? 0;
             if (canLoopBack(step)) {
               this.finishStep(runId, step.id, 'done', undefined, emit);
@@ -7051,6 +7081,10 @@ export class RunManager {
     }
     let changesFeedback: string | undefined;
     if (outcome.kind === 'changes') {
+      // Spec 2026-08-29-spec-tab-review-feed, P1: the restart-recovery twin of the step loop's own
+      // write (there is no live `execute()` here — that path returned above, through
+      // `approvalWaiter`, which is what the step loop's own instrumentation already covers).
+      this.recordSpecReview(runId, pending.stepId, 'human', 'revise', outcome.notes);
       const def = await this.reviveWorkflow(run);
       const target = def?.steps.find((s) => s.id === pending.stepId);
       changesFeedback =
@@ -7248,6 +7282,13 @@ export class RunManager {
           // (capped like any other fed-back output) rather than reduced to the verdict word.
           state.reviewReport = turnText.trimEnd().slice(-CHECK_OUTPUT_CAP);
         }
+        // The spec/review feed's snapshot trigger (spec 2026-08-29-spec-tab-review-feed, P1):
+        // parsed here, beside the verdict above, for the same reason — synchronous and NOT gated
+        // on `interactive`, unlike `RunRecord.declaredSpecPath`'s own write path
+        // (`applyTurnMarkers`, reached through the fire-and-forget `recordTurnEnd` above). Declared
+        // path wins on the LAST turn that names one, same rule as the verdict.
+        const declaredSpecPath = parseTaskMarkers(turnText).specPath;
+        if (declaredSpecPath) state.stepSpecPath = declaredSpecPath;
         const done = interactive && sessionOpen && DONE_MARKER_RE.test(turnText.trimEnd());
         // `CEZ:ASK` → the user is blocked; wins over `CEZ:MONITORING`, loses to
         // `CEZ:DONE` (#473).
@@ -8581,6 +8622,123 @@ export class RunManager {
       runId,
       `step "${stepId}" complete — status=${status}${stopReason ? ' (stopped, not failed)' : ''}`,
     );
+  }
+
+  // ---- spec/review feed (spec 2026-08-29-spec-tab-review-feed, P1) ---------------------------
+  //
+  // Three write sites feed the same side log: the step loop snapshots a finished `spec` step
+  // (`recordSpecSnapshot`), the agent verdict block and both human "changes requested" branches
+  // record a review (`recordSpecReview`). Every one of them is fail-open by construction — this is
+  // a display feature bolted onto a workflow that ships code, and it must never be able to fail a
+  // run or reject a human's decision.
+
+  /**
+   * Redacted note for a spec-review write failure — errno/error name ONLY, never the thrown
+   * error's message or any path, since both can carry file text or host layout. Best-effort on top
+   * of best-effort: `store.appendEvent` throws for an unknown run, which this swallows too.
+   */
+  private noteSpecReviewFailure(runId: string, stepId: string | undefined, err: unknown): void {
+    const code =
+      err && typeof err === 'object' && 'code' in err && typeof (err as { code?: unknown }).code === 'string'
+        ? (err as { code: string }).code
+        : err instanceof Error
+          ? err.name
+          : 'unknown';
+    try {
+      this.store.appendEvent(runId, { type: 'note', stepId, message: `spec-review log unavailable (${code})` });
+    } catch {
+      // the run may already be gone from the store's map — nothing more to do
+    }
+  }
+
+  /** Recompute and persist `RunRecord.specReview` from the side log — called after every append.
+   *  Its own try/catch is deliberately SEPARATE from the append's: a summary-write failure (P1
+   *  test 10e) must not read as "the append failed" and must not stop the caller either. */
+  private updateSpecReviewSummary(runId: string, stepId: string | undefined): void {
+    try {
+      const entries = readSpecReviewEntries(this.dataDir, runId);
+      this.store.updateRun(runId, { specReview: summariseSpecReview(entries) });
+    } catch (err) {
+      this.noteSpecReviewFailure(runId, stepId, err);
+    }
+  }
+
+  /**
+   * Snapshot the file a just-finished step declared via `CEZ:SPEC_PATH=` into the run's
+   * spec-review side log. Called once per attempt, in the step loop, AFTER the step's own
+   * post-condition passed and BEFORE the review verdict is consulted — so the draft always
+   * precedes its verdict in the log, which is what lets `appendSpecReviewEntry` associate a
+   * review with "the latest spec entry already in the log" with no extra bookkeeping.
+   *
+   * The read is untrusted input (the path came from an agent's own turn text) and is bounded and
+   * containment-checked by `readWorktreePath` — reused rather than re-implemented, see that
+   * function's own doc comment for the checks (traversal, `.git` internals, a symlinked final
+   * component, an intermediate symlinked directory). A refused or unresolved path still gets an
+   * entry, with `missing`/`rejected` set and no `text` — "the step said it wrote a spec and there
+   * is no file there" is a fact worth surfacing, not skipping silently.
+   */
+  private async recordSpecSnapshot(
+    runId: string,
+    state: ActiveRun,
+    stepId: string,
+  ): Promise<void> {
+    const specPath = state.stepSpecPath;
+    // Spent regardless of outcome: a failed attempt must not make the NEXT attempt re-snapshot a
+    // path that may no longer describe what is on disk.
+    state.stepSpecPath = undefined;
+    if (!specPath) return;
+    try {
+      const result = await readWorktreePath(state.cwd, specPath, SPEC_SNAPSHOT_CAP);
+      const entry =
+        result.kind === 'file' && result.content !== undefined
+          ? { kind: 'spec' as const, stepId, specPath, source: 'recorded' as const, text: result.content }
+          : result.kind === 'invalid'
+            ? {
+                kind: 'spec' as const,
+                stepId,
+                specPath,
+                source: 'recorded' as const,
+                missing: true as const,
+                rejected: true as const,
+                error: result.error,
+              }
+            : result.kind === 'missing'
+              ? { kind: 'spec' as const, stepId, specPath, source: 'recorded' as const, missing: true as const, error: result.error }
+              : {
+                  kind: 'spec' as const,
+                  stepId,
+                  specPath,
+                  source: 'recorded' as const,
+                  missing: true as const,
+                  error:
+                    result.kind === 'file'
+                      ? result.binary
+                        ? `binary file, not snapshotted: ${specPath}`
+                        : `file too large to snapshot (${result.size} bytes): ${specPath}`
+                      : `declared path is a directory, not a file: ${specPath}`,
+                };
+      appendSpecReviewEntry(this.dataDir, runId, entry);
+      this.updateSpecReviewSummary(runId, stepId);
+    } catch (err) {
+      this.noteSpecReviewFailure(runId, stepId, err);
+    }
+  }
+
+  /** Append a `review` entry — `actor: 'agent'` for the `review-spec` step's own verdict (both
+   *  `pass` and `revise`), `actor: 'human'` for a person's decision at the approval gate. */
+  private recordSpecReview(
+    runId: string,
+    stepId: string,
+    actor: 'agent' | 'human',
+    verdict: ReviewVerdict,
+    report: string,
+  ): void {
+    try {
+      appendSpecReviewEntry(this.dataDir, runId, { kind: 'review', stepId, actor, verdict, report });
+      this.updateSpecReviewSummary(runId, stepId);
+    } catch (err) {
+      this.noteSpecReviewFailure(runId, stepId, err);
+    }
   }
 }
 

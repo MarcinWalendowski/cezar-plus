@@ -37,6 +37,22 @@ else
   log "app is already stopped"
 fi
 
+# The D2 scratch TMPDIR (a candidate launch condition, `.ai/qa/test-env.json`'s
+# `browser.env.TMPDIR`) belongs to this environment's lifetime, not to the OS's own /tmp
+# cleanup — remove it alongside everything else this run owns.
+scratch_tmpdir=$(node -e '
+  const fs = require("fs");
+  try {
+    const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const t = d.browser && d.browser.env && d.browser.env.TMPDIR;
+    if (t) process.stdout.write(t);
+  } catch { /* corrupt descriptor → nothing safe to remove */ }
+' "$ENV_DESCRIPTOR" 2>/dev/null || true)
+case "$scratch_tmpdir" in
+  /tmp/cez-e2e.*) rm -rf "$scratch_tmpdir" 2>/dev/null || true ;;
+  *) : ;; # empty, or not one of ours — never rm -rf a path this script did not create
+esac
+
 node -e '
   const fs = require("fs");
   const f = process.argv[1];

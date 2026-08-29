@@ -1,5 +1,11 @@
 # Cold Watcher Production Verification
 
+> **CORRECTED 2026-08-29 by `.ai/specs/2026-08-29-cold-watcher-closure-record.md`: both board
+> todos below now read `done`, not `in-progress` / `QA Needed`.** Re-read directly from
+> `/var/lib/cezar/loki-labs/cezar/.ai/cezar/todos.json` in that closure step. The KB entries
+> `notion-4feaf1dc57d8` and `notion-c01d2be9d47a` were also corrected in place the same day. The
+> rest of this status block, including the execution record it describes, is unchanged and holds.
+>
 > **Status:** EXECUTED and VERIFIED 2026-08-29. Both production cold-project canaries
 > passed against the live service (`deploy.sha = 17637629`, which contains the fix
 > `809c8220`), so no manual deployment was needed to close criterion 5: production had
@@ -235,6 +241,19 @@ The acceptance rule is unchanged and now actually reachable: a known-resident co
 must report at least one match in the same invocation in which the cold target reports
 zero. A run in which the positive control reports zero is a broken probe, not a cold
 project, and the canary does not proceed.
+
+**CAVEAT added 2026-08-29 by `.ai/specs/2026-08-29-cold-watcher-closure-record.md` (P4):**
+`probe_inotify_dir` measures **inotify** watches, which only the resident `fs.watch`-based
+domain watchers create. The cold-intent poller (`lazy-project-intents.ts`) deliberately uses
+`watchFile` — stat polling, no inotify watch at all. So `matches=0` for a cold project is the
+**expected and correct** reading whether or not the poller is covering it: this probe can
+select a genuinely non-resident canary target, and that is its only valid use here. It is
+**never** evidence about poller coverage, in either direction — a `0` does not mean the fix
+regressed, and it never meant the original defect either. The claim this probe cannot make is
+settled instead by positive evidence: a pending intent written to a cold project produces a
+run. That is what `todo-autostart.test.ts`'s and `reopen-watch.test.ts`'s twin
+`describe('cold-project … discovery')` blocks assert in the test suite, and what the S4
+production canaries below demonstrated live (`mw-site` autostart 4s, `loki-labs` reopen 6s).
 
 ### S3. Make the twin tests fail without the wiring
 

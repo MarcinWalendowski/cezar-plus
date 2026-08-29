@@ -2,6 +2,22 @@
 
 ## Added
 
+- 📄 **Task detail gets a Spec tab, rendered as a feed: spec, then review, then spec again, until
+  a review passes** (spec `.ai/specs/2026-08-29-spec-tab-review-feed.md`, merged via PR #14,
+  commit `2a16bb72`). Before this, the reviewer's verdict and report lived only in memory on
+  `ActiveRun` and were cleared after one use, and the `spec` step overwrote the same file on
+  every retry, so revision 1's text was already gone from disk by the time revision 2 existed:
+  the loop was real but unwatchable. Now every `spec` write and every `review` verdict (agent or
+  human) is appended to a new per-run file, `<dataDir>/runs/<runId>.spec-review.ndjson`, and
+  `GET /api/v1/runs/:id/spec` (additive, `BACKWARD_COMPATIBILITY.md`) serves it as an ordered
+  feed: a clean `pass` renders just the spec (the owner's "if review was passed, don't show"),
+  a `revise` renders the full argument in order, and a run mid-approval-gate renders a neutral
+  "awaiting human approval" line rather than a premature accepted state. A run with no recorded
+  log but a `declaredSpecPath` still gets one synthetic entry read live off the worktree, so an
+  older or finished run isn't left with an empty tab. **QA Needed**: the spec's own Runtime E2E
+  (real agent runs through the approval gate twice) has not been executed pending the owner's
+  approval to run it.
+
 - ⚡ **`spec-to-deploy` reworks a spec in the session that wrote it, and reviews it twice** (spec
   `.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`). Measured on run `872b396a`: the
   `review-spec` step took **14:02** — of which tool execution was 33.5s — and the `spec` rework it
@@ -33,6 +49,32 @@
   reasoning split — thinking is billed inside `output_tokens` — not because opus did not think.
   The same run recorded `blockCounts.thinkingWithheld` of 12, 21, 23 and 29 on those steps.
 
+- ⏱️ **A retried step's clock now shows every attempt, not just the last one** (spec
+  `.ai/specs/2026-08-29-step-retry-timing.md`, closing Risk R3 that
+  `.ai/specs/2026-08-20-step-and-tool-call-durations.md` had named and deferred). Before this,
+  `startedAt` was overwritten on every iteration, so a step retried 3 times showed only its final
+  attempt's duration under the `×3` badge — the other two attempts' time vanished from the rail
+  entirely.
+
+  - **The store now accumulates `StepState.attempts[]`** (`RunStore.updateStep`, three ordered
+    rules: an explicit close, a status-exit close, and an iteration-transition mint with an
+    upgrade-boundary guard so a step mid-flight when this ships never gains a partial array the UI
+    would misread). `RunStore.open({now})` takes an injectable clock.
+  - **The rail's clock is now cumulative**: `stepElapsed` sums every closed attempt plus any open
+    one, clamped so clock skew can never make the live total dip below the banked total.
+  - **The `×N` badge is now a disclosure**: expanding it shows a per-attempt breakdown
+    (`StepRow`/`StepAttempts`), each attempt's own start and duration. A pre-upgrade step with no
+    `attempts` key falls back to today's single-duration display, unchanged.
+  - **First real caller for the workspace analytics sink**: expanding the breakdown fires
+    `step.attempts_expanded`, paying down the `CEZ_ANALYTICS` documentation debt
+    (`.env.example`, README, `BACKWARD_COMPATIBILITY.md` §1) left open by
+    `.ai/specs/2026-08-26-filed-task-detail-page.md`.
+
+  Gates: `npm run typecheck` green; `packages/web` 4179/4179, `packages/cezar` 7824 passed / 4
+  skipped / 0 failed post-merge; all 9 Verification-4b negative controls reverted-and-confirmed-red
+  then restored. **QA Needed:** the spec's own Playwright runtime E2E (Verification 5) has not run
+  yet — tracked as todo `da65120d-670e-47e0-baf8-ddbef6ab0bd4`.
+
 ## ⚠️ Breaking
 
 - 🧭 **A workspace-scoped run routes work instead of doing it** (spec
@@ -61,6 +103,21 @@
   **minor** bump (0.11.0), called out as breaking.
 
 ## 🛠 Fixed
+
+- **The browser E2E harness now actually launches on `prod-host`, and the recorded reason it
+  couldn't was wrong** (`.ai/specs/2026-08-29-verify-active-backlog-e2e.md`). The record said
+  agent-browser "is not installed"; measured, it was installed and its Chrome launched fine — the
+  blocker was two launch conditions the box needs (`--no-sandbox`, and a short `TMPDIR` so
+  Chromium's process-singleton socket stays under the 108-byte `sun_path` cap) that
+  `ensure_browser()` never tried. `test-env-up.sh` now probes candidate launch conditions in order
+  and records the winning one in the descriptor (`browser.env`), applied to every operation the
+  provider runs; the boot environment for both the shared instance and a spec's own fixture server
+  is now built by CEZ_* allowlist rather than by a stale deny list, closing the same hosted-mode
+  boot refusal a second stuck task hit independently. `filed-partitions.e2e.ts`
+  (`.ai/specs/2026-08-25-split-active-backlog-tables.md`'s Filed board Active/Backlog split) is the
+  first spec run all the way through: composite `<project>:<todoId>` row keys, a real
+  Resource-Timing request log proving the two-request-per-load design, exact-sequence sort waits
+  (not just `aria-sort`), and an assertion that analytics events reach disk.
 
 - **Cold-project intent discovery is now verified on production, and its verification runbook
   no longer lies.** The runtime fix (`809c8220`) shipped on 2026-08-25 and reached production

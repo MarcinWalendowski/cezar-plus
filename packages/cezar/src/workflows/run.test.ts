@@ -3338,3 +3338,125 @@ describe('a step is green only when its post-condition holds', () => {
     expect(deploy?.error).toContain('.ai/deploy-targets.json');
   }, 20_000);
 });
+
+/**
+ * `StepState.attempts` accumulates end to end through the real engine (spec
+ * 2026-08-29-step-retry-timing, Verification 3) — proof that `RunStore.updateStep`'s writer
+ * (§"The writer, precisely") sees the actual patches `run.ts` sends on the two retry shapes that
+ * matter most: a check step's `onFail.retry` loop-back (row 1 of the nine paths, `finishStep`
+ * closes explicitly) and an agent step's post-condition retry (row 4, `retryAfterFailedPostcondition`
+ * leaves the attempt open with `{status:'pending'}` and nothing else — the shape D3's rule (2)
+ * exists for).
+ */
+describe('StepState.attempts accumulates end to end (spec 2026-08-29-step-retry-timing)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-retry-timing-'));
+    savedEnv.CEZ_DRY_RUN = process.env.CEZ_DRY_RUN;
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    manager?.dispose();
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  async function waitForTerminal(runId: string, deadlineMs = 20_000): Promise<void> {
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + deadlineMs;
+    while (!terminal.has(store.getRun(runId)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not reach a terminal state in time');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  it('a check-step onFail.retry loop-back (fails twice) records one closed, nondecreasing attempt per iteration on both steps', async () => {
+    const counter = join(repoRoot, 'verify-count');
+    const workflow: WorkflowDef = {
+      name: 'loops-back-twice',
+      source: 'file',
+      steps: [
+        { id: 'implement', prompt: '{{task}}' },
+        {
+          id: 'verify',
+          command: `c=$(cat ${JSON.stringify(counter)} 2>/dev/null || echo 0); c=$((c+1)); echo $c > ${JSON.stringify(counter)}; test $c -ge 3`,
+          onFail: { retry: 'implement', max: 2 },
+        },
+      ],
+    };
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done fix it',
+      worktree: false,
+    });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    expect(run?.status).toBe('done');
+    const implement = run?.steps.find((s) => s.id === 'implement');
+    const verify = run?.steps.find((s) => s.id === 'verify');
+    // Both steps entered the run at iterations:0, so the upgrade boundary lets both mint from
+    // attempt 1 — this is the qualified `attempts.length === iterations` invariant (D5, R1).
+    expect(implement?.iterations).toBe(3);
+    expect(verify?.iterations).toBe(3);
+    for (const step of [implement, verify]) {
+      expect(step?.attempts?.length).toBe(step?.iterations);
+      let previousStart: string | undefined;
+      for (const attempt of step?.attempts ?? []) {
+        expect(attempt.finishedAt).toBeDefined();
+        if (previousStart !== undefined) expect(attempt.startedAt >= previousStart).toBe(true);
+        previousStart = attempt.startedAt;
+      }
+    }
+  }, 25_000);
+
+  it('an agent step post-condition retry (path 4 — no finishStep) still closes via D3 rule (2)', async () => {
+    const marker = join(repoRoot, 'ship-marker');
+    const workflow: WorkflowDef = {
+      name: 'agent-postcondition-retry',
+      source: 'file',
+      steps: [
+        {
+          id: 'ship',
+          prompt: '{{task}}',
+          verify: {
+            command: `test -f ${JSON.stringify(marker)} || { touch ${JSON.stringify(marker)}; exit 1; }`,
+            max: 1,
+          },
+        },
+      ],
+    };
+    const record = manager.startRun(workflow, {
+      author: localCliAuthor(),
+      task: 'mock:done ship it',
+      worktree: false,
+    });
+    await waitForTerminal(record.id);
+
+    const run = store.getRun(record.id);
+    const ship = run?.steps.find((s) => s.id === 'ship');
+    expect(ship?.status).toBe('done');
+    // Re-entered once by `retryAfterFailedPostcondition`'s `{status:'pending'}` patch, which
+    // carries no `finishedAt` — if D3's rule (2) did not fire from inside the real engine, the
+    // first attempt would still be open here.
+    expect(ship?.iterations).toBe(2);
+    expect(ship?.attempts?.length).toBe(2);
+    expect(ship?.attempts?.[0]?.finishedAt).toBeDefined();
+    expect(ship?.attempts?.[1]?.finishedAt).toBeDefined();
+  }, 20_000);
+});

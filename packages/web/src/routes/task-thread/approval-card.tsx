@@ -2,6 +2,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { CheckIcon, CornerUpLeftIcon, ShieldQuestionIcon } from 'lucide-react'
 import { useRef, useState } from 'react'
 
+import { Link } from '@/lib/project-router'
+
 import { approveRun, requestRunChanges } from '@/api/client'
 import { queryKeys } from '@/api/queries'
 import type { ApiRun } from '@loki-labs/better-cezar-api-client'
@@ -84,7 +86,16 @@ export function ApprovalCard({ run }: { run: ApiRun }) {
 
       {pending.specPath ? (
         <p className="text-[13px] text-muted-foreground">
-          Under review: <code className="font-mono text-[12px]">{pending.specPath}</code>
+          Under review:{' '}
+          {/* Links into the Spec tab (spec .ai/specs/2026-08-29-spec-tab-review-feed.md, P3) —
+              the card stays the place that collects the decision, but it stops being the only
+              way to learn a spec exists. */}
+          <Link
+            to={`/tasks/${run.id}/spec`}
+            className="font-mono text-[12px] underline decoration-dotted underline-offset-2 hover:text-foreground"
+          >
+            {pending.specPath}
+          </Link>
         </p>
       ) : null}
 
