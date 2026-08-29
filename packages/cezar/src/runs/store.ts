@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { collectSecretValues, redactDeep, redactSecrets } from '../core/secret-redaction.ts';
@@ -11,6 +11,12 @@ import { pendingApprovalSchema, pendingHandoffSchema, testAttestationSchema } fr
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 import { resolveContextWindow } from '../core/context-window.ts';
 import { taskAuthorSchema, type TaskAuthor } from './task-author.ts';
+import {
+  readSpecReviewEntries,
+  specReviewLogPath as specReviewLogPathFor,
+  specReviewSummarySchema,
+  summariseSpecReview,
+} from './spec-review-log.ts';
 
 import type { RunnerId } from '../core/agent-runner.ts';
 // Type-only, so no runtime edge is added from the store to the contract package — one definition
@@ -326,6 +332,13 @@ export const runRecordSchema = z.object({
    * invented path.
    */
   declaredSpecPath: z.string().max(500).optional(),
+  /**
+   * Cached three-number summary of `<dataDir>/runs/<id>.spec-review.ndjson` (spec
+   * `.ai/specs/2026-08-29-spec-tab-review-feed.md`, P1) — lets the Spec tab decide it exists
+   * without a second fetch. The side log is authoritative; this is a derived cache that can be
+   * absent or briefly stale (see `RunStore.open`'s load-path reconcile) without losing data.
+   */
+  specReview: specReviewSummarySchema.optional(),
   /** Set while the run is parked on a human approval gate (spec 2026-08-20, P3); cleared the
    *  moment the gate releases or the chain moves on. Absent on every ungated run. */
   pendingApproval: pendingApprovalSchema.optional(),
@@ -796,7 +809,9 @@ export class RunStore extends EventEmitter {
         const parsed = z.array(runRecordSchema).safeParse(raw);
         if (parsed.success) {
           for (const run of parsed.data) {
-            store.runs.set(run.id, reconcileLoadedRun(run, opts));
+            const reconciled = reconcileLoadedRun(run, opts);
+            store.reconcileSpecReviewSummary(reconciled);
+            store.runs.set(reconciled.id, reconciled);
           }
         }
       } catch {
@@ -1389,6 +1404,7 @@ export class RunStore extends EventEmitter {
         rmSync(this.eventsPath(id), { force: true });
         rmSync(this.handoffPath(id), { force: true }); // spec 007: the journal goes with the task
         rmSync(this.imagesDir(id), { recursive: true, force: true }); // agent screenshots
+        rmSync(this.specReviewLogPath(id), { force: true }); // spec .../2026-08-29-spec-tab-review-feed.md
       } catch {
         // best effort — the index is authoritative
       }
@@ -1397,6 +1413,37 @@ export class RunStore extends EventEmitter {
       this.emit('deleted', id);
     }
     return existed;
+  }
+
+  /**
+   * `<dataDir>/runs/<id>.spec-review.ndjson` — the spec/review feed's side log (spec
+   * `.ai/specs/2026-08-29-spec-tab-review-feed.md`, P1). Public, not a `dataDir` accessor, for the
+   * same reason `readHandoffText` hands out the handoff file rather than the directory it lives in
+   * (see that method's doc comment): the read route needs this exact path, and the store already
+   * owns the file's whole lifecycle (writes it via `workflows/run.ts`, deletes it here and in
+   * `pruneOldRuns`).
+   */
+  specReviewLogPath(runId: string): string {
+    return specReviewLogPathFor(this.dataDir, runId);
+  }
+
+  /**
+   * Recompute `run.specReview` from the side log when the record has a log but no summary — the
+   * crash-recovery case: `runs.json` saves on a debounce while the NDJSON append is immediate, so a
+   * kill between the two leaves a record with a log and no summary that nothing else self-heals
+   * (see the spec's "The summary on RunRecord", point 3). Runs once per record, in `open()`, before
+   * the run list is exposed to any caller. Fail-open: a read error leaves the record as it was.
+   */
+  private reconcileSpecReviewSummary(run: RunRecord): void {
+    if (run.specReview !== undefined) return;
+    try {
+      const logPath = this.specReviewLogPath(run.id);
+      const info = statSync(logPath);
+      if (!info.isFile() || info.size === 0) return;
+      run.specReview = summariseSpecReview(readSpecReviewEntries(this.dataDir, run.id));
+    } catch {
+      // no log, or unreadable — leave the record exactly as loaded
+    }
   }
 
   /** Write the index out now (used on shutdown). */
@@ -1463,6 +1510,7 @@ export class RunStore extends EventEmitter {
         rmSync(this.eventsPath(stale.id), { force: true });
         rmSync(this.handoffPath(stale.id), { force: true });
         rmSync(this.imagesDir(stale.id), { recursive: true, force: true });
+        rmSync(this.specReviewLogPath(stale.id), { force: true });
       } catch {
         // best effort
       }

@@ -1,9 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runStatusSchema as contractRunStatusSchema } from '@loki-labs/better-cezar-contract';
 import { RunStore, runRecordSchema } from './store.ts';
+import { appendSpecReviewEntry } from './spec-review-log.ts';
 import { localCliAuthor } from './task-author.ts';
 
 /** A minimal pre-#389 record, exactly as an old runs.json holds it — no
@@ -1928,5 +1929,107 @@ describe('RunStore — legacy workspaceWorktrees survive the writer being remove
       Record<string, unknown>
     >;
     expect(onDisk.find((r) => r.id === run.id)).not.toHaveProperty('autoStart');
+  });
+});
+
+/**
+ * The spec/review feed's side log integration (`.ai/specs/2026-08-29-spec-tab-review-feed.md`,
+ * P1 Verification items 7, 7b, 7c).
+ */
+describe('RunStore — spec-review side log (spec 2026-08-29-spec-tab-review-feed)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-specreview-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  it('7. deleteRun removes the spec-review log alongside the other per-run side files', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
+    appendSpecReviewEntry(dataDir, run.id, { kind: 'spec', stepId: 'spec', specPath: 'x.md', source: 'recorded', text: 'v1' });
+    expect(existsSync(store.specReviewLogPath(run.id))).toBe(true);
+
+    expect(store.deleteRun(run.id)).toBe(true);
+    expect(existsSync(store.specReviewLogPath(run.id))).toBe(false);
+  });
+
+  it(
+    '7. the retention sweep removes a pruned run\'s spec-review log too',
+    () => {
+      const store = RunStore.open(dataDir);
+      const target = store.createRun({ author: localCliAuthor(), title: 'oldest', workflow: 'w', task: 'task', steps: [] });
+      appendSpecReviewEntry(dataDir, target.id, { kind: 'spec', stepId: 'spec', specPath: 'x.md', source: 'recorded', text: 'v1' });
+      // Guaranteed the oldest, regardless of how many filler runs share `target`'s millisecond.
+      store.updateRun(target.id, { createdAt: new Date(0).toISOString() });
+      expect(existsSync(store.specReviewLogPath(target.id))).toBe(true);
+
+      // MAX_RUNS_KEPT is 300 (private to store.ts) — 300 fillers pushes the 301-run total one
+      // past it, and `target` (oldest) is what the sweep prunes.
+      for (let i = 0; i < 300; i += 1) {
+        store.createRun({ author: localCliAuthor(), title: `filler ${i}`, workflow: 'w', task: 'task', steps: [] });
+      }
+
+      expect(store.getRun(target.id)).toBeUndefined();
+      expect(existsSync(store.specReviewLogPath(target.id))).toBe(false);
+    },
+    20_000,
+  );
+
+  it('7b. specReview survives a reload of runs.json — the field must exist on BOTH record schemas', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
+    store.updateRun(run.id, { specReview: { revisions: 2, reviews: 2, latestVerdict: 'pass' } });
+    store.flush();
+
+    // Without `specReview` on the STORE's own `runRecordSchema` (store.ts:328, beside
+    // `declaredSpecPath`) this reads `undefined`: `z.array(runRecordSchema).safeParse` strips any
+    // key the schema does not declare on every load, contract schema notwithstanding.
+    const reopened = RunStore.open(dataDir);
+    expect(reopened.getRun(run.id)?.specReview).toEqual({ revisions: 2, reviews: 2, latestVerdict: 'pass' });
+  });
+
+  it('7c. crash recovery: reconciles specReview from the side log on load when runs.json has none', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
+    appendSpecReviewEntry(dataDir, run.id, { kind: 'spec', stepId: 'spec', specPath: 'x.md', source: 'recorded', text: 'v1' });
+    appendSpecReviewEntry(dataDir, run.id, { kind: 'review', stepId: 'review-spec', actor: 'agent', verdict: 'revise', report: 'r1' });
+    appendSpecReviewEntry(dataDir, run.id, { kind: 'spec', stepId: 'spec', specPath: 'x.md', source: 'recorded', text: 'v2' });
+    appendSpecReviewEntry(dataDir, run.id, { kind: 'review', stepId: 'review-spec', actor: 'agent', verdict: 'pass', report: 'r2' });
+    // The log is written immediately (above); `runs.json` is only ever debounce-saved and was
+    // never told about `specReview` — exactly the state a kill between the two leaves behind.
+    store.flush();
+    const onDisk = JSON.parse(readFileSync(join(dataDir, 'runs.json'), 'utf8')) as Array<Record<string, unknown>>;
+    expect(onDisk.find((r) => r.id === run.id)).not.toHaveProperty('specReview');
+    expect(onDisk.find((r) => r.id === run.id)).not.toHaveProperty('declaredSpecPath');
+
+    // First read after reopening, no route call in between — the reconcile runs inside `open()`.
+    const reopened = RunStore.open(dataDir);
+    const expected = { revisions: 2, reviews: 2, latestVerdict: 'pass' };
+    expect(reopened.getRun(run.id)?.specReview).toEqual(expected);
+    expect(reopened.listRuns().find((r) => r.id === run.id)?.specReview).toEqual(expected);
+  });
+
+  it('7c. crash recovery is fail-open: an unreadable/non-file log leaves specReview absent and never throws', () => {
+    const store = RunStore.open(dataDir);
+    const run = store.createRun({ author: localCliAuthor(), title: 't', workflow: 'w', task: 'task', steps: [] });
+    appendSpecReviewEntry(dataDir, run.id, { kind: 'spec', stepId: 'spec', specPath: 'x.md', source: 'recorded', text: 'v1' });
+    store.flush();
+
+    // A directory at the log's path is a deterministic stand-in for "the log cannot be read as a
+    // file" that does not depend on whether the test process runs as root (where chmod 000 would
+    // not actually block the read) — the reconcile's `statSync`/`isFile()` guard must treat it the
+    // same way a genuine read failure is treated: leave the record alone, never throw.
+    rmSync(store.specReviewLogPath(run.id), { force: true });
+    mkdirSync(store.specReviewLogPath(run.id), { recursive: true });
+
+    let reopened: RunStore | undefined;
+    expect(() => {
+      reopened = RunStore.open(dataDir);
+    }).not.toThrow();
+    expect(reopened?.getRun(run.id)?.specReview).toBeUndefined();
   });
 });

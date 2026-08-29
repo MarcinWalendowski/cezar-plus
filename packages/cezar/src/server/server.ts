@@ -141,6 +141,7 @@ import {
   validateLiveCursor,
 } from '../runs/event-history.ts';
 import { readRunIndexFromDisk } from '../runs/run-index.ts';
+import { readSpecReviewEntries, summariseSpecReview, type SpecReviewEntry } from '../runs/spec-review-log.ts';
 import { isV2WireEventType } from '../runs/ui-event-sink.ts';
 import {
   runEventsQuerySchema,
@@ -1405,6 +1406,17 @@ function negotiate<O extends string>(accept: string | undefined, offers: readonl
     if (q > 0 && (best === null || q > best.q)) best = { offer, q };
   }
   return best?.offer ?? null;
+}
+
+/** The path the NEWEST `spec` entry in a spec/review feed names, or `undefined` when the feed
+ *  holds no spec entry at all (an unmatched-review-only feed, spec 2026-08-29-spec-tab-review-
+ *  feed.md, P2's `GET /runs/:id/spec`). */
+function latestSpecEntryPath(entries: readonly SpecReviewEntry[]): string | undefined {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const entry = entries[i]!;
+    if (entry.kind === 'spec') return entry.specPath;
+  }
+  return undefined;
 }
 
 /** What `GET /repo/commit/:sha` offers, DEFAULT FIRST: the legacy `text/plain` blob is what a
@@ -6051,6 +6063,52 @@ export function createApp(deps: ServerDeps) {
         tooLarge: result.tooLarge,
         ...(result.content !== undefined ? { content: result.content } : {}),
       });
+    })
+
+    // The Spec tab's feed (spec .ai/specs/2026-08-29-spec-tab-review-feed.md, P2): the recorded
+    // spec/review side log when there is one, else a single synthetic entry read live off the
+    // worktree, else the empty answer. Deliberately NO 409 for a missing worktree — unlike
+    // `/runs/:id/files`, this route can still serve every recorded entry from the run's own data
+    // dir after the worktree is reclaimed, which is the main case where the feed is valuable.
+    .get('/runs/:id/spec', async (c) => {
+      const { root: repoRoot, dataDir, store } = c.get('project');
+      const run = store.getRun(c.req.param('id'));
+      if (!run) return c.json({ error: 'not found' }, 404);
+
+      const recorded = readSpecReviewEntries(dataDir, run.id);
+      if (recorded.length > 0) {
+        return c.json({
+          ...(latestSpecEntryPath(recorded) !== undefined ? { specPath: latestSpecEntryPath(recorded) } : {}),
+          entries: recorded,
+          summary: summariseSpecReview(recorded),
+        });
+      }
+
+      if (run.declaredSpecPath) {
+        const workingDirectory = workingDirectoryOf(run, repoRoot);
+        if (workingDirectory) {
+          // Traversal safety comes free: `readWorktreePath` already rejects anything escaping the
+          // worktree, which is why this reuses it instead of reading the declared path itself.
+          const result = await readWorktreePath(workingDirectory, run.declaredSpecPath);
+          if (result.kind === 'file' && result.content !== undefined) {
+            const entries = [
+              {
+                seq: 0,
+                at: new Date().toISOString(),
+                stepId: '',
+                kind: 'spec' as const,
+                revision: 1,
+                specPath: run.declaredSpecPath,
+                source: 'worktree' as const,
+                text: result.content,
+              },
+            ];
+            return c.json({ specPath: run.declaredSpecPath, entries, summary: summariseSpecReview(entries) });
+          }
+        }
+      }
+
+      return c.json({ entries: [], summary: { revisions: 0, reviews: 0 } });
     })
 
     .post('/runs/:id/git/commit', jsonZodValidator(gitCommitSchema), async (c) => {

@@ -265,6 +265,72 @@ export const testAttestationSchema = z.object({
 });
 export type TestAttestation = z.infer<typeof testAttestationSchema>;
 
+// ---- spec/review feed (spec .ai/specs/2026-08-29-spec-tab-review-feed.md) -----------------------
+//
+// One line of `<runId>.spec-review.ndjson` (`packages/cezar/src/runs/spec-review-log.ts`), the
+// wire shape of the same schemas that module owns server-side. `looseObject` on each member for
+// the same reason `runEventSchema` uses it (`./events.ts`): this is an on-disk append-only format,
+// and a file written by a newer cezar must stay readable by an older one.
+
+const specReviewBaseFields = {
+  seq: z.number().int().nonnegative(),
+  at: z.string(),
+  /** Workflow step that produced it — never assumed to be `spec`/`review-spec`: the writer keys
+   *  on the `CEZ:SPEC_PATH=` declaration, not on the step id. */
+  stepId: z.string(),
+};
+
+export const specReviewSpecEntrySchema = z.looseObject({
+  ...specReviewBaseFields,
+  kind: z.literal('spec'),
+  /** REQUIRED. Counts spec attempts from 1, in capture order. */
+  revision: z.number().int().min(1),
+  specPath: z.string().max(500),
+  /** `recorded` = snapshotted when that attempt finished. `worktree` = synthesised by the read
+   *  route from the live file, for a run written before this feature or still mid-spec. */
+  source: z.enum(['recorded', 'worktree']),
+  text: z.string().optional(),
+  truncated: z.literal(true).optional(),
+  /** The step declared a path that did not resolve, or the containment-safe reader refused it.
+   *  `text` is absent whenever this is set. */
+  missing: z.literal(true).optional(),
+  /** Set alongside `missing` when the reason is specifically that the path was REJECTED
+   *  (traversal, `.git` internals, a symlink) rather than simply not existing. */
+  rejected: z.literal(true).optional(),
+  error: z.string().optional(),
+});
+
+export const specReviewReviewEntrySchema = z.looseObject({
+  ...specReviewBaseFields,
+  kind: z.literal('review'),
+  /** OPTIONAL: absent means this verdict arrived with no captured spec to attach it to — an
+   *  unmatched review, never labelled revision 1. */
+  revision: z.number().int().min(1).optional(),
+  /** `agent` = the `review-spec` step's CEZ:REVIEW verdict. `human` = a person requesting
+   *  changes at the approval gate. Never conflated — they carry different authority. */
+  actor: z.enum(['agent', 'human']),
+  verdict: z.enum(['pass', 'revise']),
+  report: z.string(),
+  truncated: z.literal(true).optional(),
+});
+
+export const specReviewEntrySchema = z.discriminatedUnion('kind', [
+  specReviewSpecEntrySchema,
+  specReviewReviewEntrySchema,
+]);
+export type SpecReviewEntry = z.infer<typeof specReviewEntrySchema>;
+
+/** Enough for the header to decide whether the Spec tab exists and whether the feed is worth
+ *  rendering, without a second fetch. Deliberately three small numbers: `RunRecord` is serialised
+ *  wholesale into `runs.json` on every save, so nothing large may live here — the documents
+ *  themselves stay in `<runId>.spec-review.ndjson`. */
+export const specReviewSummarySchema = z.object({
+  revisions: z.number().int().min(0),
+  reviews: z.number().int().min(0),
+  latestVerdict: z.enum(['pass', 'revise']).optional(),
+});
+export type SpecReviewSummary = z.infer<typeof specReviewSummarySchema>;
+
 export const runRecordSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -351,6 +417,10 @@ export const runRecordSchema = z.object({
    *  `markerRefs`). Absent until the run declares one, and absent forever on a run that never does
    *  — a fact worth seeing, not one to paper over with a guessed path. */
   declaredSpecPath: z.string().max(500).optional(),
+  /** Cached summary of `<runId>.spec-review.ndjson` (spec 2026-08-29-spec-tab-review-feed, P1) —
+   *  lets the Spec tab decide it exists without a second fetch. The side log is authoritative;
+   *  this is a derived cache, absent or briefly stale without losing data. */
+  specReview: specReviewSummarySchema.optional(),
   /** Set while the run is parked on a human approval gate (spec 2026-08-20, P3); cleared the
    *  moment the gate releases or the chain moves on. Absent on every ungated run. */
   pendingApproval: pendingApprovalSchema.optional(),
@@ -828,6 +898,19 @@ export type RunCommit = z.infer<typeof runCommitSchema>;
 /** `GET /runs/:id/commits` — `<base>..HEAD` on the worktree branch, newest first. */
 export const runCommitsResponseSchema = z.object({ commits: z.array(runCommitSchema) });
 export type RunCommitsResponse = z.infer<typeof runCommitsResponseSchema>;
+
+/** `GET /runs/:id/spec` (spec 2026-08-29-spec-tab-review-feed, P2) — the spec/review feed. Never
+ *  404s for a run with nothing recorded: an empty `entries` array with a zero `summary` is a
+ *  valid 200, not an error. */
+export const specReviewFeedResponseSchema = z.object({
+  /** The path the newest spec entry names, when there is one. */
+  specPath: z.string().max(500).optional(),
+  /** Chronological: spec, review, spec, review… Empty when nothing was recorded and no fallback
+   *  file could be read. */
+  entries: z.array(specReviewEntrySchema),
+  summary: specReviewSummarySchema,
+});
+export type SpecReviewFeedResponse = z.infer<typeof specReviewFeedResponseSchema>;
 
 // ---- parallel variants (spec 010) ----------------------------------------------------------
 //

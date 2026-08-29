@@ -43,6 +43,7 @@ import {
   getRepo,
   getRunCommit,
   getRunCommits,
+  getRunSpec,
   getRepoChanges,
   getRepoCommit,
   getRun,
@@ -191,6 +192,7 @@ export const queryKeys = {
     handoff: (id: string) => [queryScope(), 'runs', 'handoff', id] as const,
     commits: (id: string) => [queryScope(), 'runs', 'commits', id] as const,
     commit: (id: string, sha: string) => [queryScope(), 'runs', 'commit', id, sha] as const,
+    spec: (id: string) => [queryScope(), 'runs', 'spec', id] as const,
   },
   groups: {
     detail: (groupId: string) => [queryScope(), 'groups', groupId] as const,
@@ -1279,6 +1281,19 @@ export function useRunCommits(id: string | undefined, live = false) {
   return useQuery({
     queryKey: queryKeys.runs.commits(id ?? ''),
     queryFn: ({ signal }) => getRunCommits(id as string, { signal }),
+    enabled: Boolean(id),
+    retry: false,
+    refetchInterval: live ? 5000 : false,
+  })
+}
+
+/** The Spec tab's feed (spec 2026-08-29-spec-tab-review-feed.md, P3) — polls while the run is
+ *  active, exactly like the Commits tab, since the tab itself already appears from the record
+ *  fan-out (`run.specReview`) with no poll needed. */
+export function useRunSpec(id: string | undefined, live = false) {
+  return useQuery({
+    queryKey: queryKeys.runs.spec(id ?? ''),
+    queryFn: ({ signal }) => getRunSpec(id as string, { signal }),
     enabled: Boolean(id),
     retry: false,
     refetchInterval: live ? 5000 : false,
