@@ -19,6 +19,7 @@ import { pinWorkflowRunner, type WorkflowDef } from './types.ts';
 
 const exec = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
+const LIMIT_UNTIL = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
 /**
  * A step that pins its own runner resolves its own ACCOUNT
@@ -78,7 +79,7 @@ describe('a step pinning its own runner', () => {
   function limitAccounts(...keys: string[]): void {
     const usage = defaultAgentAccountUsageStore();
     for (const key of keys) {
-      recordLimited(usage, key, { source: 'usage-limit', until: '2026-08-26T23:00:00.000Z' });
+      recordLimited(usage, key, { source: 'usage-limit', until: LIMIT_UNTIL() });
     }
     writeFileSync(agentAccountUsagePath(), JSON.stringify(usage), 'utf8');
   }

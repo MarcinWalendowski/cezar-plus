@@ -93,6 +93,24 @@ export const workflowStepSchema = z
       .object({
         retry: z.string().min(1),
         max: z.number().int().positive().default(2),
+        /**
+         * Re-enter the TARGET step's own session on this loop-back instead of starting it cold
+         * (`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`, D1).
+         *
+         * Absent === `false` === the behaviour every workflow on disk already has, which is why
+         * this is optional with no `.default`: a persisted `workflowDef` written before this key
+         * existed must keep restarting cold rather than silently changing what it does.
+         *
+         * Measured reason it exists: on run `872b396a` a `revise` verdict re-ran `spec` from a
+         * fresh `randomUUID()` session — 11:39 and $5.92 to rewrite a document the SAME step had
+         * finished 14 minutes earlier, re-reading what was still sitting in the window it threw
+         * away. `runAgentStep` has taken a `resumeFrom` handle since the restart/stop work; this
+         * key is what lets a loop-back hand it one.
+         *
+         * Best-effort by construction: every guard in `loopBackTo` falls back to a cold session
+         * and says why (`run.step.looped_back.reason`), so this can degrade but never fail.
+         */
+        resume: z.boolean().optional(),
       })
       .optional(),
     /**
@@ -978,8 +996,26 @@ const CODEX_WRITE = { model: 'gpt-5.6-luna', effort: 'high' } as const;
  */
 const CODEX_COMPLEX = { model: 'gpt-5.6-sol', effort: 'medium' } as const;
 
-/** Spec review is the SOL xhigh judgement pass, with Claude opus as the explicit fallback. */
-const CODEX_REVIEW = { model: 'gpt-5.6-sol', effort: 'xhigh' } as const;
+/**
+ * Spec review is the SOL judgement pass, with Claude opus as the explicit fallback.
+ *
+ * **CORRECTED 2026-08-29 (`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`, D3): the
+ * effort was `xhigh` and is now `high`.** The docblock said "SOL xhigh judgement pass", so the
+ * heading carried the stale value and not just the body.
+ *
+ * Measured on run `872b396a`: `review-spec` took **14:02**, of which tool execution was 33.5s.
+ * Regressing per-turn latency on per-turn output tokens across its 20 turns gives
+ * `latency = 4.8s + 24.5s per 1k output tokens` (R² = 0.947) — 89% of the step is generation at
+ * ~41 tok/s. It emitted 30,390 output tokens of which **21,284 were reasoning**, so `xhigh` alone
+ * was worth roughly 8.7 minutes of that wall clock.
+ *
+ * `high` is not a quality cut, and the reason is structural rather than hopeful: {@link
+ * SPEC_TO_DEPLOY_WORKFLOW} now runs a full opus review (`review-spec-local`) BEFORE this step, so
+ * the total judgement applied to a spec goes up while the expensive step gets shorter. Dropping
+ * this to `high` WITHOUT that step in front of it would be a real reduction — the two changes are
+ * one decision, not two.
+ */
+const CODEX_REVIEW = { model: 'gpt-5.6-sol', effort: 'high' } as const;
 
 /** The version-control grant shared by the commit and merge stages. */
 const SHIP_BASH_ALLOWLIST = [
@@ -1247,6 +1283,83 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       ].join('\n'),
     },
     {
+      id: 'review-spec-local',
+      name: 'Review the spec (same-provider pass)',
+      // `.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`, D2 — the CHEAP pass, in front
+      // of the expensive one.
+      //
+      // Same runner and model as the writer, on purpose. Not for a shared cache — a prompt cache
+      // is keyed on (provider, model, exact prefix) and two independent sessions share no prefix,
+      // so nothing here is warm by co-location (D2/P2 say so explicitly, because "same provider
+      // therefore cached" is the intuition this step would otherwise seem to endorse). What
+      // same-provider buys is that the run does not cross a provider boundary to get its FIRST
+      // opinion, and that this step's own loop-back can resume `spec` on a matching backend —
+      // guard 3 in `loopBackTo` refuses a resume whose recorded backend moved.
+      model: SPEC_AUTHORING_MODEL,
+      effort: 'high',
+      runner: SPEC_AUTHORING_RUNNER,
+      byRunner: { codex: CODEX_REVIEW },
+      // READ-ONLY BY CONSTRUCTION, exactly as `review-spec` is, and for exactly the same reason:
+      // a reviewer that can edit what it reviews rewrites it instead, and the loop-back below
+      // stops meaning anything. Cheaper does not mean laxer.
+      allowedTools: ['Read', 'Grep', 'Glob', 'Bash'],
+      bashAllowlist: ['git log', 'git show', 'git status', 'git diff', 'cez kb', 'sed -n', 'ls'],
+      // A FRESH session, never a resume of `spec`. Resuming the writer's own window to review its
+      // own work produces agreement, not review — the independence is the product here, and it is
+      // worth more than the cache would be.
+      //
+      // `max: 1` — ONE cheap round. `retriesUsed` is keyed by step id, so this budget is its own
+      // and does not spend `review-spec`'s two; the worst case is three `spec` executions rather
+      // than five. `resume: true` is what makes a cheap round actually cheap: the rework re-enters
+      // `spec`'s own session instead of re-deriving the brief and the code from zero.
+      onFail: { retry: 'spec', max: 1, resume: true },
+      // Deliberately NO `requiresApproval`. The human gate stays on exactly one step, so
+      // `types.test.ts`'s "only the review step is gated" keeps meaning what it says.
+      prompt: [
+        'You are the FIRST reviewer of the spec the previous step wrote (its path was declared as',
+        'CEZ:SPEC_PATH, and is in this run\'s handoff file). You are NOT implementing it, and you',
+        'must NOT edit it — you have no write tools, on purpose.',
+        '',
+        'Original task, for context:',
+        '{{task}}',
+        '',
+        'A second, independent reviewer on a DIFFERENT model runs after you, and the human gate is',
+        'on that one. So your job is not to be the last word — it is to catch the defects that are',
+        'cheap to find and expensive to carry: a claim about code that is not true, a citation that',
+        'does not resolve, a phase that cannot ship on its own, a verification section nobody could',
+        'execute, and anything the task asked for that the spec quietly dropped.',
+        '',
+        'Read the spec in full and open the code and prior specs it cites. Check, do not re-derive:',
+        'the `context` step already swept the record and left a brief, and re-running that sweep is',
+        'the single most expensive thing you can do here.',
+        '',
+        'Then end your report with your verdict on its OWN LAST LINE, exactly one of:',
+        '  CEZ:REVIEW=pass     — good enough to hand to the second reviewer; nits above will not block.',
+        '  CEZ:REVIEW=revise   — a real defect exists.',
+        '',
+        'A `revise` verdict is handed to the spec step as ITS INSTRUCTIONS, and it acts on it as a',
+        'change list to apply, not as prose to re-derive. So write every defect as its own numbered',
+        'item, in exactly this shape:',
+        '  1. FILE: <a path that resolves from YOUR OWN working directory — check it exists before you',
+        '     write it down. If it does not, use an absolute path instead of guessing a repo-relative one;',
+        '     a repo can have more than one directory of the same relative name (e.g. a worktree and the',
+        '     main checkout each have their own .ai/specs/).>',
+        '     SECTION: <the exact heading text the defect is in, e.g. "## Verification"> — or, for a',
+        '     missing section, "NEW — insert after <the heading before it>".',
+        '     CHANGE: what is wrong, and specifically what the section should say instead. Concrete',
+        '     enough to apply directly — not "clarify this part".',
+        '',
+        'If, taken together, the defects touch MOST of the document rather than isolated sections, say',
+        'so in one sentence before the list (e.g. "This needs a structural rewrite: …") — that is the',
+        'one case where the next step re-emitting the whole file is the right call instead of editing',
+        'section by section.',
+        '',
+        'Judge the spec, not its prose. `revise` is for a spec that is wrong, incomplete against the',
+        'ask, or built on facts that do not hold — not for one you would have worded differently. You',
+        'get ONE revision here, so spend it on defects that matter.',
+      ].join('\n'),
+    },
+    {
       id: 'review-spec',
       name: 'Review the spec',
       model: CODEX_REVIEW.model,
@@ -1264,7 +1377,12 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
       // A `revise` verdict re-runs `spec` with this step's report appended to its prompt — the
       // same channel a failing check step uses. `max: 2` bounds it: a stubborn reviewer and a
       // stubborn writer would otherwise argue until the step budget ran out.
-      onFail: { retry: 'spec', max: 2 },
+      // `resume: true` added 2026-08-29 (`.ai/specs/2026-08-29-step-resume-and-two-stage-review.md`,
+      // D1): the rework re-enters `spec`'s OWN session. Measured on run `872b396a`, the cold
+      // version of this loop-back cost 11:39 and $5.92 — more than the 9:24/$3.74 spec it was
+      // reworking — because a fresh session re-derived the brief, the spec and the code that
+      // iteration 1 still had in its window when the run threw it away.
+      onFail: { retry: 'spec', max: 2, resume: true },
       // Owner ask 2026-08-20 ("and then approvals from users"). Dormant unless
       // `approvals.minApprovers` >= 1 — see `requiresApproval`'s doc comment.
       requiresApproval: true,
@@ -1275,6 +1393,13 @@ export const SPEC_TO_DEPLOY_WORKFLOW: WorkflowDef = {
         '',
         'Original task, for context:',
         '{{task}}',
+        '',
+        'A first reviewer has already passed over this spec on a different model, and the `context`',
+        'step before it swept the record and left a BRIEF (its path is in the handoff file). Start',
+        'from those two. Your job is to CHECK, not to re-derive: opening the whole record again is',
+        'the single most expensive thing you can do in this step, and it was already done twice.',
+        'When you do read, read in bounded slices — a `sed -n`/`rg` batch that returns a quarter of',
+        'a megabyte crowds out the window you need to hold the spec itself.',
         '',
         'Everything after this step acts on the spec: it gets implemented, committed, pushed to a',
         'remote and deployed. You are the last checkpoint before that. Read the spec in full, open',

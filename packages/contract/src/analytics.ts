@@ -28,8 +28,13 @@ export const analyticsEventSchema = z.object({
 });
 export type AnalyticsEvent = z.infer<typeof analyticsEventSchema>;
 
+/** One request's ceiling. Exported rather than inlined so the browser buffer that fills a batch
+ *  (`packages/web/src/lib/analytics.ts`) slices at exactly the number the server accepts — a
+ *  client that guessed a larger one would have every batch rejected whole. */
+export const ANALYTICS_MAX_EVENTS_PER_BATCH = 20;
+
 export const analyticsEventsRequestSchema = z.object({
-  events: z.array(analyticsEventSchema).min(1).max(20),
+  events: z.array(analyticsEventSchema).min(1).max(ANALYTICS_MAX_EVENTS_PER_BATCH),
 });
 export type AnalyticsEventsRequest = z.infer<typeof analyticsEventsRequestSchema>;
 

@@ -604,3 +604,61 @@ describe('truncatedProjectNames', () => {
     expect(truncatedProjectNames(['api', 'gone'], PROJECTS)).toEqual(['API', 'gone'])
   })
 })
+
+/**
+ * `fasort` / `fbsort` through the page's ONE codec
+ * (`.ai/specs/2026-08-25-split-active-backlog-tables.md`, D6, verification step 5). The two keys
+ * are composed here rather than written by a second `URLSearchParams` writer — the page doctrine
+ * is one function that reads the address bar and one that writes it.
+ */
+describe('URL state — the two Filed table sorts', () => {
+  const state = (over: Partial<GlobalTasksUrlState> = {}): GlobalTasksUrlState => ({
+    ...DEFAULT_URL_STATE,
+    ...over,
+  })
+
+  it('the defaults emit no key at all, so a bare /tasks stays bare', () => {
+    expect(urlStateToSearchParams(DEFAULT_URL_STATE).toString()).toBe('')
+    expect(urlStateToSearchParams(state({ filedActiveSort: { column: 'age', dir: 'desc' } })).toString()).toBe('')
+  })
+
+  it('round-trips each table independently', () => {
+    const params = urlStateToSearchParams(
+      state({
+        filedActiveSort: { column: 'priority', dir: 'asc' },
+        filedBacklogSort: { column: 'task', dir: 'desc' },
+      }),
+    )
+    expect(params.get('fasort')).toBe('priority:asc')
+    expect(params.get('fbsort')).toBe('task:desc')
+    const back = urlStateFromSearchParams(params)
+    expect(back.filedActiveSort).toEqual({ column: 'priority', dir: 'asc' })
+    expect(back.filedBacklogSort).toEqual({ column: 'task', dir: 'desc' })
+  })
+
+  it('one table sorted leaves the other at its default, and emits only one key', () => {
+    const params = urlStateToSearchParams(state({ filedBacklogSort: { column: 'status', dir: 'asc' } }))
+    expect(params.get('fasort')).toBeNull()
+    expect(params.get('fbsort')).toBe('status:asc')
+  })
+
+  it('a hand-edited or older URL degrades to the default rather than to a blank table', () => {
+    const parsed = urlStateFromSearchParams(new URLSearchParams('fasort=garbage:sideways&fbsort=node:asc'))
+    expect(parsed.filedActiveSort).toEqual(DEFAULT_URL_STATE.filedActiveSort)
+    expect(parsed.filedBacklogSort).toEqual(DEFAULT_URL_STATE.filedBacklogSort)
+  })
+
+  it('`fasort=created-desc` resolves through the legacy alias instead of falling back', () => {
+    const parsed = urlStateFromSearchParams(new URLSearchParams('fasort=created-asc'))
+    expect(parsed.filedActiveSort).toEqual({ column: 'age', dir: 'asc' })
+  })
+
+  it('`fsort` — the ARCHIVED table’s key — still parses exactly as it did', () => {
+    const parsed = urlStateFromSearchParams(new URLSearchParams('fsort=created-asc'))
+    expect(parsed.filedSort).toBe('created-asc')
+    // …and is untouched by the two new keys sitting beside it on the same URL.
+    const both = urlStateFromSearchParams(new URLSearchParams('fsort=created-asc&fasort=task:desc'))
+    expect(both.filedSort).toBe('created-asc')
+    expect(both.filedActiveSort).toEqual({ column: 'task', dir: 'desc' })
+  })
+})

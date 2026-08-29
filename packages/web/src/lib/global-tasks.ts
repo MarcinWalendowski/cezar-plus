@@ -3,12 +3,17 @@ import type { ProjectListEntry, RunIndexEntry } from '@loki-labs/better-cezar-ap
 import { allProjectTags } from '@/lib/project-tags'
 import {
   DEFAULT_FILED_SORT,
+  DEFAULT_FILED_TABLE_SORT,
   FILED_SEARCH_PARAMS,
   NO_FILED_FILTERS,
+  formatFiledTableSort,
+  isDefaultFiledTableSort,
   isFiledPriority,
   isFiledSort,
   isFiledStatus,
+  parseFiledTableSort,
   type FiledSort,
+  type FiledTableSort,
   type FiledTaskFilters,
 } from '@/lib/filed-tasks'
 import { isInFlight, runTitle } from '@/lib/task-groups'
@@ -440,6 +445,8 @@ export const SEARCH_PARAMS = {
   filedStatus: FILED_SEARCH_PARAMS.status,
   filedPriority: FILED_SEARCH_PARAMS.priority,
   filedSort: FILED_SEARCH_PARAMS.sort,
+  filedActiveSort: FILED_SEARCH_PARAMS.activeSort,
+  filedBacklogSort: FILED_SEARCH_PARAMS.backlogSort,
 } as const
 
 const GROUP_BY_VALUES = new Set<string>(GROUP_BY_OPTIONS.map((option) => option.value))
@@ -456,8 +463,15 @@ export interface GlobalTasksUrlState {
    *  because the two tables filter different things (runs vs. filed todos) even though they
    *  share the page's `filters.query` box and `view`. */
   filedFilters: FiledTaskFilters
-  /** The Filed section's sort — `created-desc` (newest first) by default. */
+  /** The ARCHIVED Filed table's sort — `created-desc` (newest first) by default. Untouched by
+   *  the 2026-08-25 split: that table still sorts client-side on the legacy path. */
   filedSort: FiledSort
+  /** The Active table's per-column sort. Server-applied. */
+  filedActiveSort: FiledTableSort
+  /** The Backlog table's per-column sort. Independent of the Active one on purpose — a sort
+   *  change in one table is not a state change in the other, which is what lets each keep its own
+   *  Show more count across the other's re-sort. */
+  filedBacklogSort: FiledTableSort
 }
 
 /** The local spelling of `ListView`, so this module's public shape does not depend on a
@@ -471,6 +485,8 @@ export const DEFAULT_URL_STATE: GlobalTasksUrlState = {
   view: 'active',
   filedFilters: NO_FILED_FILTERS,
   filedSort: DEFAULT_FILED_SORT,
+  filedActiveSort: DEFAULT_FILED_TABLE_SORT,
+  filedBacklogSort: DEFAULT_FILED_TABLE_SORT,
 }
 
 /**
@@ -496,6 +512,12 @@ export function urlStateToSearchParams(state: GlobalTasksUrlState): URLSearchPar
   for (const status of state.filedFilters.statuses) params.append(SEARCH_PARAMS.filedStatus, status)
   for (const priority of state.filedFilters.priorities) params.append(SEARCH_PARAMS.filedPriority, priority)
   if (state.filedSort !== DEFAULT_FILED_SORT) params.set(SEARCH_PARAMS.filedSort, state.filedSort)
+  if (!isDefaultFiledTableSort(state.filedActiveSort)) {
+    params.set(SEARCH_PARAMS.filedActiveSort, formatFiledTableSort(state.filedActiveSort))
+  }
+  if (!isDefaultFiledTableSort(state.filedBacklogSort)) {
+    params.set(SEARCH_PARAMS.filedBacklogSort, formatFiledTableSort(state.filedBacklogSort))
+  }
   return params
 }
 
@@ -525,5 +547,7 @@ export function urlStateFromSearchParams(params: URLSearchParams): GlobalTasksUr
       priorities: params.getAll(SEARCH_PARAMS.filedPriority).filter(isFiledPriority),
     },
     filedSort: isFiledSort(filedSort) ? filedSort : DEFAULT_FILED_SORT,
+    filedActiveSort: parseFiledTableSort(params.get(SEARCH_PARAMS.filedActiveSort)),
+    filedBacklogSort: parseFiledTableSort(params.get(SEARCH_PARAMS.filedBacklogSort)),
   }
 }

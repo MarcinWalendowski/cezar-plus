@@ -62,6 +62,18 @@ const storedRunnerSchema = z
   .enum([...RUNNER_IDS, 'claude-cli'])
   .transform((id) => (id === 'claude-cli' ? ('claude' as const) : id));
 
+/** Local mirror of the contract's `stepAttemptSchema` (spec 2026-08-29-step-retry-timing) — one
+ *  attempt at a step, written only by `updateStep` below. */
+const stepAttemptSchema = z.object({
+  startedAt: z.string(),
+  finishedAt: z.string().optional(),
+});
+type StepAttempt = z.infer<typeof stepAttemptSchema>;
+
+/** The statuses `updateStep`'s D3 rule (2) treats as "an attempt is in flight" (spec
+ *  2026-08-29-step-retry-timing). Leaving any of these closes the open attempt. */
+const ACTIVE_STEP_STATUSES: ReadonlySet<StepStatus> = new Set(['running', 'waiting', 'review']);
+
 const stepStateSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -87,6 +99,10 @@ const stepStateSchema = z.object({
   usageInvocationEpoch: usageCounterSchema.optional(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
+  /** Mirror of the contract's `StepState.attempts` — see there for the full doc comment.
+   *  Accumulated only by `updateStep`, keyed on the iteration transition (spec
+   *  2026-08-29-step-retry-timing). */
+  attempts: z.array(stepAttemptSchema).optional(),
   error: z.string().optional(),
   /** Latest backend-owned session id, used for same-backend Continue. */
   sessionId: z.string().optional(),
@@ -780,15 +796,24 @@ export class RunStore extends EventEmitter {
   private runs = new Map<string, RunRecord>();
   private saveTimer: NodeJS.Timeout | null = null;
 
-  private constructor(private readonly dataDir: string) {
+  private constructor(
+    private readonly dataDir: string,
+    /** Clock `updateStep`'s D3 rule (2) reads to close an attempt with no explicit `finishedAt`
+     *  (spec 2026-08-29-step-retry-timing). Overridable only through `RunStore.open`'s `now`
+     *  option — the constructor itself is private, so no test reaches it directly. */
+    private readonly now: () => string = () => new Date().toISOString(),
+  ) {
     super();
     this.setMaxListeners(100);
   }
 
-  /** See `reconcileLoadedRun` for what `keepLive` (#367) decides about live-looking rows. */
-  static open(dataDir: string, opts?: { keepLive?: boolean }): RunStore {
+  /** See `reconcileLoadedRun` for what `keepLive` (#367) decides about live-looking rows.
+   *  `now` (spec 2026-08-29-step-retry-timing) overrides the clock `updateStep` uses to close an
+   *  attempt on a status exit with no explicit `finishedAt` — every production call site omits
+   *  it and gets the real clock; tests inject a fixed one so rule (2) is asserted, not raced. */
+  static open(dataDir: string, opts?: { keepLive?: boolean; now?: () => string }): RunStore {
     mkdirSync(join(dataDir, 'runs'), { recursive: true });
-    const store = new RunStore(dataDir);
+    const store = new RunStore(dataDir, opts?.now);
     const indexPath = join(dataDir, 'runs.json');
     if (existsSync(indexPath)) {
       try {
@@ -979,7 +1004,63 @@ export class RunStore extends EventEmitter {
     this.touch(run);
   }
 
-  updateStep(runId: string, stepId: string, patch: Partial<Omit<StepState, 'id'>>): void {
+  /**
+   * Accumulate `step.attempts` from a raw `updateStep` patch, BEFORE the `Object.assign` merge —
+   * every field it reads (`step.iterations`, `step.status`, `step.attempts`) must still be the
+   * PREVIOUS attempt's values (spec 2026-08-29-step-retry-timing, §"The writer, precisely").
+   * Three rules, order fixed:
+   *
+   *   (1) explicit close  — the patch supplies `finishedAt`, e.g. `finishStep`.
+   *   (2) implicit close  — the step leaves the active set (`running`/`waiting`/`review`) with
+   *       nothing to close on; closes at `this.now()`. Six of the nine retry paths in the engine
+   *       take exactly this shape (`{status:'pending'}` and nothing else).
+   *   (3) new attempt     — an ITERATION INCREMENT, never a `startedAt` comparison: two attempts
+   *       can share a millisecond. Guarded by the upgrade boundary so a step that was already
+   *       mid-flight when this shipped never gains a partial array.
+   *
+   * `attempts` is mutated on `step` directly; it is excluded from `patch`'s type so a caller
+   * cannot race this accumulation with its own write.
+   */
+  private accumulateStepAttempts(step: StepState, patch: Partial<Omit<StepState, 'id' | 'attempts'>>): void {
+    const prevIterations = step.iterations;
+    const prevStatus = step.status;
+    const open = (): StepAttempt | undefined => {
+      const attempts = step.attempts;
+      if (!attempts || attempts.length === 0) return undefined;
+      const last = attempts.at(-1);
+      return last && last.finishedAt === undefined ? last : undefined;
+    };
+
+    // (1) explicit close
+    if (typeof patch.finishedAt === 'string') {
+      const openAttempt = open();
+      if (openAttempt) openAttempt.finishedAt = patch.finishedAt;
+    }
+
+    // (2) implicit close — the step left the active set with nothing to close on
+    if (
+      typeof patch.status === 'string' &&
+      ACTIVE_STEP_STATUSES.has(prevStatus) &&
+      !ACTIVE_STEP_STATUSES.has(patch.status)
+    ) {
+      const openAttempt = open();
+      if (openAttempt) openAttempt.finishedAt = this.now();
+    }
+
+    // (3) a NEW attempt is an ITERATION INCREMENT, never a timestamp comparison
+    if (typeof patch.iterations === 'number' && patch.iterations > prevIterations && typeof patch.startedAt === 'string') {
+      // the upgrade boundary — a step that already had `iterations > 0` and no `attempts` when
+      // this shipped never gains the field; only a fresh step (iterations 0) or one already
+      // accumulating may mint an entry.
+      if (prevIterations === 0 || step.attempts !== undefined) {
+        const openAttempt = open();
+        if (openAttempt) openAttempt.finishedAt = patch.startedAt; // fallback close, see D3
+        step.attempts = [...(step.attempts ?? []), { startedAt: patch.startedAt }];
+      }
+    }
+  }
+
+  updateStep(runId: string, stepId: string, patch: Partial<Omit<StepState, 'id' | 'attempts'>>): void {
     const run = this.runs.get(runId);
     const step = run?.steps.find((s) => s.id === stepId);
     if (!run || !step) return;
@@ -990,6 +1071,7 @@ export class RunStore extends EventEmitter {
     // patch counts as a report (spec 2026-08-22-context-window-denominator-per-step).
     const reportedWindow = patch.contextWindow;
     const touchesContext = 'contextTokens' in patch || 'contextWindow' in patch;
+    this.accumulateStepAttempts(step, patch);
     Object.assign(step, this.redactStepPatch(patch));
     if (touchesContext) {
       step.contextWindow = resolveContextWindow({

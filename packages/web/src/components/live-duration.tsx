@@ -22,6 +22,7 @@ export function LiveDuration({
   label,
   title,
   format = formatDuration,
+  offsetMs = 0,
 }: {
   /** ISO-8601 instant the clock counts from — `run.startedAt`. */
   since: string | undefined
@@ -36,12 +37,23 @@ export function LiveDuration({
    * neighbours will — a card must not jump from `0:00` to `70ms` the moment it completes.
    */
   format?: (ms: number) => string
+  /**
+   * Ms already banked by attempts closed BEFORE `since` (spec 2026-08-29-step-retry-timing) —
+   * added on top of the live tick so a retried step's clock reads the cumulative total, not just
+   * the open attempt. Defaults to `0`, so every existing caller renders byte-identical output.
+   * Never rescues a missing/unparseable `since` — a step with banked attempts and no open one is
+   * not live and never reaches this leaf.
+   */
+  offsetMs?: number
 }) {
   const now = useNow(1000)
   if (!since) return null
   const start = new Date(since).getTime()
   if (Number.isNaN(start)) return null
-  const elapsed = format(now - start)
+  // The clamp wraps the LIVE term alone, not the sum: a browser clock behind the server must
+  // never subtract from already-banked duration, which is what `offsetMs + (now - start)` did
+  // before this existed (spec 2026-08-29-step-retry-timing, Phase 2 step 1).
+  const elapsed = format(offsetMs + Math.max(0, now - start))
   return (
     <time
       data-slot="live-duration"

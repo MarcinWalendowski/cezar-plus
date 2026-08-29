@@ -1,4 +1,4 @@
-import type { InferResponseType } from 'hono/client';
+import type { InferRequestType, InferResponseType } from 'hono/client';
 import { hc } from 'hono/client';
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
@@ -26,6 +26,48 @@ describe('src/contract workspace-todos schema matches the route exactly', () => 
   type WorkspaceTodos200 = InferResponseType<typeof client.api.v1.workspace.todos.$get, 200>;
 
   type _Checks = [Assert<Exact<z.infer<typeof workspaceTodosResponseSchema>, WorkspaceTodos200>>];
+
+  /**
+   * The QUERY side (2026-08-25-split-active-backlog-tables.md). `queryZodValidator` is middleware
+   * precisely so the query shape reaches the route type — parsing inside the handler would leave
+   * `hc` accepting anything (see `./validators.ts`). The cases below are the proof that it did.
+   *
+   * Note WHICH shape reaches `hc`: `queryZodValidator` publishes the schema's OUTPUT as the
+   * request type (Hono declares the validator's request parameter as a conditional type, which is
+   * not an inference site), so `limit` is a `number` here and the facets are arrays, even though
+   * the wire carries strings. Pinned rather than worked around — the client builds the same shape
+   * and `hc` stringifies on the way out.
+   */
+  type WorkspaceTodosRequest = InferRequestType<typeof client.api.v1.workspace.todos.$get>;
+
+  it('every query key is optional — the legacy no-params call still type-checks', () => {
+    const legacy: WorkspaceTodosRequest = { query: {} };
+    expect(legacy.query).toEqual({});
+  });
+
+  it('the partitioned call type-checks, including repeated facets and a numeric limit', () => {
+    const partitioned: WorkspaceTodosRequest = {
+      query: {
+        partition: 'active',
+        sort: 'priority',
+        dir: 'asc',
+        view: 'active',
+        limit: 20,
+        status: ['todo', 'blocked'],
+        priority: ['high'],
+        q: 'needle',
+      },
+    };
+    expect(partitioned.query.partition).toBe('active');
+  });
+
+  it('an unknown key and a bad enum value are both compile errors', () => {
+    // @ts-expect-error `bogus` is not a query key this route publishes.
+    const unknownKey: WorkspaceTodosRequest = { query: { bogus: '1' } };
+    // @ts-expect-error `sideways` is not a direction.
+    const badEnum: WorkspaceTodosRequest = { query: { dir: 'sideways' } };
+    expect([unknownKey, badEnum]).toHaveLength(2);
+  });
 
   it('is enforced by tsc, not at runtime', () => {
     // Pins the comparator itself: a `Mutual` that degenerated to `true` would make every
