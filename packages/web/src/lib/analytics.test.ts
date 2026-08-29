@@ -1,90 +1,114 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { analyticsEventSchema } from '@loki-labs/better-cezar-api-client'
-import { postAnalyticsEvents } from '@/api/client'
-import { track } from './analytics'
+import { __flushAnalyticsForTests, __resetAnalyticsForTests, track } from './analytics'
 
-// spec 2026-08-29-step-retry-timing §Analytics — `track()` delegates to `postAnalyticsEvents`,
-// the typed `hc` wrapper, rather than a raw `fetch` at a hand-written URL. Stubbing the global
-// `fetch` the `hc` client itself uses is what proves the wrapper — and not a URL this feature
-// built on its own — is the thing being exercised.
-const fetchMock = vi.fn<typeof fetch>()
+/**
+ * `lib/analytics.ts` (`.ai/specs/2026-08-25-split-active-backlog-tables.md`, D7, verification
+ * step 7). What is worth pinning is not that events reach the server — it is that NOTHING a
+ * caller does can make a component wait on, or fail because of, the sink.
+ */
+
+let posted: { events: { name: string; props: Record<string, unknown> }[] }[] = []
+
+const captureFetch = () =>
+  vi.fn(async (_input: RequestInfo | URL, init: RequestInit = {}) => {
+    posted.push(JSON.parse(String(init.body)))
+    return new Response(JSON.stringify({ accepted: 1 }), {
+      status: 202,
+      headers: { 'content-type': 'application/json' },
+    })
+  })
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', fetchMock)
+  posted = []
+  __resetAnalyticsForTests()
+  // `requestIdleCallback` is absent under jsdom, so `track` already falls back to a macrotask;
+  // the tests drive the flush explicitly rather than waiting on either.
+  vi.stubGlobal('fetch', captureFetch())
 })
 
 afterEach(() => {
-  fetchMock.mockReset()
   vi.unstubAllGlobals()
+  __resetAnalyticsForTests()
 })
 
-function reply(body: unknown, init: ResponseInit = {}): void {
-  fetchMock.mockResolvedValue(
-    new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-      ...init,
-    }),
-  )
-}
+describe('track', () => {
+  it('batches several events into ONE request', async () => {
+    track('todo.filed_sorted', { partition: 'active', column: 'task', dir: 'asc' })
+    track('todo.filed_show_more', { partition: 'backlog', from: 30, to: 40 })
+    expect(posted).toHaveLength(0) // nothing has left the buffer yet — `track` returns immediately
 
-function lastCall(): { path: string; method: string; body: unknown; headers: Headers } {
-  const call = fetchMock.mock.calls.at(-1)
-  if (!call) throw new Error('fetch was never called')
-  const [path, init = {}] = call as [string, RequestInit]
-  return {
-    path,
-    method: String(init.method),
-    body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined,
-    headers: new Headers(init.headers),
-  }
-}
-
-describe('track() (spec 2026-08-29-step-retry-timing §Analytics)', () => {
-  it('sends { events: [{ name, props }] } to /api/v1/workspace/analytics/events with a JSON content type', async () => {
-    reply({ accepted: 1 })
-    track('step.attempts_expanded', { runId: 'run-1', stepId: 'ship', iterations: 3 })
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
-
-    const call = lastCall()
-    expect(call.path).toBe('/api/v1/workspace/analytics/events')
-    expect(call.method).toBe('POST')
-    expect(call.headers.get('content-type')).toContain('application/json')
-    expect(call.body).toEqual({
-      events: [{ name: 'step.attempts_expanded', props: { runId: 'run-1', stepId: 'ship', iterations: 3 } }],
-    })
-    // Satisfies the contract schema — parsed directly, not hand-checked against the regex.
-    for (const event of (call.body as { events: unknown[] }).events) {
-      expect(analyticsEventSchema.safeParse(event).success).toBe(true)
-    }
+    await __flushAnalyticsForTests()
+    expect(posted).toHaveLength(1)
+    expect(posted[0]?.events.map((event) => event.name)).toEqual([
+      'todo.filed_sorted',
+      'todo.filed_show_more',
+    ])
+    expect(posted[0]?.events[0]?.props).toEqual({ partition: 'active', column: 'task', dir: 'asc' })
   })
 
-  it('failure is swallowed: a rejecting transport leaves track() resolved and throws nothing', async () => {
-    fetchMock.mockRejectedValue(new TypeError('network down'))
-    // track() itself is fire-and-forget (void), so the assertion is that calling it never throws
-    // synchronously and the underlying promise it started settles without an unhandled rejection.
-    expect(() => track('step.attempts_expanded', { runId: 'run-1', stepId: 'ship', iterations: 1 })).not.toThrow()
-    await new Promise((resolve) => setTimeout(resolve, 0))
+  it('sends an empty props object rather than omitting the key the sink requires', async () => {
+    track('todo.filed_sorted')
+    await __flushAnalyticsForTests()
+    expect(posted[0]?.events[0]?.props).toEqual({})
   })
 
-  it('failure is swallowed: a resolving 500 also leaves track() resolved', async () => {
-    reply({ error: 'boom' }, { status: 500 })
-    expect(() => track('step.attempts_expanded', { runId: 'run-1', stepId: 'ship', iterations: 1 })).not.toThrow()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-  })
-})
-
-describe('postAnalyticsEvents() does not throw on a non-2xx (spec 2026-08-29-step-retry-timing §Analytics)', () => {
-  it('a 500 response resolves rather than raising — the one deviation from every unwrap-based sibling', async () => {
-    reply({ error: 'boom' }, { status: 500 })
-    await expect(postAnalyticsEvents([{ name: 'step.attempts_expanded', props: { runId: 'run-1' } }])).resolves
-      .toBeUndefined()
+  it('never stamps a client timestamp — the server owns `ts`', async () => {
+    track('todo.filed_sorted', { partition: 'active' })
+    await __flushAnalyticsForTests()
+    expect(Object.keys(posted[0]?.events[0] ?? {}).sort()).toEqual(['name', 'props'])
   })
 
-  it('a rejecting transport still rejects — only the HTTP-status half is swallowed, not the network half', async () => {
-    fetchMock.mockRejectedValue(new TypeError('network down'))
-    await expect(postAnalyticsEvents([{ name: 'step.attempts_expanded', props: { runId: 'run-1' } }])).rejects
-      .toThrow()
+  it('splits a batch over the sink cap and sends the rest next time', async () => {
+    for (let i = 0; i < 25; i += 1) track(`todo.filed_e${i}`)
+    await __flushAnalyticsForTests()
+    expect(posted[0]?.events).toHaveLength(20)
+    await __flushAnalyticsForTests()
+    expect(posted[1]?.events).toHaveLength(5)
+  })
+
+  it('drops a failed POST silently and never throws — and the next batch still goes out', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('offline')
+      }),
+    )
+    track('todo.filed_lost')
+    await expect(__flushAnalyticsForTests()).resolves.toBeUndefined()
+
+    // Recovery: a later event is not held hostage by the dropped one.
+    vi.stubGlobal('fetch', captureFetch())
+    track('todo.filed_kept')
+    await __flushAnalyticsForTests()
+    expect(posted.at(-1)?.events.map((event) => event.name)).toEqual(['todo.filed_kept'])
+  })
+
+  it('a server error status is dropped just as silently as a network failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: 'nope' }), { status: 500 })),
+    )
+    track('todo.filed_boom')
+    await expect(__flushAnalyticsForTests()).resolves.toBeUndefined()
+  })
+
+  it('flushing an empty buffer sends nothing', async () => {
+    await __flushAnalyticsForTests()
+    expect(posted).toHaveLength(0)
+  })
+
+  it('the buffer is bounded — a cockpit that can never reach its server does not grow forever', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('offline')
+      }),
+    )
+    for (let i = 0; i < 1_000; i += 1) track(`todo.filed_e${i}`)
+    // Newest-wins: the events a reader would be asking about are the recent ones.
+    vi.stubGlobal('fetch', captureFetch())
+    await __flushAnalyticsForTests()
+    expect(posted[0]?.events[0]?.name).toBe('todo.filed_e920') // 1000 - (20 * 4)
   })
 })
