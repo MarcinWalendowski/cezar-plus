@@ -30,7 +30,10 @@ ENV_DESCRIPTOR="$QA_DIR/test-env.json"
 LOCK_DIR="$QA_DIR/test-env.lock"
 CACHE_FILE="$QA_DIR/.build-cache"
 APP_LOG="$QA_DIR/test-env-app.log"
-BROWSER_DESCRIPTOR=".ai/browsers/agent-browser.md"
+# BROWSER_DESCRIPTOR is resolved by ensure_browser() to whichever provider's own descriptor
+# document actually launched (D3, 2026-08-29-verify-active-backlog-e2e.md) — there is one arm
+# today, agent-browser, but the name is no longer a constant here so a second provider needs
+# no edit at this call site.
 
 PREFERRED_PORT=4321
 HEALTH_PATH="/api/v1/health"
@@ -150,7 +153,7 @@ TEST_ENV_STATUS=running
 TEST_ENV_BASE_URL=$BASE_URL
 TEST_ENV_DESCRIPTOR=.ai/qa/test-env.json
 TEST_ENV_REUSED=$reused
-BROWSER_PROVIDER=agent-browser
+BROWSER_PROVIDER=${BROWSER_PROVIDER:-none}
 BROWSER_INSTALLED=$BROWSER_INSTALLED
 EOF
 }
@@ -182,9 +185,47 @@ try_reuse() {
     [ -z "$newer" ] || { log "source changed since boot ($newer)"; return 1; }
   fi
 
+  # ---- browser: restore every field, and revalidate rather than trust (D3) --------------
+  # A descriptor written before this change carries no browser.provider/env, and reusing it
+  # would launch under conditions that don't work here (or print an unset $BROWSER_PROVIDER
+  # under `set -u`). Missing is "not validated", never "empty" — fall through to a full
+  # ensure_browser() rather than trust a partial claim.
+  d_provider=$(json_get "$ENV_DESCRIPTOR" browser.provider)
+  d_command=$(json_get "$ENV_DESCRIPTOR" browser.command)
+  d_version=$(json_get "$ENV_DESCRIPTOR" browser.version)
+  d_descriptor=$(json_get "$ENV_DESCRIPTOR" browser.descriptor)
+  d_env_present=$(json_get "$ENV_DESCRIPTOR" browser.env)
+  d_installed=$(json_get "$ENV_DESCRIPTOR" browser.installed)
+  if [ -z "$d_provider" ] || [ -z "$d_command" ] || [ -z "$d_version" ] || [ -z "$d_descriptor" ] || [ -z "$d_env_present" ]; then
+    log "descriptor predates the browser.provider/env fields — re-resolving the browser"
+    return 1
+  fi
+
   BASE_URL=$url
-  BROWSER_INSTALLED=$(json_get "$ENV_DESCRIPTOR" browser.installed)
-  [ "$BROWSER_INSTALLED" = true ] && BROWSER_INSTALLED=1 || BROWSER_INSTALLED=0
+  BROWSER_PROVIDER=$d_provider
+  BROWSER_COMMAND=$d_command
+  BROWSER_VERSION=$d_version
+  BROWSER_DESCRIPTOR=$d_descriptor
+  BROWSER_ENV_ARGS=$(json_get "$ENV_DESCRIPTOR" browser.env.AGENT_BROWSER_ARGS)
+  BROWSER_ENV_TMPDIR=$(json_get "$ENV_DESCRIPTOR" browser.env.TMPDIR)
+  REUSE_BROWSER_DEMOTED=0
+
+  if [ "$d_installed" = true ]; then
+    # A descriptor is a claim, not proof — same rule as the app PID/health check above,
+    # applied to the browser: the scratch TMPDIR may have been reaped since. Revalidate with
+    # the same cheap open/close probe under the restored conditions before trusting it.
+    if [ "$(browser_probe_launch "$BROWSER_ENV_ARGS" "$BROWSER_ENV_TMPDIR" reuse)" = 1 ]; then
+      BROWSER_INSTALLED=1
+    else
+      log "browser revalidation failed under restored launch conditions — demoting to not installed"
+      BROWSER_INSTALLED=0
+      BROWSER_NOTES="reuse revalidation failed under restored launch conditions"
+      REUSE_BROWSER_DEMOTED=1
+    fi
+  else
+    BROWSER_INSTALLED=0
+  fi
+
   return 0
 }
 
@@ -244,13 +285,48 @@ ensure_build() {
   printf '%s' "$fp" > "$CACHE_FILE"
 }
 
-# ---- browser provider (per .ai/browsers/agent-browser.md: ensure-installed) --
-# Never fails the boot: e2e degrades to a loud SKIP when the provider is unavailable,
-# and everything else about the environment stays usable.
+# ---- browser provider: candidate-condition launch probe (D2) ---------------
+# Never fails the boot: e2e degrades to a loud SKIP when no provider resolves, and
+# everything else about the environment stays usable.
 BROWSER_INSTALLED=0
+BROWSER_PROVIDER=""
 BROWSER_COMMAND=""
 BROWSER_VERSION=unknown
 BROWSER_NOTES=""
+BROWSER_DESCRIPTOR=""
+BROWSER_ENV_ARGS=""
+BROWSER_ENV_TMPDIR=""
+REUSE_BROWSER_DEMOTED=0
+
+# One real launch attempt — `open about:blank` then `close` — under the given
+# AGENT_BROWSER_ARGS / TMPDIR (either argument may be empty, meaning "leave that variable
+# unset"). Prints `1` on a `"success":true` open, `0` otherwise. Shared by ensure_browser's
+# candidate loop and by try_reuse()'s revalidation, so the two can never disagree about what
+# "the launch works" means.
+browser_probe_launch() {
+  probe_args=$1
+  probe_tmpdir=$2
+  probe_tag=$3
+  probe_session="cez-probe-$$-$probe_tag"
+  probe_out="$QA_DIR/.browser-probe.$$.json"
+  if [ -n "$probe_args" ] && [ -n "$probe_tmpdir" ]; then
+    env AGENT_BROWSER_ARGS="$probe_args" TMPDIR="$probe_tmpdir" \
+      "$BROWSER_COMMAND" --session "$probe_session" open about:blank --json >"$probe_out" 2>&1
+  elif [ -n "$probe_args" ]; then
+    env AGENT_BROWSER_ARGS="$probe_args" \
+      "$BROWSER_COMMAND" --session "$probe_session" open about:blank --json >"$probe_out" 2>&1
+  elif [ -n "$probe_tmpdir" ]; then
+    env TMPDIR="$probe_tmpdir" \
+      "$BROWSER_COMMAND" --session "$probe_session" open about:blank --json >"$probe_out" 2>&1
+  else
+    "$BROWSER_COMMAND" --session "$probe_session" open about:blank --json >"$probe_out" 2>&1
+  fi
+  probe_ok=0
+  grep -q '"success":true' "$probe_out" 2>/dev/null && probe_ok=1
+  env ${probe_tmpdir:+TMPDIR="$probe_tmpdir"} "$BROWSER_COMMAND" --session "$probe_session" close --json >/dev/null 2>&1 || true
+  rm -f "$probe_out"
+  echo "$probe_ok"
+}
 
 ensure_browser() {
   if command -v agent-browser >/dev/null 2>&1; then
@@ -295,6 +371,11 @@ ensure_browser() {
     fi
   fi
 
+  # A binary is in hand — this run resolved to the agent-browser provider, whether or not it
+  # can actually launch here (that is the separate `installed` claim, below).
+  BROWSER_PROVIDER=agent-browser
+  BROWSER_DESCRIPTOR=".ai/browsers/agent-browser.md"
+
   "$BROWSER_COMMAND" install >/dev/null 2>&1 || true
   if ! "$BROWSER_COMMAND" doctor --json >/dev/null 2>&1; then
     # Linux Chrome libraries may need root; only try when it costs no prompt.
@@ -306,11 +387,63 @@ ensure_browser() {
       fi
     fi
   fi
-  if "$BROWSER_COMMAND" doctor --json >/dev/null 2>&1; then
-    BROWSER_INSTALLED=1
-    BROWSER_VERSION=$("$BROWSER_COMMAND" --version 2>/dev/null || echo unknown)
-  else
-    BROWSER_NOTES="live browser launch failed after autonomous install"
+  BROWSER_VERSION=$("$BROWSER_COMMAND" --version 2>/dev/null || echo unknown)
+
+  # Kept for BROWSER_NOTES if every launch candidate below fails. A passing doctor is no
+  # longer sufficient on its own (Problem 3): it does not exercise the sandbox/TMPDIR
+  # conditions a real launch needs, so it is diagnostic evidence, not the gate.
+  DOCTOR_JSON=$("$BROWSER_COMMAND" doctor --json 2>&1 || true)
+
+  # The daemon caches the FIRST launch's environment (Risk 2) — close whatever session might
+  # already be running before probing, so a stale daemon cannot mask this probe.
+  "$BROWSER_COMMAND" --session cez-probe-reset-$$ close >/dev/null 2>&1 || true
+
+  # Scratch TMPDIR for the candidates that need one: short, so Chromium's process-singleton
+  # socket (`$TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket`) stays under the 108-byte
+  # `sun_path` cap. Removed by test-env-down.sh alongside the rest of the environment.
+  BROWSER_SCRATCH_TMPDIR=$(mktemp -d /tmp/cez-e2e.XXXXXX 2>/dev/null || true)
+
+  # Candidate condition sets, in order, stopping at the first REAL launch — not the first
+  # passing doctor. `{}` first, so a machine that needs nothing (a Mac) pays no cost.
+  candidate=1
+  while [ "$candidate" -le 4 ]; do
+    case "$candidate" in
+      1) c_args=""; c_tmpdir="" ;;
+      2) c_args="--no-sandbox"; c_tmpdir="" ;;
+      3) c_args=""; c_tmpdir="$BROWSER_SCRATCH_TMPDIR" ;;
+      4) c_args="--no-sandbox"; c_tmpdir="$BROWSER_SCRATCH_TMPDIR" ;;
+    esac
+    # Candidates 3/4 need the scratch dir; skip them if mktemp failed rather than silently
+    # re-running 1/2 under a different label.
+    if [ "$candidate" -ge 3 ] && [ -z "$BROWSER_SCRATCH_TMPDIR" ]; then
+      candidate=$((candidate + 1))
+      continue
+    fi
+    if [ "$(browser_probe_launch "$c_args" "$c_tmpdir" "$candidate")" = 1 ]; then
+      BROWSER_ENV_ARGS="$c_args"
+      BROWSER_ENV_TMPDIR="$c_tmpdir"
+      BROWSER_INSTALLED=1
+      break
+    fi
+    candidate=$((candidate + 1))
+  done
+
+  if [ "$BROWSER_INSTALLED" != 1 ]; then
+    fail_reason=$(printf '%s' "$DOCTOR_JSON" | node -e '
+      let d = "";
+      process.stdin.on("data", (c) => { d += c; });
+      process.stdin.on("end", () => {
+        try {
+          const j = JSON.parse(d);
+          const f = (j.checks || []).find((c) => c.status === "fail");
+          process.stdout.write(f ? (f.message || f.id || "unknown check failed") : "no failing check reported");
+        } catch {
+          process.stdout.write("doctor did not return JSON");
+        }
+      });
+    ' 2>/dev/null || echo "doctor did not return JSON")
+    BROWSER_NOTES="every agent-browser launch candidate failed (last doctor check: ${fail_reason})"
+    [ -n "$BROWSER_SCRATCH_TMPDIR" ] && rm -rf "$BROWSER_SCRATCH_TMPDIR" 2>/dev/null || true
   fi
 }
 
@@ -321,14 +454,32 @@ start_app() {
   BASE_URL="http://127.0.0.1:$PORT"
 
   log "starting cezar on $BASE_URL (CEZ_DRY_RUN=1)"
+  # D8: the boot env is built by ALLOWLIST, not by subtraction. Every inherited CEZ_* variable
+  # (and NODE_ENV) is dropped, enumerated from the environment itself so a variable added next
+  # month is dropped without anyone editing a list — then only what this boot sets
+  # deliberately is restored, plus CEZ_SINGLE_PROJECT when the caller asked for it (try_reuse()
+  # already keys the reuse check on it). `CEZ_PUBLIC_URL` alone is enough to put a fresh
+  # instance into hosted mode (AGENTS.md § auth-boot-gate), which is exactly the class of
+  # inherited variable this exists to strip.
+  SINGLE_PROJECT_RESTORE="${CEZ_SINGLE_PROJECT:-}"
   # --no-open: a test boot must never hijack the operator's browser.
-  if command -v setsid >/dev/null 2>&1; then
-    (cd "$REPO_ROOT" && exec setsid nohup node packages/cezar/dist/index.js --port "$PORT" --no-open --repo "$REPO_ROOT" \
-      >"$APP_LOG" 2>&1 </dev/null) &
-  else
-    (cd "$REPO_ROOT" && exec nohup node packages/cezar/dist/index.js --port "$PORT" --no-open --repo "$REPO_ROOT" \
-      >"$APP_LOG" 2>&1 </dev/null) &
-  fi
+  (
+    cd "$REPO_ROOT"
+    for cez_var in $(env | grep -E '^(CEZ_[A-Za-z0-9_]*|NODE_ENV)=' | cut -d= -f1); do
+      unset "$cez_var" 2>/dev/null || true
+    done
+    export CEZ_DRY_RUN=1
+    export CEZ_HOME="$QA_DIR/cez-home"
+    export CEZ_ANALYTICS=1
+    [ -n "$SINGLE_PROJECT_RESTORE" ] && export CEZ_SINGLE_PROJECT="$SINGLE_PROJECT_RESTORE"
+    if command -v setsid >/dev/null 2>&1; then
+      exec setsid nohup node packages/cezar/dist/index.js --port "$PORT" --no-open --repo "$REPO_ROOT" \
+        >"$APP_LOG" 2>&1 </dev/null
+    else
+      exec nohup node packages/cezar/dist/index.js --port "$PORT" --no-open --repo "$REPO_ROOT" \
+        >"$APP_LOG" 2>&1 </dev/null
+    fi
+  ) &
   APP_PID=$!
 
   waited=0
@@ -356,7 +507,10 @@ write_descriptor() {
   [ "${CEZ_SINGLE_PROJECT:-}" = 1 ] && SINGLE_PROJECT=true
   node -e '
     const fs = require("fs");
-    const [out, baseUrl, port, pid, cmd, bInstalled, bCmd, bVer, bNotes, desc, singleProject, platform] = process.argv.slice(1);
+    const [out, baseUrl, port, pid, cmd, bProvider, bInstalled, bCmd, bVer, bNotes, desc, bArgs, bTmpdir, singleProject, platform] = process.argv.slice(1);
+    const env = {};
+    if (bArgs) env.AGENT_BROWSER_ARGS = bArgs;
+    if (bTmpdir) env.TMPDIR = bTmpdir;
     fs.writeFileSync(out, JSON.stringify({
       version: 1,
       runId: "cezar-" + new Date().toISOString().slice(0, 10) + "-" + pid,
@@ -371,12 +525,13 @@ write_descriptor() {
       credentials: [],
       environment: { singleProject: singleProject === "true" },
       browser: {
-        provider: "agent-browser",
+        provider: bProvider || "none",
         installed: bInstalled === "1",
         command: bCmd,
         version: bVer,
         descriptor: desc,
         notes: bNotes,
+        env,
       },
       testRunner: { name: "other", config: "packages/web/e2e/vitest.config.ts" },
       platform,
@@ -385,8 +540,26 @@ write_descriptor() {
     }, null, 2) + "\n");
   ' "$ENV_DESCRIPTOR" "$BASE_URL" "$PORT" "$APP_PID" \
     "CEZ_DRY_RUN=1 CEZ_HOME=.ai/qa/cez-home node packages/cezar/dist/index.js --port $PORT --no-open" \
-    "$BROWSER_INSTALLED" "$BROWSER_COMMAND" "$BROWSER_VERSION" "$BROWSER_NOTES" "$BROWSER_DESCRIPTOR" \
+    "$BROWSER_PROVIDER" "$BROWSER_INSTALLED" "$BROWSER_COMMAND" "$BROWSER_VERSION" "$BROWSER_NOTES" "$BROWSER_DESCRIPTOR" \
+    "$BROWSER_ENV_ARGS" "$BROWSER_ENV_TMPDIR" \
     "$SINGLE_PROJECT" "$(uname -s 2>/dev/null | grep -qi Linux && { grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null && echo wsl2 || echo linux; } || echo darwin)"
+}
+
+# Patches only the `browser` sub-object of an already-written descriptor, in place — used when
+# a reuse revalidation (D3) demotes the browser without rebooting the app, so `startedAt` and
+# every app field are left exactly as they were.
+rewrite_browser_descriptor() {
+  node -e '
+    const fs = require("fs");
+    const [file, provider, installed, command, version, descriptor, notes, argsVal, tmpdirVal] = process.argv.slice(1);
+    const env = {};
+    if (argsVal) env.AGENT_BROWSER_ARGS = argsVal;
+    if (tmpdirVal) env.TMPDIR = tmpdirVal;
+    const d = JSON.parse(fs.readFileSync(file, "utf8"));
+    d.browser = { provider: provider || "none", installed: installed === "1", command, version, descriptor, notes, env };
+    fs.writeFileSync(file, JSON.stringify(d, null, 2) + "\n");
+  ' "$ENV_DESCRIPTOR" "$BROWSER_PROVIDER" "$BROWSER_INSTALLED" "$BROWSER_COMMAND" "$BROWSER_VERSION" \
+    "$BROWSER_DESCRIPTOR" "$BROWSER_NOTES" "$BROWSER_ENV_ARGS" "$BROWSER_ENV_TMPDIR"
 }
 
 # ---- main -------------------------------------------------------------------
@@ -394,6 +567,9 @@ acquire_lock
 
 if try_reuse; then
   log "reusing the healthy instance at $BASE_URL"
+  # A revalidation demotion is written back immediately — it never silently reuses a stale
+  # "installed: true" claim (D3).
+  [ "$REUSE_BROWSER_DEMOTED" = 1 ] && rewrite_browser_descriptor
   emit 1
   exit 0
 fi

@@ -22,12 +22,26 @@ const descriptorPath = resolve(repoRoot, '.ai/qa/test-env.json')
  * Exported from here rather than re-derived per spec because it is one fact about the build
  * layout, and it has already moved once: `npm run build` emits the server into the workspace
  * package (`packages/cezar/dist`), not into a root-level `dist/`.
+ *
+ * `CEZ_E2E_SERVER_CLI` overrides it so the SAME spec can be pointed at a deployed build (the
+ * production pass, `.ai/specs/2026-08-29-verify-active-backlog-e2e.md` D6) without a second
+ * copy of any of the 19 specs that import this constant.
  */
-export const cezarCli = resolve(repoRoot, 'packages/cezar/dist/index.js')
+export const cezarCli = process.env.CEZ_E2E_SERVER_CLI ?? resolve(repoRoot, 'packages/cezar/dist/index.js')
 
 type EnvDescriptor = {
   baseUrl: string
-  browser: { installed: boolean; command: string; version: string; notes: string }
+  browser: {
+    /** The resolved provider's name (`"agent-browser"`, `"none"` when nothing resolved). */
+    provider: string
+    installed: boolean
+    command: string
+    version: string
+    notes: string
+    /** The launch conditions the probe measured (D2) — applied to every operation this
+     *  provider runs. `{}` on a machine that needs none, the expected value on a Mac. */
+    env: Record<string, string>
+  }
 }
 
 /** The shared descriptor written by .ai/scripts/test-env-up.sh — QA and e2e attach to the
@@ -56,12 +70,32 @@ export function readTestEnv(): EnvDescriptor {
  *
  * The shared test env pins the same variable under `.ai/qa/cez-home`
  * (`.ai/scripts/test-env-up.sh`); this is that rule for the specs that boot their own server.
+ *
+ * **D8: built by allowlist, not by subtraction.** Every inherited `CEZ_*` variable (and
+ * `NODE_ENV`) is dropped — enumerated from the environment itself, so a variable added next
+ * month is dropped without editing a list — then only what this boot sets deliberately is
+ * restored. A spec that wants a `CEZ_*` variable passes it through `extra`; it can no longer
+ * inherit one from whatever runner launched the test process (`CEZ_PUBLIC_URL` alone is
+ * enough to put a fresh boot into hosted mode, where it refuses to start with no auth
+ * configured). `CEZ_ANALYTICS` is forced to `'1'` rather than merely left alone, because
+ * `analytics-log.ts` disables the sink on the exact string `'0'` and leaving that to chance
+ * would make the analytics assertion in `filed-partitions.e2e.ts` non-deterministic.
  */
 export function fixtureServeEnv(
   dataRoot: string,
   extra: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
-  return { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: resolve(dataRoot, '.cez-home'), ...extra }
+  const base: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key === 'NODE_ENV' || key.startsWith('CEZ_')) continue
+    if (value !== undefined) base[key] = value
+  }
+  return {
+    ...base,
+    CEZ_DRY_RUN: '1', CEZ_HOME: resolve(dataRoot, '.cez-home'), // guardian: same line, always paired
+    CEZ_ANALYTICS: '1',
+    ...extra,
+  }
 }
 
 /**
@@ -84,17 +118,24 @@ export class AgentBrowser {
   private constructor(
     private readonly bin: string,
     private readonly session: string,
+    private readonly provider: string,
+    private readonly launchEnv: Record<string, string>,
   ) {}
 
   static open(session: string): AgentBrowser {
     const env = readTestEnv()
+    const provider = env.browser.provider || 'none'
     if (!env.browser.installed) {
-      throw new Error(`cezar e2e: the agent-browser provider is not installed (${env.browser.notes})`)
+      throw new Error(`cezar e2e: the ${provider} provider is not installed (${env.browser.notes})`)
     }
-    return new AgentBrowser(env.browser.command, session)
+    return new AgentBrowser(env.browser.command, session, provider, env.browser.env ?? {})
   }
 
-  /** One agent-browser invocation. `--json` on every call so results are parsed, not scraped. */
+  /** One provider invocation. `--json` on every call so results are parsed, not scraped. The
+   *  descriptor's `browser.env` (D2's measured launch conditions — e.g. `AGENT_BROWSER_ARGS`,
+   *  a short `TMPDIR`) is applied to every child, not just the first: `execFileSync` gives the
+   *  child no environment of its own otherwise, so it would silently inherit whatever this
+   *  process's own environment happens to be. */
   private run(args: string[]): Record<string, unknown> {
     let stdout: string
     try {
@@ -103,13 +144,14 @@ export class AgentBrowser {
         // A hung browser must fail the spec, not the whole suite's wall clock.
         timeout: 60_000,
         maxBuffer: 32 * 1024 * 1024,
+        env: { ...process.env, ...this.launchEnv },
       })
     } catch (cause) {
-      throw new Error(`cezar e2e: agent-browser ${args.join(' ')} failed`, { cause })
+      throw new Error(`cezar e2e: ${this.provider} ${args.join(' ')} failed`, { cause })
     }
     const parsed = JSON.parse(stdout) as { success: boolean; data?: unknown; error?: unknown }
     if (!parsed.success) {
-      throw new Error(`cezar e2e: agent-browser ${args.join(' ')} → ${JSON.stringify(parsed.error)}`)
+      throw new Error(`cezar e2e: ${this.provider} ${args.join(' ')} → ${JSON.stringify(parsed.error)}`)
     }
     return (parsed.data ?? {}) as Record<string, unknown>
   }

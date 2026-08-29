@@ -29,6 +29,21 @@
 
 ## 🛠 Fixed
 
+- **The browser E2E harness now actually launches on `prod-host`, and the recorded reason it
+  couldn't was wrong** (`.ai/specs/2026-08-29-verify-active-backlog-e2e.md`). The record said
+  agent-browser "is not installed"; measured, it was installed and its Chrome launched fine — the
+  blocker was two launch conditions the box needs (`--no-sandbox`, and a short `TMPDIR` so
+  Chromium's process-singleton socket stays under the 108-byte `sun_path` cap) that
+  `ensure_browser()` never tried. `test-env-up.sh` now probes candidate launch conditions in order
+  and records the winning one in the descriptor (`browser.env`), applied to every operation the
+  provider runs; the boot environment for both the shared instance and a spec's own fixture server
+  is now built by CEZ_* allowlist rather than by a stale deny list, closing the same hosted-mode
+  boot refusal a second stuck task hit independently. `filed-partitions.e2e.ts`
+  (`.ai/specs/2026-08-25-split-active-backlog-tables.md`'s Filed board Active/Backlog split) is the
+  first spec run all the way through: composite `<project>:<todoId>` row keys, a real
+  Resource-Timing request log proving the two-request-per-load design, exact-sequence sort waits
+  (not just `aria-sort`), and an assertion that analytics events reach disk.
+
 - **Cold-project intent discovery is now verified on production, and its verification runbook
   no longer lies.** The runtime fix (`809c8220`) shipped on 2026-08-25 and reached production
   on 2026-08-29; both cold-project canaries were run against the live service and passed. A

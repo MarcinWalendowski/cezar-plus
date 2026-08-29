@@ -21,11 +21,12 @@ skip() {
 ################################################################################
 # E2E SKIPPED — the UI was NOT verified.
 #
+# Provider resolved: $2
 # Reason: $1
 #
-# The agent-browser provider (.ai/browsers/agent-browser.md) could not be
-# provisioned here, so no spec ran. This is NOT a pass. Re-run on a machine with
-# network access to the GitHub Releases and Chrome-for-Testing hosts.
+# No browser provider could launch here, so no spec ran. This is NOT a pass. See
+# .ai/qa/test-env.json's browser.notes for the specific launch failure, or re-run on a
+# machine with network access to the provider's release host.
 ################################################################################
 
 EOF
@@ -52,14 +53,21 @@ installed=$(node -e '
 ' "$DESCRIPTOR" 2>/dev/null || echo 0)
 
 if [ "$installed" != 1 ]; then
+  provider=$(node -e '
+    const fs = require("fs");
+    try {
+      const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      process.stdout.write((d.browser && d.browser.provider) || "none");
+    } catch { process.stdout.write("none"); }
+  ' "$DESCRIPTOR" 2>/dev/null || echo none)
   notes=$(node -e '
     const fs = require("fs");
     try {
       const d = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-      process.stdout.write((d.browser && d.browser.notes) || "agent-browser is unavailable");
+      process.stdout.write((d.browser && d.browser.notes) || "no browser provider is available");
     } catch { process.stdout.write("no test-env descriptor"); }
-  ' "$DESCRIPTOR" 2>/dev/null || echo "agent-browser is unavailable")
-  skip "$notes"
+  ' "$DESCRIPTOR" 2>/dev/null || echo "no browser provider is available")
+  skip "$notes" "$provider"
 fi
 
 # ---- 3. run the specs -------------------------------------------------------

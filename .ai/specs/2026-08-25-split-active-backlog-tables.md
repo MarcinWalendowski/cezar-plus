@@ -1,6 +1,9 @@
 # Split filed tasks into sortable Active and Backlog tables
 
-- **Status:** Implemented (phases 1-4 landed and gated; phase 5's browser E2E is written but has not been executed here — see Implementation notes)
+- **Status:** Implemented (phases 1-4 landed and gated). **Verification steps 9 and 10 (browser
+  E2E, prod runtime pass) are tracked by `.ai/specs/2026-08-29-verify-active-backlog-e2e.md`**,
+  which closes them out rather than reopening this document — see that spec's own Status line for
+  the current state.
 - **Date:** 2026-08-25
 - **Task:** `265c2695-f524-4a40-b0e8-d613cf1a31fd`, workflow `spec-to-deploy`, branch `cez/265c2695`
 - **Brief:** `.ai/specs/briefs/2026-08-25-split-active-backlog-tables.md` (step 1 of this run;
@@ -557,7 +560,13 @@ verified by artifacts, not by assertion in prose.
 8. **Gates**, each run with its exit code checked and the final lines quoted verbatim in the
    implementation notes:
    `npm run typecheck && npm test && npm run test:unit && npm run build && npm run test:package`.
-9. **Browser E2E** (`packages/web/e2e/filed-partitions.e2e.ts`, new), on the repo's own
+9. **Browser E2E — tracked by `.ai/specs/2026-08-29-verify-active-backlog-e2e.md`**, which
+   corrects the harness that kept this step from running (the recorded "provider not installed"
+   was the wrong path, D2/D3 there) and adds the request-log/analytics assertions this list
+   originally specified. Read that spec's own Verification and Results for the current state; the
+   description below is the original design, not amended in place beyond this pointer.
+
+   `packages/web/e2e/filed-partitions.e2e.ts` (new), on the repo's own
    `AgentBrowser` harness (`packages/web/e2e/agent-browser.ts`) dispatched by
    `npm run test:e2e` (`.ai/scripts/e2e.sh`), modelled on `backlog-composer.e2e.ts`: boot a
    throwaway `~/.cezar` home and a fixture git project, seed `todos.json` with 60 non-`todo` and
@@ -572,7 +581,11 @@ verified by artifacts, not by assertion in prose.
      rather than only in a passing assertion.
    A run that cannot provision the browser exits `TEST_E2E_STATUS=skipped`, which is **not** a
    pass (`.ai/scripts/e2e.sh:5-13`) and must be reported as such.
-10. **Prod runtime pass** on https://cockpit.example.com after deploy: both sections present with
+10. **Prod runtime pass — tracked by `.ai/specs/2026-08-29-verify-active-backlog-e2e.md` §10a/§10b**,
+    which splits this step at the authorization line an agent cannot cross: §10a (deployed bytes)
+    is agent-provable, §10b (the real cockpit) is the owner's alone.
+
+    On https://cockpit.example.com after deploy: both sections present with
     real data, one sort in each, both Show more controls, and the network tab showing exactly two
     `workspace/todos` requests on load and exactly one on each expansion. Until this has actually
     run, the task is **QA Needed**, not Done.
