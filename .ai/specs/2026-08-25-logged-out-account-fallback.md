@@ -1,6 +1,11 @@
 # Logged-Out Account Fallback
 
-**Status:** Draft (not implemented).
+**Status:** Implemented / QA Needed — landed on `main` as `c569aee8` (PR #11, merged 2026-08-25),
+shipped revision `d385cd5c`. The full repo gate suite (`npm ci --include=dev`, `npm run typecheck`,
+`npm test`: 631 files / 11911 tests, 0 failing) has run green on that exact merged tree. **V6**
+(the isolated-secondary-server runtime E2E) and **V7** (the packed-CLI E2E) below have not run, and
+the change has not been deployed. Do not read this as `Implemented` until V6, V7 and the deploy
+have actually happened. Tracked as cezar todo `21e18103-dd69-41de-8343-b6d401df75db`.
 **Date:** 2026-08-25
 **Repo:** `cezar`
 **Task:** `90836867-2ad6-4c51-abfd-b242ba46da6d`
