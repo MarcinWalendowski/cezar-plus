@@ -228,6 +228,19 @@ export const deployTargetsSchema = z.object({
       probe: z.string().min(1),
       manual: z.boolean().optional(),
       manualReason: z.string().min(1).max(2_000).optional(),
+      /**
+       * The shell command that PERFORMS this manual deployment, for the Resolve button to run.
+       *
+       * Optional and opt-in: a manual target without it keeps the original behaviour exactly — the
+       * button re-probes and reports. It is declared HERE, beside the probe, because the repo that
+       * knows how to prove a service is live is the one that knows how to make it live, and a
+       * deploy command living in the engine would be one repo's runbook compiled into every user's
+       * binary.
+       *
+       * It runs OUTSIDE this process's cgroup (see `manual-activation.ts`), because the activation
+       * it names is expected to restart the very server handling the click.
+       */
+      activate: z.string().min(1).max(2_000).optional(),
     }),
   ),
 });
@@ -461,9 +474,66 @@ export async function testedRevisionShipped(ctx: PostconditionContext): Promise<
   const paths = changed.stdout.split('\n').map((path) => path.trim()).filter(Boolean);
   const outside = paths.filter((path) => !pathIsShippingRecord(path));
   if (outside.length > 0) {
-    return { ok: false, detail: `HEAD changed outside the tested revision in ${outside.join(', ')}` };
+    const named =
+      outside.length > NAMED_FILES_CAP
+        ? `${outside.slice(0, NAMED_FILES_CAP).join(', ')} … and ${outside.length - NAMED_FILES_CAP} more`
+        : outside.join(', ');
+    const drift = await baseMovedUnderTest(ctx, attestation);
+    if (drift) {
+      return {
+        ok: false,
+        // NOT the same failure as "the agent edited code after the tests ran", and it must not read
+        // like one: the remedy lives in an EARLIER step. Re-running this one cannot change the
+        // comparison, because the merge is precisely what the shipping revision has to contain —
+        // so `retryMax: 0` spends no agent turn on an attempt that is arithmetically unable to pass.
+        detail:
+          `the tests attested a revision this HEAD has moved past: ${drift} merged in after the attestation, `
+          + `changing ${plural(outside.length, 'file')} (${named}). Re-run the tests on the MERGED tree.`,
+        retryMax: 0,
+      };
+    }
+    return { ok: false, detail: `HEAD changed outside the tested revision in ${named}` };
   }
   return { ok: true, detail: `HEAD preserves the tested tree; only record paths changed after the test attestation` };
+}
+
+/**
+ * Did the BASE move under the tested revision, or did the agent edit code after testing?
+ *
+ * The two are indistinguishable in a tree diff and have opposite remedies, which is how a run that
+ * had ALREADY pushed its work died anyway (`872b396a`, 2026-08-29: `commit-push` merged `origin/main`
+ * to ship onto a base that six concurrent runs were moving, and the gate read the 38 files the merge
+ * brought in as untested edits). Merging the base before shipping is not optional on a busy `main`,
+ * so a gate that treats it as tampering is a guaranteed run-killer rather than a safety property.
+ *
+ * Answers with a phrase naming the distance when — and only when — `origin/<base>` is contained in
+ * HEAD now and was NOT contained in the revision the tests ran against. That asymmetry is the whole
+ * signal: it is true exactly for "upstream arrived after my tests" and false for an edit, a
+ * cherry-pick, or a base that was already merged when the suite ran.
+ *
+ * This does NOT weaken the gate — it still fails, and the merged tree still has to be tested before
+ * anything ships. It changes only WHICH step is asked to fix it. Every probe failing reads as "not
+ * base drift", so an unresolvable ref degrades to the original strict verdict rather than to a pass.
+ */
+async function baseMovedUnderTest(
+  ctx: PostconditionContext,
+  attestation: NonNullable<PostconditionContext['attestation']>,
+): Promise<string | undefined> {
+  const testedHead = attestation.headSha;
+  if (!testedHead) return undefined;
+  const base = ctx.baseBranch ?? 'main';
+  const remoteRef = `refs/remotes/origin/${base}`;
+  const remote = await git(ctx.cwd, ['rev-parse', '--verify', remoteRef]);
+  if (!remote.ok) return undefined;
+  const inHead = await git(ctx.cwd, ['merge-base', '--is-ancestor', remoteRef, 'HEAD']);
+  if (!inHead.ok) return undefined;
+  const wasAlreadyTested = await git(ctx.cwd, ['merge-base', '--is-ancestor', remoteRef, testedHead]);
+  if (wasAlreadyTested.ok) return undefined;
+  const count = await git(ctx.cwd, ['rev-list', '--count', `${testedHead}..${remoteRef}`]);
+  const moved = count.ok ? Number(count.stdout.trim()) : Number.NaN;
+  return Number.isFinite(moved) && moved > 0
+    ? `${plural(moved, `origin/${base} commit`)}`
+    : `origin/${base} commits`;
 }
 
 /** Verify that the current revision has landed on the configured base when auto-merge is on. */
