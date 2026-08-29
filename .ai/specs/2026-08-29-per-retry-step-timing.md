@@ -1,5 +1,29 @@
 # Retry Step Timing
 
+**Status:** **SUPERSEDED 2026-08-29 by `main`'s independently-landed
+`.ai/specs/2026-08-29-step-retry-timing.md`.** This branch (`cez/6ed5bc42`) built the same
+feature — per-retry attempt times plus an aggregated step total in the tree UI — from the
+same original request, in parallel with another task. `main` shipped its version first:
+commit `20690834` ("feat: aggregate step retries into total time, show each retry in tree
+UI", 2026-08-29 14:06:36Z), merged to `origin/main` as `a560b873`, closed
+Implemented/QA-Needed at `2095597b` (15:24:36Z). This branch's own commit, `278e0691`
+("feat: track per-retry step attempt timing in tree UI"), landed over 3 hours later
+(17:37:47Z), against a differently-scoped `attempts[]`/tree-UI-total design reviewed
+independently below.
+
+Landing step 7 (`Workflow: land the change`) found real, non-mechanical conflicts against
+`main` in `store.ts`, `store.test.ts`, `runs.ts`/`runs.test.ts`, `step-timing.ts`,
+`step-rail.tsx`/`step-rail.test.tsx`, and this spec's counterpart — not a stale-branch
+rebase, but two independent implementations of the same feature. Forcing a merge would
+either duplicate the mechanism or silently discard one side's tests, so this branch was
+**left unmerged, parked at `278e0691`, pushed to `origin/cez/6ed5bc42` only** — `main` is
+already correct and untouched. If a future session wants the union of both designs (this
+branch also adds the `retry-step-timing.e2e.ts` Playwright fixture main's version lacks),
+diff the two `store.ts`/`step-timing.ts`/`step-rail.tsx` changes by hand; don't re-attempt
+an automatic merge.
+
+Original text, kept for the record below.
+
 **Status:** SPEC, written 2026-08-29 by step 2 of run `6ed5bc42-b99d-4f6d-a346-de794980718c`
 (`spec-to-deploy`). Not implemented. No file outside this one was changed by the spec step, which
 matters for §Phase 3: the two in-place corrections this spec calls for (spec
