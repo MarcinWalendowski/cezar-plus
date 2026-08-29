@@ -252,6 +252,10 @@ export async function resolvePoolForDispatch(options: {
    *  account never enters `selectPoolAccount`'s candidate set at all — never selected, never even
    *  the limited-but-least-bad fallback. */
   tier?: (profile: ResolvedAgentProfile) => AccountTier;
+  /** When the workspace is locked to a provider (`.ai/specs/2026-08-29-global-provider-toggle.md`,
+   *  D5), candidates are confined to it — the pool still balances ACCOUNTS, it just may no longer
+   *  hop providers. Absent ⇒ today's wildcard behaviour. */
+  lock?: ProviderId;
 }): Promise<PoolChoice | undefined> {
   try {
     const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
@@ -265,7 +269,13 @@ export async function resolvePoolForDispatch(options: {
     );
     if (route.kind !== 'pool') return undefined;
     const tierOf = options.tier ?? (() => 'runnable' as const);
-    const all = poolCandidates(route, listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS));
+    // `options.lock`, never `route.provider` — same narrowing rule as `resolvePoolForProvider`'s
+    // own comment: a locked wildcard must not hop providers, and reading the route's own provider
+    // instead of the lock would defeat the narrowing on a bare `pool:*`.
+    const all = poolCandidates(
+      options.lock ? { kind: 'pool', provider: options.lock } : route,
+      listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS),
+    );
     const skipped = all.filter((profile) => tierOf(profile) === 'disconnected');
     const candidates = all.filter((profile) => tierOf(profile) !== 'disconnected');
     const chosen = selectPoolAccount({
@@ -311,7 +321,11 @@ export async function resolvePoolForDispatch(options: {
  * reached this function. That is deliberately narrower than `resolvePoolForDispatch`, which honours
  * the wildcard because the run made no such promise.
  *
- * **This does NOT decide todo `81ab4ebd`.** That question is whether a *run's* explicit runner
+ * **This does NOT decide todo `81ab4ebd`, and that is now true only when no global lock is set.**
+ * CORRECTED 2026-08-29 (`.ai/specs/2026-08-29-global-provider-toggle.md`): under a `runnerLock`
+ * that question IS decided — the lock narrows `resolvePoolForDispatch`'s own wildcard too (D5) —
+ * but this function's own scope claim stands for the unlocked case, which is what the original
+ * sentence below still describes. That question is whether a *run's* explicit runner
  * should constrain a wildcard pool, and it stays open. The narrowing here is scoped to a step whose
  * provider is already fixed by its own pin, which is a different claim.
  *

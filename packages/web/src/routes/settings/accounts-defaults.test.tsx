@@ -77,6 +77,7 @@ function serve({
   const state: WorkspaceConfigResponse = {
     browseRoot: '~/',
     projectsDir: '~/cezar/projects',
+    runnerLock: null,
     composerDefaults: {
       autonomous: null,
       worktree: null,

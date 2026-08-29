@@ -111,13 +111,20 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
   // turned it off back to on), but it no longer only means "out of quota": the same switch now
   // also governs whether a task reroutes off an account that is simply logged out.
   const accountFallback = config.resources.fallbackAcrossAccountsWhenLimited ?? true
+  // `.ai/specs/2026-08-29-global-provider-toggle.md` D3c: an active `runnerLock` turns this
+  // ladder ON regardless of what the control below says — the setting and the lock answer two
+  // different questions, and only one is being asked while a lock is set. So the OFF toast must
+  // not promise a wait the lock will not let happen.
+  const runnerLock = config.runnerLock
   const saveAccountFallback = (on: boolean) => save.mutate(
     { resources: { fallbackAcrossAccountsWhenLimited: on } },
     {
       onSuccess: () => toast(
         on
           ? 'Tasks will start on any available account when the chosen one is out of quota or logged out'
-          : 'Tasks will wait for the account they were given if it is only out of quota — a logged-out account still needs you to sign back in',
+          : runnerLock
+            ? 'Tasks will wait for the account they were given if it is only out of quota — a logged-out account still needs you to sign back in. While the global engine lock is set, this has no effect: tasks still move to another account rather than wait.'
+            : 'Tasks will wait for the account they were given if it is only out of quota — a logged-out account still needs you to sign back in',
       ),
     },
   )
@@ -288,6 +295,12 @@ function ResourcesForm({ config }: { config: WorkspaceConfigResponse }) {
           The task's thread always records which account it actually ran on, and the engine picker
           says the choice is a preference while this is on.
         </p>
+        {runnerLock ? (
+          <p data-slot="resources-account-fallback-lock-note" className="text-[11px] text-soft-foreground">
+            The global engine lock ({runnerLock}) overrides this setting while it is set: tasks
+            always move to another account when the one they were given is unusable.
+          </p>
+        ) : null}
       </SettingsField>
 
       <SettingsField

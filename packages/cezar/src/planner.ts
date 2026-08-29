@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import type { LockableRunner } from '@loki-labs/better-cezar-contract';
 import { createRunner } from './core/runner-factory.ts';
 import type { ProviderId } from './core/provider-auth.ts';
 import { loadConfig } from './config.ts';
@@ -80,6 +81,15 @@ export async function planChain(
    * every existing caller and test is unaffected.
    */
   chooseAccount?: (repoRoot: string, preferred: ProviderId) => Promise<PlannerAccountChoice | undefined>,
+  /** The global provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D4c). Preferred
+   *  over `config.defaultRunner` for BOTH the chooser's preferred provider and the no-chooser
+   *  fallback — a value, not an accessor, because the caller (the `/plan` route) is already inside
+   *  one request and holds a snapshot; a live accessor here would let the provider change between
+   *  the gate's answer and this call, which is the two-reads bug D4b's "one snapshot per decision"
+   *  rule forbids. The chooser's own candidate set must ALSO come from the locked provider (built by
+   *  `requirementForPlanner`, wired at the `/plan` route) — this parameter alone gives nothing if
+   *  the candidates it chooses from were never narrowed. */
+  runnerLock?: LockableRunner,
 ): Promise<PlanResult> {
   const [skills, config, verifyCommands] = await Promise.all([
     discoverSkills(repoRoot),
@@ -92,9 +102,11 @@ export async function planChain(
   // Plan with the account the chooser picked, or the configured default runner when there is no
   // chooser (or it found nothing runnable). `plannerModel` ("sonnet") is a Claude alias, so only
   // pass it when the CHOSEN provider is Claude, not when the configured default merely is — Codex
-  // / OpenCode pick their own default model instead.
-  const choice = await chooseAccount?.(repoRoot, config.defaultRunner);
-  const provider = choice?.provider ?? config.defaultRunner;
+  // / OpenCode pick their own default model instead. The lock, when set, wins over the project's
+  // own `config.defaultRunner` at both the preference handed to the chooser and the no-chooser
+  // fallback, exactly as every other D4/D4c site prefers it.
+  const choice = await chooseAccount?.(repoRoot, runnerLock ?? config.defaultRunner);
+  const provider = choice?.provider ?? runnerLock ?? config.defaultRunner;
   const runner = createRunner(provider);
   const plannerModel = provider === 'claude' ? config.plannerModel : undefined;
   // Plan under the SAME agent account this project's tasks run on (spec

@@ -1082,6 +1082,7 @@ async function runCommand(
     fallback,
     overrideAgentProfile: undefined,
     fallbackAcrossAccountsWhenLimited: workspace.resources.fallbackAcrossAccountsWhenLimited,
+    runnerLock: workspace.runnerLock ?? undefined,
   });
   if (requirements.length > 0 && !providerAuthChecksDisabled()) {
     const discovered = await providerAuth.status();

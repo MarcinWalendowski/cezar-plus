@@ -563,12 +563,12 @@ describe('AppShell', () => {
       const slot = document.querySelector('[data-slot="banner-slot"]') as HTMLElement
       const main = screen.getByRole('main')
       const column = main.parentElement as HTMLElement
-      expect(column.className).toContain('grid-rows-[auto_auto_1fr_auto]')
+      expect(column.className).toContain('grid-rows-[auto_auto_auto_1fr_auto]')
       expect(slot.parentElement).toBe(column)
-      expect(slot.className).toContain('row-start-2')
+      expect(slot.className).toContain('row-start-3')
       // The scroller keeps the 1fr row, so the banner's height comes out of the shell's own
       // budget rather than making every `min-h-full` route overflow by exactly the banner.
-      expect(main.className).toContain('row-start-3')
+      expect(main.className).toContain('row-start-4')
     })
   })
 
@@ -793,8 +793,8 @@ describe('AppShell', () => {
       expect(slot.parentElement).toBe(main.parentElement)
 
       // Its own grid row, so it holds its space instead of sticking to the scroller's edge.
-      expect(slot.className).toContain('row-start-2')
-      expect(main.className).toContain('row-start-3')
+      expect(slot.className).toContain('row-start-3')
+      expect(main.className).toContain('row-start-4')
       expect(slot.className).not.toContain('sticky')
     })
   })

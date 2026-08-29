@@ -86,6 +86,8 @@ import {
   openProjectInSchema,
   updateProjectInputSchema,
   updateTodoInputSchema,
+  lockableRunnerSchema,
+  type LockableRunner,
 } from '@loki-labs/better-cezar-contract';
 import { detectEnvironment } from '../core/backend-detect.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
@@ -179,6 +181,7 @@ import {
   type WorkspaceConfig,
   type WorkspaceProject,
 } from '../workspace/config.ts';
+import { appendAnalyticsEvent } from '../workspace/analytics-log.ts';
 import {
   CONTROL_CHARS_RE,
   DEFAULT_AGENT_ACCOUNT_ID,
@@ -869,6 +872,8 @@ export interface WorkspaceConfigResponse {
     reviewGate: boolean | null;
     stepBudget: number | null;
   };
+  /** The global provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`). `null` = Auto. */
+  runnerLock: LockableRunner | null;
 }
 
 // ---- workspace SSE (multi-project spec, step 2.8) --------------------------
@@ -1740,22 +1745,31 @@ export function createApp(deps: ServerDeps) {
   const planAccountGate = async (
     repoRoot: string,
     defaultRunner: ProviderId,
-  ): Promise<{ error: string; runnable?: undefined } | { error: null; runnable: readonly ResolvedAgentProfile[] }> => {
-    const known = await providerStatus();
-    const cheapMessage = unavailableProviderMessage([defaultRunner], known);
-    if (cheapMessage !== null) {
-      const disabled = known.providers.find((row) => row.provider === defaultRunner)?.enabled === false;
-      if (disabled) return { error: cheapMessage };
-    }
-    const [accounts, workspace] = await Promise.all([
+  ): Promise<
+    | { error: string; runnable?: undefined; runnerLock?: undefined }
+    | { error: null; runnable: readonly ResolvedAgentProfile[]; runnerLock: LockableRunner | undefined }
+  > => {
+    const [known, accounts, workspace] = await Promise.all([
+      providerStatus(),
       loadAgentAccounts().catch(() => defaultAgentAccountStore()),
       workspaceConfig.load(),
     ]);
+    // D4b(2): the cheap disabled-provider short-circuit sits OUTSIDE `requirementForPlanner` and
+    // must be handed the lock too — otherwise a workspace locked to a viable provider is refused
+    // at the door because the OVERRIDDEN `defaultRunner` happens to be disabled.
+    const lock = workspace.runnerLock ?? undefined;
+    const effectiveRunner = lock ?? defaultRunner;
+    const cheapMessage = unavailableProviderMessage([effectiveRunner], known);
+    if (cheapMessage !== null) {
+      const disabled = known.providers.find((row) => row.provider === effectiveRunner)?.enabled === false;
+      if (disabled) return { error: cheapMessage };
+    }
     const requirement = requirementForPlanner(
       defaultRunner,
       accounts,
       repoRoot,
       workspace.resources.fallbackAcrossAccountsWhenLimited,
+      lock,
     );
     const evaluate = async (rows: ProviderStatusResponse) => {
       const input = await loadViabilityInput(repoRoot, providerAuth, {
@@ -1773,7 +1787,9 @@ export function createApp(deps: ServerDeps) {
       viability = await evaluate(fresh);
       runnable = viability.requirements[0]?.runnable ?? [];
     }
-    return runnable.length > 0 ? { error: null, runnable } : { error: plannerRefusalMessage(viability) };
+    return runnable.length > 0
+      ? { error: null, runnable, runnerLock: lock }
+      : { error: plannerRefusalMessage(viability) };
   };
   const openTerminal = deps.openTerminal ?? openInTerminal;
   const openFile = deps.openFile ?? openFileInDefaultApp;
@@ -2807,6 +2823,7 @@ export function createApp(deps: ServerDeps) {
       fallback,
       overrideAgentProfile: body.agentProfile,
       fallbackAcrossAccountsWhenLimited: workspace.resources.fallbackAcrossAccountsWhenLimited,
+      runnerLock: workspace.runnerLock ?? undefined,
     });
     const blocked = await providerActionError(requirements, root);
     if (blocked) return { error: blocked, status: 409 };
@@ -2883,15 +2900,32 @@ export function createApp(deps: ServerDeps) {
         const provider = { data: c.req.valid('param').provider };
         const body = { data: c.req.valid('json') };
         let workspace: WorkspaceConfig;
+        // D10 (`.ai/specs/2026-08-29-global-provider-toggle.md`): disabling the currently-locked
+        // provider clears the lock to Auto in the SAME write, so the two never disagree.
+        let lockCleared = false;
         try {
           workspace = await workspaceConfig.mergeWrite((config) => {
             const disabled = new Set(config.disabledProviders);
             if (body.data.enabled) disabled.delete(provider.data);
             else disabled.add(provider.data);
             config.disabledProviders = PROVIDER_IDS.filter((id) => disabled.has(id));
+            if (!body.data.enabled && config.runnerLock === provider.data) {
+              delete config.runnerLock;
+              lockCleared = true;
+            }
           });
         } catch {
           return c.json({ error: 'Provider preference could not be saved.' }, 500);
+        }
+        // D7 #3: this route previously called no `refresh()` at all, so a cleared lock left the
+        // run loop pinning a now-disabled provider from a stale in-memory snapshot until something
+        // unrelated happened to call `refresh()`.
+        if (lockCleared) {
+          await deps.semaphore?.refresh();
+          void appendAnalyticsEvent({
+            name: 'settings.runner_lock_set',
+            props: { runner: 'auto', previous: provider.data, source: 'provider-disabled' },
+          });
         }
         const result = await withPoolConnected(
           applyProviderEnablement(await providerAuth.status(), workspace.disabledProviders),
@@ -4553,6 +4587,9 @@ export function createApp(deps: ServerDeps) {
       reviewGate: config.projectDefaults.reviewGate ?? null,
       stepBudget: config.projectDefaults.stepBudget ?? null,
     },
+    // `null`-for-absent like `projectDefaults`, not the spread convention above: the tri-state
+    // (Auto/claude/codex) lives in the value, and the UI always renders one of the three.
+    runnerLock: config.runnerLock ?? null,
   });
   // ---- chained family: workspace settings + GUI prefs (workspace-level) ----
   const workspaceConfigRoutes = new Hono<ProjectApiEnv>()
@@ -4560,8 +4597,18 @@ export function createApp(deps: ServerDeps) {
 
     .put('/workspace/config', jsonZodValidator(() => workspaceConfigUpdateSchema), async (c) => {
       const parsed = { data: c.req.valid('json') };
-      const { browseRoot, projectsDir, composerDefaults, resources, agentDefaults, projectDefaults } =
+      const { browseRoot, projectsDir, composerDefaults, resources, agentDefaults, projectDefaults, runnerLock } =
         parsed.data;
+      // D10 (`.ai/specs/2026-08-29-global-provider-toggle.md`): locking to a disabled provider is
+      // refused before anything is persisted, the same shape as the rejected-root probes below.
+      let previousRunnerLock: LockableRunner | null = null;
+      if (runnerLock !== undefined) {
+        const beforeConfig = await loadWorkspaceConfig();
+        previousRunnerLock = beforeConfig.runnerLock ?? null;
+        if (runnerLock !== null && beforeConfig.disabledProviders.includes(runnerLock)) {
+          return c.json({ error: `cannot lock to ${runnerLock}: it is disabled` }, 400);
+        }
+      }
       for (const [configuredRoot, create] of [
         [browseRoot, false],
         [projectsDir, true],
@@ -4651,14 +4698,28 @@ export function createApp(deps: ServerDeps) {
               else tier[key] = value;
             }
           }
+          // `null` CLEARS the lock back to Auto (D7/D10 above already refused a disabled target).
+          if (runnerLock === null) delete config.runnerLock;
+          else if (runnerLock !== undefined) config.runnerLock = runnerLock;
         });
       } catch (err) {
         // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
         return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
       }
-      // A resource change takes effect WITHOUT a restart: refresh the shared
-      // semaphore's in-memory snapshot and pump every manager (step 2.5's hook).
-      if (resources !== undefined) await deps.semaphore?.refresh();
+      // A resource OR lock change takes effect WITHOUT a restart: refresh the shared semaphore's
+      // in-memory snapshot and pump every manager (step 2.5's hook, widened by D7 #2 — a lock-only
+      // body must not be a silent no-op on the running loop).
+      if (resources !== undefined || runnerLock !== undefined) await deps.semaphore?.refresh();
+      if (runnerLock !== undefined) {
+        void appendAnalyticsEvent({
+          name: 'settings.runner_lock_set',
+          props: {
+            runner: runnerLock ?? 'auto',
+            previous: previousRunnerLock ?? 'auto',
+            source: 'workspace-config-put',
+          },
+        });
+      }
       return c.json(workspaceConfigBody(written));
     })
 
@@ -4735,6 +4796,9 @@ export function createApp(deps: ServerDeps) {
           .optional(),
       })
       .optional(),
+    // `null` CLEARS the lock back to Auto — see setWorkspaceConfigInputSchema for the full
+    // rationale (`.ai/specs/2026-08-29-global-provider-toggle.md`).
+    runnerLock: lockableRunnerSchema.nullable().optional(),
   });
   // ---- chained family: filesystem browse (workspace-level) ----
   const fsBrowseRoutes = new Hono<ProjectApiEnv>()
@@ -4941,7 +5005,7 @@ export function createApp(deps: ServerDeps) {
         const { env } = await resolveProfileEnvForRoot(root, chosen.provider, chosen.isDefault ? undefined : chosen.id);
         return { provider: chosen.provider, profileId: chosen.isDefault ? undefined : chosen.id, env };
       };
-      return c.json(await planChain(repoRoot, parsed.data.task, chooseAccount));
+      return c.json(await planChain(repoRoot, parsed.data.task, chooseAccount, gate.runnerLock));
     });
 
   // ---- GitHub automations --------------------------------------------------
@@ -5558,6 +5622,7 @@ export function createApp(deps: ServerDeps) {
           currentRun,
           undefined,
           workspace.resources.fallbackAcrossAccountsWhenLimited,
+          workspace.runnerLock ?? undefined,
         );
         const blocked = await providerActionError([requirement], repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
@@ -5689,6 +5754,7 @@ export function createApp(deps: ServerDeps) {
         run,
         parsed.data.runner,
         workspace.resources.fallbackAcrossAccountsWhenLimited,
+        workspace.runnerLock ?? undefined,
       );
       const blocked = await providerActionError([requirement], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
@@ -5737,7 +5803,12 @@ export function createApp(deps: ServerDeps) {
       // onto the record before dispatch, so the record is stale for this one site
       // (`requirementForRetarget`'s own doc comment).
       const workspace = await workspaceConfig.load();
-      const requirement = requirementForRetarget(run, target, workspace.resources.fallbackAcrossAccountsWhenLimited);
+      const requirement = requirementForRetarget(
+        run,
+        target,
+        workspace.resources.fallbackAcrossAccountsWhenLimited,
+        workspace.runnerLock ?? undefined,
+      );
       const blocked = await providerActionError([requirement], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
 
@@ -6525,6 +6596,7 @@ export function createApp(deps: ServerDeps) {
           fallback,
           overrideAgentProfile: undefined,
           fallbackAcrossAccountsWhenLimited: workspace.resources.fallbackAcrossAccountsWhenLimited,
+          runnerLock: workspace.runnerLock ?? undefined,
         });
         const blocked = await providerActionError(requirements, repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);

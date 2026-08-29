@@ -24,7 +24,10 @@ let requests: Array<{ method: string; url: string; body?: unknown }> = []
 
 /** Returns the served state so a case can mutate it — `delete`, notably, which is how "the server
  *  omits this key" is expressed and is not reachable through the `resources` argument. */
-function serve(resources: Partial<WorkspaceConfigResponse['resources']> = {}): WorkspaceConfigResponse {
+function serve(
+  resources: Partial<WorkspaceConfigResponse['resources']> = {},
+  runnerLock: WorkspaceConfigResponse['runnerLock'] = null,
+): WorkspaceConfigResponse {
   requests = []
   const state: WorkspaceConfigResponse = {
     agentDefaults: {},
@@ -37,6 +40,7 @@ function serve(resources: Partial<WorkspaceConfigResponse['resources']> = {}): W
       inheritedAutonomous: 'source-dependent',
       inheritedWorktree: true,
     },
+    runnerLock,
     resources: {
       maxParallel: 2,
       maxMonitoringSessions: 2,
@@ -256,6 +260,51 @@ describe('Global settings → Resources', () => {
 
     await waitFor(() => expect(puts()).toHaveLength(1))
     expect(puts()[0]?.body).toEqual({ resources: { fallbackAcrossAccountsWhenLimited: false } })
+  })
+
+  /**
+   * D3c (`.ai/specs/2026-08-29-global-provider-toggle.md`): an active `runnerLock` overrides
+   * this setting while it is set, so the pane must say so — and the OFF toast must not promise a
+   * wait the lock will not let happen. Both halves matter: a note that is always on is as wrong
+   * as one that is never on.
+   */
+  it('shows no lock-override note when runnerLock is null', async () => {
+    serve()
+    renderResources()
+    await waitFor(() => expect(accountFallback()).not.toBeNull())
+    expect(document.querySelector('[data-slot="resources-account-fallback-lock-note"]')).toBeNull()
+  })
+
+  it('shows the lock-override note when runnerLock is set', async () => {
+    serve({}, 'claude')
+    renderResources()
+    await waitFor(() => expect(accountFallback()).not.toBeNull())
+    expect(document.querySelector('[data-slot="resources-account-fallback-lock-note"]')).not.toBeNull()
+    expect(screen.getByText(/global engine lock \(claude\) overrides this setting/)).not.toBeNull()
+  })
+
+  it('does not promise a wait in the OFF toast while a lock is set', async () => {
+    serve({}, 'codex')
+    renderResources()
+    await waitFor(() => expect(accountFallback()).not.toBeNull())
+
+    fireEvent.change(accountFallback()!, { target: { value: 'off' } })
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(await screen.findByText(/this has no effect: tasks still move to another account/)).not.toBeNull()
+  })
+
+  it('keeps the ordinary OFF toast wording when unlocked', async () => {
+    serve()
+    renderResources()
+    await waitFor(() => expect(accountFallback()).not.toBeNull())
+
+    fireEvent.change(accountFallback()!, { target: { value: 'off' } })
+    await waitFor(() => expect(puts()).toHaveLength(1))
+    expect(
+      await screen.findByText(
+        'Tasks will wait for the account they were given if it is only out of quota — a logged-out account still needs you to sign back in',
+      ),
+    ).not.toBeNull()
   })
 
   it('renders and saves New task On/Off/Inherit policy', async () => {
