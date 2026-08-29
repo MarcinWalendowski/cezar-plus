@@ -181,34 +181,55 @@ Executed 2026-08-29.
 10. **S8**: with the ref declaring `activate` and **both** working trees stale, the launch still
     happens — and each working-tree read is asserted empty in the same test, so the pass can only
     have come from the ref. **Mutation-checked**: dropping the ref read → red.
-11. **Production E2E, round 2 — pending.** Acceptance unchanged: one press, the card reading
-   "deploying … now", a new release under `/opt/cezar-releases/`, every park clearing on the restart
-   with no second press.
+11. **Production E2E, round 2 — PASSED 2026-08-29T17:25Z.** The owner pressed Resolve on a parked
+    run and the button ran the deployment itself. Evidence is the activation log the feature
+    writes, `\.ai/cezar/activations/activate-c0a1b7d1-….log` (27 KB, `cezar:cezar`), which ends:
 
-**S7 — `server-deploy`'s own re-exec, fixed too** *(2026-08-29, on the owner's instruction; it was
-first recorded here as a known gap).* The shared deploy path had the same unwritable-log defect and
-a worse reporting one:
+    ```
+      Deploy complete.
+      link:     /opt/cezar → /opt/cezar-releases/20260829T172513Z-0a46010b
+    ==> waiting for readiness
+    ==> live: 0a46010b… == origin/main. Done.
+    ```
 
-- `deployLogPath` hardcoded `/var/log/cezar`. It is now resolved: `pickDeployLogDir` takes the first
-  candidate the deployer can create (`/var/log/cezar`, then `~/.cezar/deploy-logs`, then the temp
-  dir), memoized per process since the answer depends only on the uid. `readDeployLog` tries **every**
-  candidate, because a log written by a root deployer and one written by the service account land in
-  different directories and `--follow` on the wrong one reports an empty deploy.
-- `ReleaseDeployHost.spawnDetached` returned `void`, so `runReleaseDeploy` answered
-  `{ ok: true, detachedUnit }` whether or not a unit existed. It now returns `{ ok, error? }` —
-  implemented with `spawnSync` for `systemd-run`, which returns once the unit is registered — and a
-  failed handoff is reported as a failure. Nothing has been staged or flipped at that point, so
-  failing there is both safe and honest; the previous behaviour turned "the unit never started" into
-  something indistinguishable from a hung deploy.
+    So the whole chain works from a click: lock taken, unit registered under `systemd-run` with a
+    writable log, build, blue-green cutover, readiness wait. The two defects that made the first
+    attempt launch nothing silently — the missing user bus and the unwritable `/var/log/cezar`
+    append target — are gone from the path a press actually takes.
 
-**S8 — the fallback declaration is read from a REF, not the project root's working tree** *(same
-instruction).* S2a's fallback was weak on the one box it was written for: the project root there is
-the shared checkout task worktrees fork from, and nothing pulls it — `activate-main.sh` refuses to
-`reset --hard` it by design, and agents fetch without pulling. Measured 2026-08-29: **22 commits
-behind `origin/main` with 4 dirty files.** The lookup is now worktree → `git show origin/<base>:…`
-→ project-root working tree. The ref is current the moment anything fetched and is unaffected by
-dirty files, and it matches how worktrees already choose their base (`resolveBaseRef` prefers
-`origin/<base>` when the local branch is behind), rather than inventing a third answer.
+    One honest caveat on the same press: the commit it shipped, `0a46010b`, was itself broken (see
+    below). That is not this feature's doing — Resolve deploys `origin/main`, and `origin/main` was
+    red. It is, though, the reason the run did not clear: a deploy can only make the probe green if
+    the run's own HEAD is in what was deployed.
 
-Note what did **not** need fixing: new task worktrees were never affected by the stale checkout,
-because `resolveBaseRef` already forks from `origin/<base>`.
+## Two things this deploy round found, recorded because neither is about this feature
+
+**A clean merge of two correct trees shipped a file that cannot run.** `origin/main` at `0a46010b`
+threw `ReferenceError: FiledDetailDialog is not defined` on every Filed board render.
+`d15e26f9` had replaced the detail DIALOG with a detail PAGE, removing the component and its only
+use; the composer-dispatch branch was cut before that and still carried both. The two edits sat far
+apart in the file, so `33ea5803` merged them independently and without conflict — keeping main's
+**deletion of the definition** and the branch's **use of it**. Neither parent is broken. That is the
+shape worth remembering: a merge can produce a defect that exists in no commit being merged, so a
+gate on either branch is structurally incapable of catching it. Only gating the merged tree can.
+
+It was pushed with a red gate: the full suite on `0a46010b` fails **109** tests, six of them naming
+the missing symbol directly. Fixed in `dc0b5dde` by restoring `FiledBoardBody` to its `d66a25ee`
+shape — the entire 98-line difference was the resurrected dialog and one comment reword, so nothing
+legitimate was lost. Verified on the box with a control: the exact bundle the browser's stack trace
+named, `index-Ca0jfg1H.js`, contains `FiledDetailDialog`; the now-served `index-Bgn8T_Ac.js` contains
+zero occurrences.
+
+**A run can park on `deploy` with work that was never pushed, and no deploy can clear it.** Run
+`265c2695` sat `waiting` across three correct activations. Its steps read `commit-push: failed`,
+`merge: done` — so its code landed, and then `document` committed two more (`.ai/specs/…`,
+`CHANGELOG.md`) that the failed `commit-push` never pushed. Its worktree HEAD `413cadb0` was
+therefore genuinely absent from `origin/main`, and the probe was right every time it said so.
+Activating harder was never going to help. Resolved by pushing the branch and merging those two
+doc commits.
+
+This is the base-drift failure of `.ai/specs/2026-08-29-base-drift-rewinds-to-retest.md` seen from
+its far end: the fix there stops the run dying at `commit-push`, which stops this park from being
+created. The residue is that runs parked *before* that fix shipped still need their unpushed tail
+landed by hand — the fix cannot reach a run that already failed, the same way
+`2026-08-29-resolve-button-red-recheck.md` records for the probe.
