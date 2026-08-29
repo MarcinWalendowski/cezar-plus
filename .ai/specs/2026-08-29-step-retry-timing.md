@@ -1,9 +1,24 @@
 # Per-retry step timing
 
-- **Status:** Specified, not implemented. Written 2026-08-29 by step 2 of run
+- **Status:** **CORRECTED 2026-08-29 (same run) — implemented, not "not implemented."** All three
+  phases (P1 store-owned `attempts[]`, P2 cumulative `stepElapsed`, P3 `StepRow` breakdown UI +
+  the `step.attempts_expanded` analytics event) are built and gate-tested: `npm run typecheck`
+  green, targeted suites green (`store.test.ts`, `run.test.ts`'s two new engine cases,
+  `step-timing.test.ts`, `step-rail.test.tsx`, `live-duration.test.tsx`, `analytics.test.ts`), all
+  9 Verification-4b negative controls reverted-and-confirmed-red then restored, and the full repo
+  suite green post-merge (`packages/web` 4179/4179, `packages/cezar` 7824 passed/4 skipped/0
+  failed). Committed as `20690834` ("feat: aggregate step retries into total time, show each retry
+  in tree UI"), merged with `origin/main` as `a560b873` (dropping this branch's own
+  `postAnalyticsEvents`/`analytics.ts` duplicate in favour of origin's already-converged canonical
+  sink; `step-rail.tsx`'s one `track()` call site is compatible with it), and pushed to
+  `origin/main` (fast-forward). **QA Needed, not Done:** Verification 5, the Playwright runtime
+  E2E against `/tasks/:id`, has not been executed — tracked as todo
+  `da65120d-670e-47e0-baf8-ddbef6ab0bd4`. Do not close that todo or call this spec Done until it
+  has actually run. Original text, kept for the record below.
+  ~~Specified, not implemented. Written 2026-08-29 by step 2 of run
   `872b396a-0672-4e05-a806-e83c4e5c4743` (`spec-to-deploy`), from the brief left by step 1 at
   `.ai/specs/briefs/2026-08-29-step-retry-timing.md`. Nothing below has been built, tested or
-  deployed.
+  deployed.~~
 - **REVISED 2026-08-29 after review**, in the same run. The first draft's design would have
   shipped wrong numbers, and the changes are load-bearing rather than editorial — each is marked
   *"Corrected during review"* in the section it lands in, with the withdrawn claim left visible
@@ -1383,9 +1398,10 @@ failure; the artifacts are what survive.
 
 **Until step 5 has actually been executed, this ships as QA Needed, not Done** — and if the
 executing step has no browser available, it must say so plainly and carry the visual pass as an
-open todo rather than rounding up. That is exactly the residual the parent durations spec is still
-carrying (`.ai/specs/2026-08-20-step-and-tool-call-durations.md` §Status, todo
-`1f74df2b-9428-4e84-a983-870b00cbdcf2`); do not repeat it silently.
+open todo rather than rounding up. **Done: filed as todo `da65120d-670e-47e0-baf8-ddbef6ab0bd4`**
+by the document step (2026-08-29), the same way the parent durations spec still carries its own
+open visual pass as todo `1f74df2b-9428-4e84-a983-870b00cbdcf2`
+(`.ai/specs/2026-08-20-step-and-tool-call-durations.md` §Status); do not repeat it silently.
 
 **6. Deployment.** P1 touches `packages/cezar/src` and needs a service restart; P2 and P3 are
 web-only and are live on the next request after the asset swap. On `prod-host` the path is

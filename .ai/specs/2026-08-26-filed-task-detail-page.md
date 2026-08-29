@@ -25,7 +25,9 @@
   `BACKWARD_COMPATIBILITY.md` §1 (§2 already had the route, from `a04cda25` the same day). Phase 5
   (e2e) of THIS spec is unaffected and still did not land. Do **not** treat
   `notion-7bb302edff13` below as superseded: the dialog-only behaviour it records is still
-  exactly what ships today. Follow-up filed; see the KB note this correction points to.
+  exactly what ships today. **Follow-up filed 2026-08-29 by the step-retry-timing document
+  step: todo `23eecf5e-646b-4e07-87cb-dcddc2f518ca`** (Phases 1-3, the actual feature, still
+  unshipped) — the prior version of this sentence promised a follow-up without ever filing one.
 - **Date:** 2026-08-26
 - **Owner instruction:** "Open archived tasks as full pages". Clicking an archived Done filed
   task should navigate to a full-detail page instead of opening the existing modal.

@@ -33,6 +33,32 @@
   reasoning split — thinking is billed inside `output_tokens` — not because opus did not think.
   The same run recorded `blockCounts.thinkingWithheld` of 12, 21, 23 and 29 on those steps.
 
+- ⏱️ **A retried step's clock now shows every attempt, not just the last one** (spec
+  `.ai/specs/2026-08-29-step-retry-timing.md`, closing Risk R3 that
+  `.ai/specs/2026-08-20-step-and-tool-call-durations.md` had named and deferred). Before this,
+  `startedAt` was overwritten on every iteration, so a step retried 3 times showed only its final
+  attempt's duration under the `×3` badge — the other two attempts' time vanished from the rail
+  entirely.
+
+  - **The store now accumulates `StepState.attempts[]`** (`RunStore.updateStep`, three ordered
+    rules: an explicit close, a status-exit close, and an iteration-transition mint with an
+    upgrade-boundary guard so a step mid-flight when this ships never gains a partial array the UI
+    would misread). `RunStore.open({now})` takes an injectable clock.
+  - **The rail's clock is now cumulative**: `stepElapsed` sums every closed attempt plus any open
+    one, clamped so clock skew can never make the live total dip below the banked total.
+  - **The `×N` badge is now a disclosure**: expanding it shows a per-attempt breakdown
+    (`StepRow`/`StepAttempts`), each attempt's own start and duration. A pre-upgrade step with no
+    `attempts` key falls back to today's single-duration display, unchanged.
+  - **First real caller for the workspace analytics sink**: expanding the breakdown fires
+    `step.attempts_expanded`, paying down the `CEZ_ANALYTICS` documentation debt
+    (`.env.example`, README, `BACKWARD_COMPATIBILITY.md` §1) left open by
+    `.ai/specs/2026-08-26-filed-task-detail-page.md`.
+
+  Gates: `npm run typecheck` green; `packages/web` 4179/4179, `packages/cezar` 7824 passed / 4
+  skipped / 0 failed post-merge; all 9 Verification-4b negative controls reverted-and-confirmed-red
+  then restored. **QA Needed:** the spec's own Playwright runtime E2E (Verification 5) has not run
+  yet — tracked as todo `da65120d-670e-47e0-baf8-ddbef6ab0bd4`.
+
 ## ⚠️ Breaking
 
 - 🧭 **A workspace-scoped run routes work instead of doing it** (spec
