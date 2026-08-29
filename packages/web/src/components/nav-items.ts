@@ -93,7 +93,7 @@ export type NavItem = {
  *  there); it carries the `skills` gate again, so `CEZ_SKILLS=0` hides it — see `NavItem.skills`.
  */
 export const NAV_ITEMS: NavItem[] = [
-  { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'], badge: 'tasks-unread', workspaceTo: '/tasks' },
+  { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare', '/todos'], badge: 'tasks-unread', workspaceTo: '/tasks' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: 'inbox-count', inbox: true },
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'], workspaceTo: '/workspace/git' },
   { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true, automations: true },

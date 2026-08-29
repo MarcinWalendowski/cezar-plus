@@ -34,6 +34,14 @@ export function HandoffCard({ run }: { run: ApiRun }) {
      */
     onSuccess: (result) => {
       void invalidate()
+      // Three outcomes, not two. `activating` is ALSO `resolved: false` — the deploy was started
+      // and this page is about to drop while the server restarts — so reporting it in the danger
+      // tone would tell someone their click failed at the exact moment it worked.
+      if (result.activating) {
+        updateNote('')
+        toast(result.verdict || 'deploying now — the run resumes once the new build is live')
+        return
+      }
       if (!result.resolved) {
         toast(result.verdict || 'the deploy targets are still red — nothing was deployed', { tone: 'danger' })
         return

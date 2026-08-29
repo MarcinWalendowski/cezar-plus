@@ -105,6 +105,40 @@ describe('HandoffCard', () => {
     expect(notes.value).toBe('activated main at 12:40')
   })
 
+  /**
+   * The THIRD outcome, added when Resolve was wired to run the deployment (2026-08-29). It is also
+   * `resolved: false` — the run is still parked, and stays parked until the post-restart sweep
+   * re-probes it — so without reading `activating` the card reports a started deploy in the danger
+   * tone, telling the operator their click failed at the moment it worked.
+   */
+  it('a 200 that STARTED the deploy reads as progress, not as a refusal', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              resolved: false,
+              activating: true,
+              verdict: 'deploying cezar service (backend) now. This restarts the server',
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    )
+
+    renderCard(handoffRun())
+    const notes = screen.getByPlaceholderText('Optional note for the handoff record') as HTMLTextAreaElement
+    fireEvent.change(notes, { target: { value: 'deploying' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Resolve' }))
+
+    await waitFor(() => expect(screen.getByText(/deploying cezar service/)).toBeTruthy())
+    // Not the refusal copy — that string is what a red probe says, and it must not appear here.
+    expect(screen.queryByText(/still red — nothing was deployed/)).toBeNull()
+    // The note is consumed: the action was accepted, unlike a refusal.
+    expect(notes.value).toBe('')
+  })
+
   it('a 200 that resolves clears the note and says so', async () => {
     vi.stubGlobal(
       'fetch',
