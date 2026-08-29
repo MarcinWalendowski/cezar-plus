@@ -1,6 +1,15 @@
 # Filed task detail page
 
-- **Status:** Specified, not implemented. Nothing in this document has been executed yet.
+- **Status:** Implemented, QA Needed. **Corrected 2026-08-29 (same day, step 8 "Document the
+  decision")** — this read "Specified, not implemented" through step 2; that is now stale. Phases
+  1-4 (BROAD scope, including the Active/Backlog port folded in during the merge) landed in
+  `d15e26f9`, merged into `main` via PR #13 (`5c5de5eb`) at 2026-08-29T16:38:24Z, confirmed by
+  `git merge-base --is-ancestor` against `origin/main` and by `gh pr view 13` reporting
+  `state: MERGED`. `FiledDetailDialog` no longer exists anywhere in the tree. QA Needed, not Done,
+  for two reasons named in full in "Phase 5" and "Phase 6" below: no recorded runtime/production
+  browser E2E exists (this box has no ffmpeg and no Playwright), and Phase 6 item 4 (marking todos
+  `33bee966`/`12dc1ac0` done) needs a signed-in person and remains PENDING as of this writing —
+  `cezar todo list --project cezar --json` still prints `status: todo` for both.
 - **Date:** 2026-08-29
 - **Task:** `1909f34e-3560-4622-9178-72b7b9724944`, workflow `spec-to-deploy`, step 2 "Write the spec".
 - **Brief this was written against:** `.ai/specs/briefs/2026-08-29-open-archived-tasks-full-page.md`
