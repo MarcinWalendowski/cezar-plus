@@ -76,7 +76,6 @@ import {
   filedTaskKey,
   filedTasksExcludingFacet,
   filterFiledTasks,
-  parseFiledDetailKey,
   cycleFiledTableSort,
   filedAriaSort,
   selectedFiledEntries,
@@ -294,9 +293,12 @@ export function GlobalTasksRoute() {
   // source of truth means a refresh, a pasted link and the Back button all land on the same
   // filtered view, with no effect syncing two copies that can disagree.
   const [searchParams, setSearchParams] = useSearchParams()
-  // The board's own `location.search` carries the exact filtered view into Filed detail links.
+  // The board's own `location.search` — a Filed row's title link carries it forward so the
+  // detail page's back link restores the exact filtered view a click came from (Risk 1,
+  // `.ai/specs/2026-08-29-filed-task-detail-page.md`), rather than always bouncing to a bare
+  // `/tasks` that drops every URL-backed filter.
   const location = useLocation()
-  const { filters, groupBy, view, filedFilters, filedSort, filedActiveSort, filedBacklogSort, filedDetail } = React.useMemo(
+  const { filters, groupBy, view, filedFilters, filedSort, filedActiveSort, filedBacklogSort } = React.useMemo(
     () => urlStateFromSearchParams(searchParams),
     [searchParams],
   )
@@ -572,8 +574,6 @@ export function GlobalTasksRoute() {
           query={filters.query}
           filedFilters={filedFilters}
           filedSort={filedSort}
-          filedDetail={filedDetail}
-          onCloseDetail={() => commit((state) => ({ ...state, filedDetail: undefined }))}
           search={location.search}
           filedActiveSort={filedActiveSort}
           filedBacklogSort={filedBacklogSort}
@@ -739,8 +739,6 @@ function FiledTasks({
   query,
   filedFilters,
   filedSort,
-  filedDetail,
-  onCloseDetail,
   search,
   filedActiveSort,
   filedBacklogSort,
@@ -755,8 +753,6 @@ function FiledTasks({
   query: string
   filedFilters: FiledTaskFilters
   filedSort: FiledSort
-  filedDetail: string | undefined
-  onCloseDetail: () => void
   /** The board's own `location.search` — carried onto every title link's history state
    *  (Risk 1), so the detail page's back link can restore this exact filtered view. */
   search: string
@@ -768,66 +764,35 @@ function FiledTasks({
   onActiveSortChange: (sort: FiledTableSort) => void
   onBacklogSortChange: (sort: FiledTableSort) => void
 }) {
-  const todos = useWorkspaceTodos()
-  const nodeRoster = useTaskNodeRoster()
-  const start = useStartFiledTask()
-  const update = useUpdateFiledTodo()
-  const requested = React.useMemo(() => parseFiledDetailKey(filedDetail), [filedDetail])
-  const detail = React.useMemo(
-    () => (requested ? (todos.data?.todos ?? []).find((entry) => entry.project === requested.project && entry.todo.id === requested.todoId) ?? null : null),
-    [requested, todos.data],
-  )
-  const deepLink = filedDetail !== undefined
-  const detailSurface = todos.data !== undefined && deepLink && detail === null ? (
-    <section data-slot="filed-task-detail-missing" className="rounded-lg border border-border bg-card p-3 text-[12.5px] text-soft-foreground">
-      That task is no longer on this board.
-    </section>
-  ) : (
-    <FiledDetailDialog
-      entry={detail}
-      nodeRoster={nodeRoster}
-      onClose={onCloseDetail}
-      onStart={(entry) => start.mutate({ projectId: entry.project, todoId: entry.todo.id })}
-      onArchive={(entry, archived) => update.mutate({ entry, patch: { archived } })}
-      startPending={start.isPending}
-      archivePending={update.isPending}
-    />
-  )
   // The two splits COMPOSE (D1): the tab asks "has this left the live board", the Active/Backlog
   // partition asks "is it in flight or waiting". Only the live board is partitioned — an archived
   // `todo`-status row is dismissed work, not backlog, and a `done` row is neither.
   if (view === 'archived') {
     return (
-      <>
-        <FiledArchivedSection
-          view={view}
-          query={query}
-          filedFilters={filedFilters}
-          filedSort={filedSort}
-          search={search}
-          onToggleFacet={onToggleFacet}
-          onClearFacet={onClearFacet}
-          onSortChange={onSortChange}
-        />
-        {detailSurface}
-      </>
-    )
-  }
-  return (
-    <>
-      <FiledActiveSection
+      <FiledArchivedSection
+        view={view}
         query={query}
         filedFilters={filedFilters}
-        activeSort={filedActiveSort}
-        backlogSort={filedBacklogSort}
+        filedSort={filedSort}
         search={search}
         onToggleFacet={onToggleFacet}
         onClearFacet={onClearFacet}
-        onActiveSortChange={onActiveSortChange}
-        onBacklogSortChange={onBacklogSortChange}
+        onSortChange={onSortChange}
       />
-      {detailSurface}
-    </>
+    )
+  }
+  return (
+    <FiledActiveSection
+      query={query}
+      filedFilters={filedFilters}
+      activeSort={filedActiveSort}
+      backlogSort={filedBacklogSort}
+      search={search}
+      onToggleFacet={onToggleFacet}
+      onClearFacet={onClearFacet}
+      onActiveSortChange={onActiveSortChange}
+      onBacklogSortChange={onBacklogSortChange}
+    />
   )
 }
 

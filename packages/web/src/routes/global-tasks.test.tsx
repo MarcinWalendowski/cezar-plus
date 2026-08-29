@@ -2270,21 +2270,16 @@ describe('the Filed section', () => {
     })
   })
 
-  it('opens a Filed detail requested by the global deep link', async () => {
-    stubFetch({ todos: TODOS })
-    renderPage(createQueryClient(), '/tasks?fdetail=api%3Atodo-1')
-    const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).getByText('Add a rate limit to /checkout')).toBeTruthy()
-
-    fireEvent.click(within(dialog).getByRole('button', { name: /close/i }))
-    await waitFor(() => expect(search()).not.toContain('fdetail'))
-  })
-
-  it('shows a visible state for a Filed detail that no longer exists', async () => {
-    stubFetch({ todos: TODOS })
-    renderPage(createQueryClient(), '/tasks?fdetail=api%3Amissing')
-    expect(await screen.findByText('That task is no longer on this board.')).toBeTruthy()
-  })
+  /*
+   * REMOVED 2026-08-29 with the `FiledDetailDialog` resurrection they covered.
+   *
+   * Two tests lived here — a `?fdetail=` deep link opening a dialog, and its missing-row state.
+   * Both were written against the dialog that `.ai/specs/2026-08-29-filed-task-detail-page.md`
+   * replaced with a real detail PAGE. They arrived on a branch cut before that spec landed and
+   * came through the `33ea5803` merge asserting a component main had already deleted, so they
+   * could not pass on any tree that also carried the deletion. The detail page's own coverage is
+   * `filed-task-detail.test.tsx`; nothing is uncovered by dropping these.
+   */
 
 })
 
