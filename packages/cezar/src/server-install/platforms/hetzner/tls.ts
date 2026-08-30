@@ -285,7 +285,7 @@ export function createTlsStep(opts: TlsStepOptions): InstallStep {
       if (pkgs.length > 0) {
         ctx.ui.note(
           pkgs.map((a) => a.removeHint ?? a.name ?? '').filter(Boolean).join('\n'),
-          'Installed for cezar but possibly used elsewhere — remove manually if unwanted',
+          'Installed for cezar-plus but possibly used elsewhere — remove manually if unwanted',
         );
       }
       const hook = (created?.artifacts ?? []).find((a) => a.type === 'file' && a.path === RENEWAL_GUARD_HOOK_PATH);

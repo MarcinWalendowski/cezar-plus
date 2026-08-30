@@ -1,7 +1,7 @@
 import { Hono, type Context, type Next } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
-import { createInternalOrgInputSchema, type CreateInternalOrgResponse } from '@loki-labs/better-cezar-contract';
+import { createInternalOrgInputSchema, type CreateInternalOrgResponse } from '@loki-labs/cezar-plus-contract';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from '../server/validators.ts';
 import type { SessionResolver } from '../server/server.ts';
 import { IdentityStoreError, type IdentityStore } from '../auth/identity-store.ts';

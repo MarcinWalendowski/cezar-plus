@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import { REFERENCE_STATUS_MAX } from '@loki-labs/better-cezar-contract';
+import { REFERENCE_STATUS_MAX } from '@loki-labs/cezar-plus-contract';
 import { autosaveCommit } from '../../git-worktree.ts';
 import type {
   DraftPrInput,
@@ -2087,7 +2087,7 @@ export function buildPrBody(handoffText: string, task: string): string {
     .join('\n');
   const parts = ['## Goal', '', goal];
   if (progress) parts.push('', '## Progress log', '', progress);
-  parts.push('', '---', '', '🤖 made with cezar');
+  parts.push('', '---', '', '🤖 made with cezar-plus');
   return parts.join('\n');
 }
 

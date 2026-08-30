@@ -8,7 +8,7 @@ import {
   type ClusterJoinResponse,
   type ClusterProtocol,
   type StoredClusterNodeIdentity,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 
 /**
  * `cluster/enrollment.ts` (package 1.2, spec `.ai/specs/2026-08-22-multi-node-cezar-cluster.md`,
@@ -161,9 +161,9 @@ describe('hashEnrollmentCode / matchesEnrollmentCode', () => {
 describe('renderJoinCommands', () => {
   it('pins the hub version and embeds only the opaque code — the spec\'s exact shape', () => {
     const commands = renderJoinCommands({ code: 'cezj_abc', hubUrl: 'https://hub.example', hubVersion: '0.10.0' });
-    expect(commands.join).toBe('npx -y @loki-labs/better-cezar@0.10.0 cluster join cezj_abc');
+    expect(commands.join).toBe('npx -y @loki-labs/cezar-plus@0.10.0 cluster join cezj_abc');
     expect(commands.provision).toBe(
-      'npx -y @loki-labs/better-cezar@0.10.0 server-install --platform hetzner --role worker --join cezj_abc',
+      'npx -y @loki-labs/cezar-plus@0.10.0 server-install --platform hetzner --role worker --join cezj_abc',
     );
   });
 

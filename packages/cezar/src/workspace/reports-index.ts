@@ -1,5 +1,5 @@
 import { basename, join } from 'node:path';
-import type { WorkspaceProjectHealth } from '@loki-labs/better-cezar-contract';
+import type { WorkspaceProjectHealth } from '@loki-labs/cezar-plus-contract';
 import { KnowledgeStore } from '../knowledge/store.ts';
 import type { CatalogEntry } from '../knowledge/types.ts';
 

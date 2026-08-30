@@ -1,5 +1,5 @@
 import { useRemoveProject } from '@/api/queries'
-import type { ProjectListEntry } from '@loki-labs/better-cezar-api-client'
+import type { ProjectListEntry } from '@loki-labs/cezar-plus-api-client'
 import {
   AlertDialog,
   AlertDialogAction,

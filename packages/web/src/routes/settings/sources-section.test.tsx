@@ -8,7 +8,7 @@ import type {
   SourceProviderInfo,
   SourceProvidersResponse,
   SourcesListResponse,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { SourcesSection } from './sources-section'
 

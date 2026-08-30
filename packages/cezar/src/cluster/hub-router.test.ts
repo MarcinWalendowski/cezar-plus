@@ -21,7 +21,7 @@ import {
   type ClusterWelcomeFrame,
   type StoredClusterNode,
   type StoredClusterNodeIdentity,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { createHubFrameRouter, type HubDispatchCorrelationDeps, type HubReplicationDeps } from './hub-router.ts';
 import type { ClusterFrameReplies } from './link-server.ts';
 import type { HubOpOutcome } from './hub-ops.ts';

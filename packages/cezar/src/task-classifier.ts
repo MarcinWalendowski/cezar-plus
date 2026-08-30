@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { LockableRunner } from '@loki-labs/cezar-plus-contract';
 import { loadConfig } from './config.ts';
 import type { AgentRunner } from './core/agent-runner.ts';
 import type { RunnerId } from './core/agent-runner.ts';
@@ -101,6 +102,11 @@ export interface TaskClassification {
 export interface ClassifyTaskDeps {
   /** Injected by tests, on `NoteProcessor`'s precedent. */
   runnerFactory?: (backend: RunnerId) => AgentRunner;
+  /** The workspace provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D4c),
+   *  preferred over `config.defaultRunner`. A VALUE rather than an accessor because the caller is
+   *  already inside one dispatch decision and holds a snapshot; a live accessor here could answer
+   *  differently from the run it is classifying for. */
+  runnerLock?: LockableRunner;
 }
 
 /**
@@ -134,7 +140,9 @@ export async function classifyTask(
   }
 
   const config = await loadConfig(repoRoot);
-  const runnerId = config.defaultRunner;
+  // The lock beats the project default here for the same reason it does at dispatch: it is a
+  // setting, and a lock that leaves classification on the other provider is a lock with a hole.
+  const runnerId: RunnerId = deps.runnerLock ?? config.defaultRunner;
   const runner = (deps.runnerFactory ?? createRunner)(runnerId);
   const cheap = CHEAPEST_MODEL[runnerId];
   const { env } = await resolveProfileEnvForRoot(repoRoot, runnerId);

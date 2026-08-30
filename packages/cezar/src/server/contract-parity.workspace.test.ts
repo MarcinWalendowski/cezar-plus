@@ -11,7 +11,7 @@ import type {
   agentProfilesResponseSchema,
   openAgentAccountFileResponseSchema,
   removeAgentProfileResponseSchema,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type {
   fsBrowseResponseSchema,
   launchKeyResponseSchema,
@@ -19,8 +19,8 @@ import type {
   registerProjectResponseSchema,
   removeProjectResponseSchema,
   updateProjectResponseSchema,
-} from '@loki-labs/better-cezar-contract';
-import type { runsIndexResponseSchema } from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
+import type { runsIndexResponseSchema } from '@loki-labs/cezar-plus-contract';
 import type {
   configResponseSchema,
   openProjectInResponseSchema,
@@ -32,7 +32,7 @@ import type {
   uiStateSchema,
   workspaceConfigResponseSchema,
   workspaceUiStateSchema,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { AppType } from './app-type.ts';
 
 /**

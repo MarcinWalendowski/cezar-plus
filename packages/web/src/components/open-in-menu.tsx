@@ -24,7 +24,7 @@ import {
 } from 'lucide-react'
 import type { ReactNode } from 'react'
 
-import type { OpenTarget, Runner } from '@loki-labs/better-cezar-api-client'
+import type { OpenTarget, Runner } from '@loki-labs/cezar-plus-api-client'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,

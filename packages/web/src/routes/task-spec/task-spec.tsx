@@ -10,7 +10,7 @@ import type {
   PendingApproval,
   SpecReviewEntry,
   SpecReviewFeedResponse,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { cn } from '@/lib/utils'
 

@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { ClusterNodeId } from '@loki-labs/better-cezar-contract';
+import type { ClusterNodeId } from '@loki-labs/cezar-plus-contract';
 import { clusterHomeDir, type ClusterHomeOptions } from './node-identity.ts';
 import { assertCezarHomeWriteIsSandboxed } from '../paths.ts';
 

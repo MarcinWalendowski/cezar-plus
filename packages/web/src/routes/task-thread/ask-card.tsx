@@ -1,13 +1,13 @@
 import { useState } from 'react'
 
-import type { ApiRun } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun } from '@loki-labs/cezar-plus-api-client'
 import { Button } from '@/components/ui/button'
 import { Link } from '@/lib/project-router'
 import { cn } from '@/lib/utils'
 
 import { useAskAnswer } from './ask-answer'
 import type { ThreadAsk } from './thread-state'
-import type { UiAskQuestion } from '@loki-labs/better-cezar-api-client'
+import type { UiAskQuestion } from '@loki-labs/cezar-plus-api-client'
 
 /** Format one answered question the way the agent reads it back. */
 function formatAnswer(question: UiAskQuestion, labels: string[]): string {

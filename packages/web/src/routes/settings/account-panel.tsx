@@ -19,7 +19,7 @@ import { logout, probeAccountAvailable } from './account-api'
  * `visibleSettingsSections`'s three gates are synchronous and `capabilitiesSchema` deliberately
  * carries no `auth` key to gate on (D1's Risks; `capabilities.test.ts:213`). So `null` here did not
  * make the section "read as absent" — it left a live nav entry, titled *Account* and described
- * *"Sign out of this cezar deployment"*, that opens a blank pane. On the npm zero-config default —
+ * *"Sign out of this cezar-plus deployment"*, that opens a blank pane. On the npm zero-config default —
  * the MOST common deployment, and the one D13 just made org-capable — that is every local user's
  * experience of this feature, and a blank pane behind a real nav item reads as a broken build, not
  * as a deployment without sessions.
@@ -41,7 +41,7 @@ export function AccountPanel() {
   if (probe.data !== true) {
     return (
       <p data-slot="account-unavailable" className="p-4 text-[13px] text-soft-foreground md:p-6">
-        This cezar deployment has no sign-in, so there is no session to end. Accounts appear here
+        This cezar-plus deployment has no sign-in, so there is no session to end. Accounts appear here
         once the server is started with an authentication provider configured.
       </p>
     )
@@ -66,7 +66,7 @@ function AccountBody() {
       data-slot="account-section"
       className="mx-auto flex w-full max-w-2xl flex-col gap-7 p-4 pb-[calc(90px+env(safe-area-inset-bottom))] md:p-6 md:pb-6"
     >
-      <SettingsField title="Sign out" hint="Ends your session on this cezar deployment.">
+      <SettingsField title="Sign out" hint="Ends your session on this cezar-plus deployment.">
         <div>
           <Button
             type="button"

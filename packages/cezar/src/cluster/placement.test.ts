@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { clusterQueuedReasonSchema } from '@loki-labs/better-cezar-contract';
-import type { ClusterActiveRun, ClusterCapacity } from '@loki-labs/better-cezar-contract';
+import { clusterQueuedReasonSchema } from '@loki-labs/cezar-plus-contract';
+import type { ClusterActiveRun, ClusterCapacity } from '@loki-labs/cezar-plus-contract';
 import {
   eligibleCandidates,
   headroom,

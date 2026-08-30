@@ -267,7 +267,7 @@ describe('recover() re-enters the workflow chain (P1/P2)', () => {
     // The mislabel the owner saw: `failed` with an EMPTY error, which the cockpit rendered as a
     // bare failure. It did not fail; it was interrupted, and now it says so.
     expect(after?.steps.find((s) => s.id === 'spec')?.error).toBe(
-      'interrupted — cezar process exited during the run',
+      'interrupted — cezar-plus process exited during the run',
     );
   });
 });

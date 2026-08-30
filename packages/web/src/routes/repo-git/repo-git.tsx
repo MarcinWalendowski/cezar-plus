@@ -1,7 +1,7 @@
 import { GitBranchIcon, TriangleAlertIcon } from 'lucide-react'
 
 import { useRepo } from '@/api/queries'
-import type { RepoInfo, RepoResponse } from '@loki-labs/better-cezar-api-client'
+import type { RepoInfo, RepoResponse } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { TabLink } from '@/components/tab-link'
 
@@ -49,7 +49,7 @@ export function RepoGitRoute({ tab }: { tab: RepoTab }) {
           icon={<GitBranchIcon />}
           tone="neutral"
           title="Not a git repository"
-          subtitle="cezar is running outside a git repository — start it inside one to browse changes, commits and branches."
+          subtitle="cezar-plus is running outside a git repository — start it inside one to browse changes, commits and branches."
         />
       </div>
     )

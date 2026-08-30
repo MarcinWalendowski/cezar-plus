@@ -4,7 +4,7 @@ import * as React from 'react'
 import { putWorkspaceUiState } from '@/api/client'
 import { useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
 import { toast } from '@/components/ui/toaster'
-import type { WorkspaceUiState } from '@loki-labs/better-cezar-api-client'
+import type { WorkspaceUiState } from '@loki-labs/cezar-plus-api-client'
 import {
   isColumnExpanded,
   normalizeExpandedColumns,

@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import { closeSync, mkdirSync, openSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import type { RunStatus } from '@loki-labs/better-cezar-contract';
+import type { RunStatus } from '@loki-labs/cezar-plus-contract';
 
 /**
  * Phase 1 of `.ai/specs/2026-08-20-reopen-finished-tasks-merge-audit.md` — the reopen inbox:

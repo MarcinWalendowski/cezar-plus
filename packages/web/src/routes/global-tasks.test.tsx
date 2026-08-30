@@ -8,7 +8,7 @@ import type {
   ProjectListEntry,
   RunIndexEntry,
   WorkspaceTodoEntry,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { ListViewProvider, useListView } from '@/components/list-view'
 import { __clearRememberedStatusesForTests, workspaceQueryKeys } from '@/api/queries'
 import { Toaster, resetToasts } from '@/components/ui/toaster'

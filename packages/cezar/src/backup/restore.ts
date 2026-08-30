@@ -67,7 +67,7 @@ export interface RunRestoreResult {
   applied: boolean;
   /** `project/<id>/…` entries skipped because `id` matches no project registered on this machine
    *  (surfaced here, and via a `console.warn`, per the spec — not a failure). Not part of the wire
-   *  contract (`BackupRestoreResponse` in `@loki-labs/better-cezar-contract` has no field for it
+   *  contract (`BackupRestoreResponse` in `@loki-labs/cezar-plus-contract` has no field for it
    *  yet); a route handler wiring this up in a later phase can fold it into a message or drop it. */
   skippedProjects: number;
 }

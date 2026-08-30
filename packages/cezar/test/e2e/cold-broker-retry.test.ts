@@ -141,7 +141,7 @@ async function packagedCliPath(root: string): Promise<string> {
     { cwd: consumerDir, maxBuffer: 10 * 1024 * 1024 },
   );
 
-  const packageRoot = join(consumerDir, 'node_modules', '@loki-labs', 'better-cezar');
+  const packageRoot = join(consumerDir, 'node_modules', '@loki-labs', 'cezar-plus');
   const manifest = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as {
     bin: { cezar: string };
   };

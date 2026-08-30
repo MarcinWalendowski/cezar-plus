@@ -144,7 +144,7 @@ export const CONFIG_FILES: ConfigFileDef[] = [
     tracked: 'tracked',
     holdsMcp: true,
     precedence:
-      'Project-scoped MCP servers (key: mcpServers), shared via version control. Each requires approval before use; user- and local-scoped servers live in ~/.claude.json, which cezar does not edit.',
+      'Project-scoped MCP servers (key: mcpServers), shared via version control. Each requires approval before use; user- and local-scoped servers live in ~/.claude.json, which cezar-plus does not edit.',
     docsUrl: CLAUDE_MCP_DOCS,
   },
   {

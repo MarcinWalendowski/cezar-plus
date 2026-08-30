@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
 import { queryKeys } from '@/api/queries'
-import type { ApiRun, RunEvent } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, RunEvent } from '@loki-labs/cezar-plus-api-client'
 
 import { settledSessionSeq, STALE_RECORD_GRACE_MS, useRunRecordReconcile } from './run-reconcile'
 

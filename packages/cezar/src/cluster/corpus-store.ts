@@ -8,7 +8,7 @@ import {
   CLUSTER_CORPUS_DEFAULT_SCOPE,
   type ClusterCorpusDoc,
   type ClusterCorpusManifestResponse,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { cezarHomeDir, expandTilde } from '../paths.ts';
 import { atomicWriteJsonSync } from '../workspace/config.ts';
 
@@ -31,7 +31,7 @@ import { atomicWriteJsonSync } from '../workspace/config.ts';
  *    machine and respects `env.CEZ_HOME` the way every other cluster module does. The immediate
  *    children are SCANNED (sorted, first hit wins), never hardcoded.
  *
- * **CORRECTED 2026-08-24 — candidate 3 used to hardcode one specific workspace directory name.** That is one operator's layout baked into a tool published as `@loki-labs/better-cezar`, and
+ * **CORRECTED 2026-08-24 — candidate 3 used to hardcode one specific workspace directory name.** That is one operator's layout baked into a tool published as `@loki-labs/cezar-plus`, and
  * it is exactly what the upstream-purity gate in `notifications/transports/webhook.test.ts`
  * exists to catch — it failed on this file, deterministically, in both runs of the box gate.
  * Deleting the candidate outright was not an option: `CEZ_PROJECTS_DIR` is unset on

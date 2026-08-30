@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ClusterDownlinkFrame, ClusterOp } from '@loki-labs/better-cezar-contract';
+import type { ClusterDownlinkFrame, ClusterOp } from '@loki-labs/cezar-plus-contract';
 import { ensureNodeIdentity } from '../cluster/node-identity.ts';
 import { applyPairingAction } from '../cluster/peers.ts';
 import { atomicWriteJsonSync, defaultWorkspaceConfig } from '../workspace/config.ts';

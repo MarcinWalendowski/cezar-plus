@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from './api/query-client'
 import { queryKeys, workspaceQueryKeys } from './api/queries'
-import type { ProjectsResponse, WorkspaceUiState } from '@loki-labs/better-cezar-api-client'
+import type { ProjectsResponse, WorkspaceUiState } from '@loki-labs/cezar-plus-api-client'
 import { AppearanceProvider } from './components/appearance-provider'
 import { ListViewProvider } from './components/list-view'
 import { ThemeProvider } from './components/theme-provider'

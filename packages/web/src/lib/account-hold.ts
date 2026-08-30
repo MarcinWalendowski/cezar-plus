@@ -1,4 +1,4 @@
-import { runAccountKey, usageHoldAccountKey, type Runner, type RunRecord } from '@loki-labs/better-cezar-api-client'
+import { runAccountKey, usageHoldAccountKey, type Runner, type RunRecord } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * Why a queued task is not starting (spec `2026-08-23-usage-limit-hold-account.md`).
@@ -9,7 +9,7 @@ import { runAccountKey, usageHoldAccountKey, type Runner, type RunRecord } from 
  * eleven hours. A person watching an idle cockpit with a free slot reads that as a broken queue,
  * which is exactly what happened on 2026-08-23 and what filed this spec.
  *
- * The keys are the engine's own (`@loki-labs/better-cezar-contract`), not a second spelling. A
+ * The keys are the engine's own (`@loki-labs/cezar-plus-contract`), not a second spelling. A
  * hold rendered from a differently-spelled key would simply never match, and would report "not
  * held" for a task the engine is holding — a wrong answer that looks like a right one.
  */

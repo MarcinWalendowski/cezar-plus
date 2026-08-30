@@ -36,12 +36,12 @@ import type {
   RunsIndexResponse,
   WorkspaceTodoEntry,
   WorkspaceTodosPage,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import {
   FILED_ACTIVE_INITIAL_ROWS,
   FILED_BACKLOG_INITIAL_ROWS,
   FILED_SHOW_MORE_INCREMENT,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { FacetFilter, SegmentedControl, ToggleChip } from '@/components/facet-filter'
 import { FILED_PRIORITY_LABEL, FILED_STATUS_LABEL, FiledPriorityChip, FiledStatusPill } from '@/components/filed-task-detail'

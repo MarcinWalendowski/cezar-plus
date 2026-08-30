@@ -1,9 +1,9 @@
 # Remote access — macOS + ngrok
 
-Expose a cezar cockpit running on your **Mac** to the internet through an
+Expose a cezar-plus cockpit running on your **Mac** to the internet through an
 [ngrok](https://ngrok.com) tunnel — no ports to open, no TLS to manage.
 
-**How it's wired:** cezar runs locally on the Mac. **ngrok** is the public
+**How it's wired:** cezar-plus runs locally on the Mac. **ngrok** is the public
 front (in place of nginx+certbot): it provides the public HTTPS URL, and its
 built-in `--basic-auth` is the identity gate (the htpasswd equivalent). A
 **launchd** agent keeps the tunnel up and restarts it on login (the systemd
@@ -56,7 +56,7 @@ npx cezar-cli server-deploy --platform macosx-ngrok
 ```
 
 `server-deploy` restarts the ngrok launchd agent and re-verifies the basic-auth
-gate. On macOS cezar itself runs locally — restart it the way you launched it;
+gate. On macOS cezar-plus itself runs locally — restart it the way you launched it;
 `server-deploy` reloads the tunnel that fronts it.
 
 To change the setup itself, the installer is idempotent:
@@ -74,7 +74,7 @@ npx cezar-cli server-install --platform macosx-ngrok --reinstall   # redo everyt
 npx cezar-cli server-uninstall --platform macosx-ngrok
 ```
 
-Removes the launchd plist and the tunnel config cezar **owns**. Shared tools
+Removes the launchd plist and the tunnel config cezar-plus **owns**. Shared tools
 (ngrok, the agent CLIs, `gh`) are *listed* for manual removal, not deleted.
 
 ---

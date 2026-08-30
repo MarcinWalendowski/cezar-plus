@@ -1,4 +1,4 @@
-import type { RunActivity, RunEvent, UiItem } from '@loki-labs/better-cezar-api-client'
+import type { RunActivity, RunEvent, UiItem } from '@loki-labs/cezar-plus-api-client'
 
 import type { ThreadEntry, ThreadState } from './thread-state'
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import type { RunEvent } from '@loki-labs/better-cezar-api-client'
-import type { UiMessageItem, UiToolItem } from '@loki-labs/better-cezar-api-client'
+import type { RunEvent } from '@loki-labs/cezar-plus-api-client'
+import type { UiMessageItem, UiToolItem } from '@loki-labs/cezar-plus-api-client'
 
 import bashAndScreenshot from '../../../../cezar/src/core/__fixtures__/claude/bash-and-screenshot.expected.json'
 import failedAndDenied from '../../../../cezar/src/core/__fixtures__/claude/failed-and-denied.expected.json'

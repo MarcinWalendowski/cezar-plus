@@ -1,6 +1,6 @@
 import { XIcon } from 'lucide-react'
 
-import type { ProviderStatusResponse } from '@loki-labs/better-cezar-api-client'
+import type { ProviderStatusResponse } from '@loki-labs/cezar-plus-api-client'
 import { Link as WorkspaceLink } from 'react-router'
 import { Link } from '@/lib/project-router'
 import {

@@ -295,7 +295,7 @@ describe('systemdUnit', () => {
    * EXISTING install looks like, not only a fresh one").
    *
    * The test above proves a FRESH install boots. It cannot see the upgrade, and the upgrade is
-   * where the damage was: the released `@loki-labs/better-cezar` 0.9.2 installer wrote exactly
+   * where the damage was: the released `@loki-labs/cezar-plus` 0.9.2 installer wrote exactly
    * `Environment=CEZ_REMOTE=1` plus `Environment=PATH=…`, and `redeploy()` — the only thing
    * `server-deploy` runs — never reaches `autostartStep`, the only writer of the unit. So the new
    * binary booted against the old unit, `runAuthBootGate` exited 1, and `Restart=on-failure`

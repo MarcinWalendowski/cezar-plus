@@ -11,7 +11,7 @@ import {
   type ClusterUplinkFrame,
   type ClusterWatermark,
   type StoredClusterNodeIdentity,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { signClusterFrame } from './enrollment.ts';
 import {
   DEFAULT_LINK_BACKOFF,

@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import type { KnowledgeDocument } from '@loki-labs/better-cezar-contract';
+import type { KnowledgeDocument } from '@loki-labs/cezar-plus-contract';
 import {
   WorkspaceReportsIndex,
   isReportDocument,

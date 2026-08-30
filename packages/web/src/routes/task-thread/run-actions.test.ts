@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { RunRecord, RunStatus, StepState } from '@loki-labs/better-cezar-api-client'
+import type { RunRecord, RunStatus, StepState } from '@loki-labs/cezar-plus-api-client'
 
 import { isUnread } from '@/lib/read-state'
 

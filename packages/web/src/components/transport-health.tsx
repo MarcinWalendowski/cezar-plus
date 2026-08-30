@@ -1,4 +1,4 @@
-import type { TransportHealth as TransportHealthValue, TransportHealthStatus } from '@loki-labs/better-cezar-api-client'
+import type { TransportHealth as TransportHealthValue, TransportHealthStatus } from '@loki-labs/cezar-plus-api-client'
 
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { cn } from '@/lib/utils'

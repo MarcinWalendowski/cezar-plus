@@ -4,7 +4,7 @@ import { useState, type FormEvent } from 'react'
 
 import { createRepoBranch, putConfig } from '@/api/client'
 import { queryKeys, useGithub, useHealth } from '@/api/queries'
-import type { GithubItem, HealthResponse, RepoInfo, RepoResponse } from '@loki-labs/better-cezar-api-client'
+import type { GithubItem, HealthResponse, RepoInfo, RepoResponse } from '@loki-labs/cezar-plus-api-client'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/toaster'

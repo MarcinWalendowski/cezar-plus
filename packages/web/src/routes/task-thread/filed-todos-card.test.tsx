@@ -2,7 +2,7 @@ import { render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
 
-import type { ApiRun } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun } from '@loki-labs/cezar-plus-api-client'
 
 import { FiledTodosCard, filedTodosHeading } from './filed-todos-card'
 

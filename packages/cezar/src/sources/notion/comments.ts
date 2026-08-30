@@ -1,4 +1,4 @@
-import type { SourceCommentAttachment } from '@loki-labs/better-cezar-contract';
+import type { SourceCommentAttachment } from '@loki-labs/cezar-plus-contract';
 import type { NotionApiError, NotionClient, NotionEnumerateOptions, NotionRawComment } from './client.ts';
 
 /**

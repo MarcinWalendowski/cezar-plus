@@ -33,7 +33,7 @@ import { useParams } from 'react-router'
 
 import { ApiError, createWorkflow, deleteWorkflow, parseWorkflow, postPlan } from '@/api/client'
 import { queryKeys, useSkills, useUiState, useWorkflows } from '@/api/queries'
-import type { Skill, WorkflowDef, WorkflowStepDef } from '@loki-labs/better-cezar-api-client'
+import type { Skill, WorkflowDef, WorkflowStepDef } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { SkillEmptyHintCompact } from '@/components/skill-empty-hint'
 import {
@@ -616,7 +616,7 @@ function WorkflowsBuilder({ routeName }: { routeName: string | undefined }) {
               {yaml}
             </pre>
             <p className="mt-2 text-[11.5px] leading-relaxed text-soft-foreground">
-              Portable — export this file and import it in any repo running cezar.
+              Portable — export this file and import it in any repo running cezar-plus.
             </p>
           </aside>
         </div>

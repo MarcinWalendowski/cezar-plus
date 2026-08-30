@@ -6,7 +6,7 @@ import { Link } from '@/lib/project-router'
 
 import { ApiError } from '@/api/client'
 import { useRepoCommit } from '@/api/queries'
-import type { LogEntry } from '@loki-labs/better-cezar-api-client'
+import type { LogEntry } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Diff, type DiffMode } from '@/components/diff'
 import { DiffStatLabel } from '@/components/diff-stat'

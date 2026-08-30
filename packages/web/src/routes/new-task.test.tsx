@@ -14,7 +14,7 @@ import type {
   Skill,
   WorkspaceConfigResponse,
   WorkflowsResponse,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
 
 import { readDraft, resetDraft, writeDraft } from './new-task-draft'
@@ -88,6 +88,17 @@ const HEALTH_MULTI: HealthResponse = {
     { name: 'codex', available: true },
     { name: 'git', available: true },
   ],
+}
+
+/** `accountUsage` on, which is what makes the composer offer the balancing POOL rows. */
+const HEALTH_POOLS: HealthResponse = {
+  ...HEALTH,
+  checks: [
+    { name: 'claude', available: true },
+    { name: 'codex', available: true },
+    { name: 'git', available: true },
+  ],
+  capabilities: { ...HEALTH.capabilities, accountUsage: true },
 }
 
 const HEALTH_ALL: HealthResponse = {
@@ -2292,6 +2303,135 @@ describe('the composer runner pill carries the account', () => {
     fireEvent.change(textarea(), { target: { value: 'do the thing' } })
     await startTask()
     // …and nothing account-shaped reaches the wire.
+    expect(postedBody()).not.toHaveProperty('agentProfile')
+  })
+})
+
+/**
+ * The global engine lock, at the composer (`.ai/specs/2026-08-29-global-provider-toggle.md`,
+ * D2 rank 5, V5d).
+ *
+ * This is the surface the production report came from, verbatim: Codex checked here, Codex on the
+ * shell bar, `· model: anthropic/sonnet` in the run. Dispatch now honours the lock — these are the
+ * cases that stop the composer from going on showing a choice that no longer exists.
+ */
+describe('the composer engine lock', () => {
+  const locked = (runnerLock: 'claude' | 'codex' | null) => ({
+    agentProfiles: ACCOUNTS,
+    health: HEALTH_MULTI,
+    providerStatus: PROVIDERS_MULTI,
+    workspaceConfig: { ...WORKSPACE_CONFIG, runnerLock },
+  })
+
+  it('fixes the pill to the locked provider', async () => {
+    serve(locked('codex'))
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()?.textContent?.trim()).toBe('codex'))
+
+    fireEvent.pointerDown(runnerPill()!)
+    const options = await screen.findAllByRole('menuitemradio')
+    expect(options.map((o) => o.textContent)).toEqual([expect.stringContaining('codex')])
+  })
+
+  it('offers both providers on Auto — the control', async () => {
+    serve(locked(null))
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+
+    fireEvent.pointerDown(runnerPill()!)
+    const options = await screen.findAllByRole('menuitemradio')
+    // claude's two logins plus codex — the list this composer has always shown.
+    expect(options).toHaveLength(3)
+  })
+
+  it('starts the task on the locked provider, on the wire', async () => {
+    // The assertion the report is about. A pill that reads codex over a body that says claude is
+    // the same bug one layer up from the one dispatch had.
+    serve(locked('codex'))
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()?.textContent?.trim()).toBe('codex'))
+
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+    expect(postedBody()).toMatchObject({ runner: 'codex' })
+  })
+
+  it('sends the lock even when it is what the project would have chosen anyway', async () => {
+    // `runnerOverride` omits a runner that IS the project default, which is right for an untouched
+    // pill and wrong for a lock: omission means "server, you decide", and this pill is no longer
+    // offering a decision. The provider is the same either way here, which is exactly why the
+    // mutation that drops it leaves every other case in this file green.
+    serve(locked('claude'))
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+    expect(postedBody()).toMatchObject({ runner: 'claude' })
+  })
+
+  it('drops a `pool:*` draft, which picks the PROVIDER the lock has already decided', async () => {
+    // The pool exemption exists so a runner re-render cannot silently downgrade a pooled task to
+    // one login. Under a lock the wildcard is the opposite case: it is the row that spans
+    // providers, `RunnerPill` stops offering it, and D5 narrows it server-side — so a draft still
+    // holding it would leave the pill reading `codex` over a body asking the balancer to choose.
+    serve({ ...locked(null), health: HEALTH_POOLS })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+    await pickFrom(runnerPill()!, 'balance · everything')
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('balance · everything'))
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+    // The control: unlocked, the wildcard rides the request, which is what makes the next half a
+    // statement about the lock rather than about a composer that lost the draft.
+    expect(postedBody()).toMatchObject({ agentProfile: 'pool:*' })
+
+    cleanup()
+    serve({ ...locked('codex'), health: HEALTH_POOLS })
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()?.textContent?.trim()).toBe('codex'))
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+    expect(postedBody()).not.toHaveProperty('agentProfile')
+  })
+
+  it('leaves a claude account behind rather than sending it to codex', async () => {
+    // D6a, from the draft rather than from a pick: a sticky `agentProfile` written before the lock
+    // was set names a claude login, and an id is provider-scoped. The pill drops it, so the row it
+    // shows and the account the run bills are the same thing.
+    serve(locked(null))
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+    await pickFrom(runnerPill()!, 'Klaudiusz')
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('Klaudiusz'))
+
+    // The draft survives the remount — asserted, not assumed. Without this line the case below
+    // passes on a composer that simply forgot the account, which proves nothing about the lock.
+    cleanup()
+    serve(locked(null))
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('Klaudiusz'))
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
+    expect(postedBody()).toMatchObject({ agentProfile: 'klaudiusz' })
+
+    // Now the workspace locks to codex, with that same draft account still in state.
+    cleanup()
+    serve(locked('codex'))
+    renderNewTask()
+    await pillReady()
+    await waitFor(() => expect(runnerPill()?.textContent?.trim()).toBe('codex'))
+
+    fireEvent.change(textarea(), { target: { value: 'do the thing' } })
+    await startTask()
     expect(postedBody()).not.toHaveProperty('agentProfile')
   })
 })

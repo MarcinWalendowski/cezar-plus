@@ -99,7 +99,7 @@ describe('index.ts module-load safety', () => {
 
     await import('./index.ts');
 
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('cezar — local cockpit'));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('cezar-plus — local cockpit'));
   });
 
   it('no skip vars set: import safely reaches main()\'s own dispatch — kb submit --help', async () => {

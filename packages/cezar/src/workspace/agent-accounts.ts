@@ -2,7 +2,7 @@ import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { posix, resolve, win32 } from 'node:path';
 import { z } from 'zod';
-import { DEFAULT_AGENT_ACCOUNT_ID } from '@loki-labs/better-cezar-contract';
+import { DEFAULT_AGENT_ACCOUNT_ID } from '@loki-labs/cezar-plus-contract';
 import { PROVIDER_IDS, type ProviderId } from '../core/provider-auth.ts';
 import { supportsProfiles } from '../core/agent-profiles.ts';
 import { agentAccountsPath, workspaceConfigPath } from '../paths.ts';

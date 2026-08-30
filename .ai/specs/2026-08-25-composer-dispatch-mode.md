@@ -577,7 +577,7 @@ this comparison is now meaningful.
 
 ## Backward compatibility
 
-cezar is published (`@loki-labs/better-cezar`), so `BACKWARD_COMPATIBILITY.md` applies and the
+cezar is published (`@loki-labs/cezar-plus`), so `BACKWARD_COMPATIBILITY.md` applies and the
 house "no backward compatibility" default does not.
 
 - **§3 state files.** `filedTodos` is optional and additive; absent on every existing record. Never

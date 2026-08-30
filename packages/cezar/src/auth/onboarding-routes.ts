@@ -7,7 +7,7 @@ import {
   type Org as WireOrg,
   type RenameOnboardingTeamResponse,
   type Team as WireTeam,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { jsonZodValidator } from '../server/validators.ts';
 import { identityDir } from '../paths.ts';
 import type { SessionResolver } from '../server/server.ts';
@@ -519,7 +519,7 @@ export function createOnboardingRoutes(deps: OnboardingRouteDeps): Hono {
                   return c.json(
                     {
                       error:
-                        'you already belong to an organization on this deployment, and cezar cannot switch between them yet — this claim code has NOT been used up. Sign in as the account that should own this organization (a separate browser profile works) and claim it there.',
+                        'you already belong to an organization on this deployment, and cezar-plus cannot switch between them yet — this claim code has NOT been used up. Sign in as the account that should own this organization (a separate browser profile works) and claim it there.',
                     },
                     409,
                   );

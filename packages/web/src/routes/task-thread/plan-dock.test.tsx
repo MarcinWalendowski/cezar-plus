@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import type { PlanEntry } from '@loki-labs/better-cezar-api-client'
+import type { PlanEntry } from '@loki-labs/cezar-plus-api-client'
 
 import thinkingEditWriteTodo from '../../../../cezar/src/core/__fixtures__/claude/thinking-edit-write-todo.expected.json'
 import { PlanDock, planActiveEntry, planCounts } from './plan-dock'

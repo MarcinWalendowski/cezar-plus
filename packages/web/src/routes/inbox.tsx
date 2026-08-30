@@ -6,7 +6,7 @@ import { Link, useNavigate } from '@/lib/project-router'
 
 import { removeTodo, startTodo } from '@/api/client'
 import { queryKeys, useHealth, useRuns, useTodos, useUiState } from '@/api/queries'
-import type { TodoItem } from '@loki-labs/better-cezar-api-client'
+import type { TodoItem } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { EnginePills, engineBody, useResolvedEngine, type EnginePick } from '@/components/engine-pills'
 import { PromptTemplateMenu } from '@/components/prompt-template-menu'
@@ -103,7 +103,7 @@ export function InboxRoute() {
             icon={<InboxIcon />}
             tone="neutral"
             title="The follow-up inbox is off"
-            subtitle="Agents are not asked to leave follow-ups. Set CEZ_FOLLOWUPS=1 and restart cezar to turn the inbox on."
+            subtitle="Agents are not asked to leave follow-ups. Set CEZ_FOLLOWUPS=1 and restart cezar-plus to turn the inbox on."
             heading="h2"
           />
         ) : todos === undefined ? (

@@ -6,7 +6,7 @@ import { Link } from '@/lib/project-router'
 
 import { approveRun, requestRunChanges } from '@/api/client'
 import { queryKeys } from '@/api/queries'
-import type { ApiRun } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun } from '@loki-labs/cezar-plus-api-client'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'

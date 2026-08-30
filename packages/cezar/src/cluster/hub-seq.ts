@@ -1,7 +1,7 @@
 import { closeSync, mkdirSync, openSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { promises as fsPromises } from 'node:fs';
 import { join } from 'node:path';
-import type { ClusterOpScope, ClusterProjectKey } from '@loki-labs/better-cezar-contract';
+import type { ClusterOpScope, ClusterProjectKey } from '@loki-labs/cezar-plus-contract';
 import { clusterHomeDir, type ClusterHomeOptions } from './node-identity.ts';
 import { atomicWriteJsonSync } from '../workspace/config.ts';
 import { assertCezarHomeWriteIsSandboxed } from '../paths.ts';

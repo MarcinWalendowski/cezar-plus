@@ -23,7 +23,7 @@ import {
   type StoredClusterNode,
   type StoredClusterPairing,
   type StoredClusterPeers,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { currentHostMetrics } from '../core/host-metrics.ts';
 import { getHeadCommit, getRepoInfo, getStatus, type StatusEntry } from '../server/git.ts';
 import { workspaceConfigPath } from '../paths.ts';

@@ -4,7 +4,7 @@ import {
   type ClusterProjectKey,
   type ClusterReplicaFrame,
   type StoredClusterNodeIdentity,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { readTodos as readTodosDefault, type TodoItem } from '../todos.ts';
 import { applyOpAtHub } from './hub-apply.ts';
 import type { HubOpOutcome } from './hub-ops.ts';

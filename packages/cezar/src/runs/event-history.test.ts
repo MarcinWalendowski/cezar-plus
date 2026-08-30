@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { RunEvent } from '@loki-labs/better-cezar-contract';
+import type { RunEvent } from '@loki-labs/cezar-plus-contract';
 import {
   HistoryCursorError,
   canonicalSessionItems,

@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { knowledgeSupersedeProposalSchema, knowledgeUpsertProposalSchema } from '@loki-labs/better-cezar-contract';
+import { knowledgeSupersedeProposalSchema, knowledgeUpsertProposalSchema } from '@loki-labs/cezar-plus-contract';
 import { KnowledgeStore } from './store.ts';
 import type { SearchFilters } from './search.ts';
 

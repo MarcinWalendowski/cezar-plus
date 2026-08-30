@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CLUSTER_FRAME_MAX_BYTES, CLUSTER_PROTOCOL, type ClusterRelayFrame } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_FRAME_MAX_BYTES, CLUSTER_PROTOCOL, type ClusterRelayFrame } from '@loki-labs/cezar-plus-contract';
 import { seedHandoffFile } from '../handoff.ts';
 import { localCliAuthor } from '../runs/task-author.ts';
 import { RunStore, type RunEvent } from '../runs/store.ts';

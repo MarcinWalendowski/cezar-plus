@@ -211,7 +211,7 @@ describe('resolveCapabilities — followups (#471)', () => {
     expect(resolveCapabilities({ CEZ_CLUSTER: '1' }, undefined).cluster).toBe(true);
     // The negative control that matters: an opt-IN key must not be readable as an opt-OUT one.
     // Three of the keys in this object are `!== '0'` gates, and a `cluster` written that way would
-    // turn every existing install into a cluster node on upgrade — `@loki-labs/better-cezar` is
+    // turn every existing install into a cluster node on upgrade — `@loki-labs/cezar-plus` is
     // published, so that would reach machines this repo does not control (PLAN P8).
     for (const value of ['0', 'true', 'yes', '', 'on', 'TRUE']) {
       expect(resolveCapabilities({ CEZ_CLUSTER: value }, undefined).cluster).toBe(false);

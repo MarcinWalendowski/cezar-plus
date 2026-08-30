@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLUSTER_CORPUS_DEFAULT_SCOPE, type StoredClusterNodeIdentity } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_CORPUS_DEFAULT_SCOPE, type StoredClusterNodeIdentity } from '@loki-labs/cezar-plus-contract';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CEZAR_HUB_SOURCE_KIND } from '../sources/cezar-hub/provider.ts';
 import { SourceStore } from '../sources/store.ts';

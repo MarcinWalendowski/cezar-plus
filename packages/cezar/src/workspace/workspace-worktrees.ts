@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
-import type { WorkspaceGrantProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
+import type { WorkspaceGrantProject, WorkspaceWorktree } from '@loki-labs/cezar-plus-contract';
 import { autosaveCommit, createWorktree, removeWorktree, resolveBaseRef } from '../git-worktree.ts';
 import { getRepoInfo } from '../server/git.ts';
 import { writeWorktreeLease } from './worktree-lease.ts';

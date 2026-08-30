@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { ProjectScopeProvider, useProjectScope } from './project-scope-context'
-import { getApiScope, queryScope, apiPath, setApiScope } from '@loki-labs/better-cezar-api-client'
+import { getApiScope, queryScope, apiPath, setApiScope } from '@loki-labs/cezar-plus-api-client'
 
 afterEach(() => {
   cleanup()

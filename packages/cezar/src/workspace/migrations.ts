@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { workspaceUiStateSchema } from '@loki-labs/better-cezar-contract';
+import { workspaceUiStateSchema } from '@loki-labs/cezar-plus-contract';
 import { cezarHomeDir, workspaceConfigPath, workspaceUiStatePath } from '../paths.ts';
 import { readUiState } from '../ui-state.ts';
 import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from './config.ts';

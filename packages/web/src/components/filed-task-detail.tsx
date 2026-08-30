@@ -3,7 +3,7 @@ import { Link } from 'react-router'
 
 import type { FiledPriority, FiledStatus } from '@/lib/filed-tasks'
 import { filedStatus } from '@/lib/filed-tasks'
-import type { WorkspaceTodoEntry } from '@loki-labs/better-cezar-api-client'
+import type { WorkspaceTodoEntry } from '@loki-labs/cezar-plus-api-client'
 import { AuthorCell } from '@/components/author-cell'
 import { Pill } from '@/components/pill'
 import type { StatusDotTone } from '@/components/status-dot'

@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { CheckIcon, FlagIcon, TriangleAlertIcon, Undo2Icon, UsersIcon, WandSparklesIcon } from 'lucide-react'
 
-import type { ReportListItem, ReportStatus } from '@loki-labs/better-cezar-api-client'
+import type { ReportListItem, ReportStatus } from '@loki-labs/cezar-plus-api-client'
 import {
   workspaceQueryKeys,
   useApproveReport,
@@ -116,7 +116,7 @@ export function WorkspaceReportsRoute() {
             icon={<FlagIcon />}
             tone="neutral"
             title="Reports are off"
-            subtitle="Reports are knowledge documents. Set CEZ_KB=1 and restart cezar to turn them on."
+            subtitle="Reports are knowledge documents. Set CEZ_KB=1 and restart cezar-plus to turn them on."
             heading="h2"
           />
         ) : health.isPending ? null : (

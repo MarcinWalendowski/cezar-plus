@@ -1,6 +1,6 @@
 import type { ExtractSchema } from 'hono/types';
 import { describe, expect, it } from 'vitest';
-import { setWorkspaceUiStateInputSchema } from '@loki-labs/better-cezar-contract';
+import { setWorkspaceUiStateInputSchema } from '@loki-labs/cezar-plus-contract';
 import type { z } from 'zod';
 import type { AppType } from './app-type.ts';
 

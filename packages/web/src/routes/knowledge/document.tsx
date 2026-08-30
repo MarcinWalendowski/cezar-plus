@@ -1,6 +1,6 @@
 import { HistoryIcon, TriangleAlertIcon } from 'lucide-react'
 
-import type { KnowledgeDocument } from '@loki-labs/better-cezar-api-client'
+import type { KnowledgeDocument } from '@loki-labs/cezar-plus-api-client'
 import { Badge } from '@/components/ui/badge'
 import { Link } from '@/lib/project-router'
 import { cn } from '@/lib/utils'

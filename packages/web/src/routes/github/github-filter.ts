@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
 
-import type { GithubItem } from '@loki-labs/better-cezar-api-client'
+import type { GithubItem } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * Pure filtering + label-color helpers for the GitHub tab (#gh-filter). Kept apart from the

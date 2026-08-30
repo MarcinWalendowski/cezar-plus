@@ -305,7 +305,7 @@ class CodexSession implements AgentSession {
       if (this.terminatedByCezar && isSignalTerminationExit(exitCode)) {
         this.emit({
           type: 'note',
-          message: `codex app-server did not exit on its own after close; terminated by cezar (code ${exitCode})`,
+          message: `codex app-server did not exit on its own after close; terminated by cezar-plus (code ${exitCode})`,
         });
         this.emit({ type: 'done' });
         return base;
@@ -513,9 +513,9 @@ class CodexSession implements AgentSession {
       } else {
         this.rpc.respond({
           id: rpcId,
-          error: { code: -32601, message: `cezar does not implement ${msg.method}` },
+          error: { code: -32601, message: `cezar-plus does not implement ${msg.method}` },
         });
-        this.emit({ type: 'note', message: `codex requested unsupported method ${msg.method}; cezar replied -32601` });
+        this.emit({ type: 'note', message: `codex requested unsupported method ${msg.method}; cezar-plus replied -32601` });
       }
       return;
     }

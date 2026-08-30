@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { CLUSTER_PROTOCOL, clusterDispatchFrameSchema } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_PROTOCOL, clusterDispatchFrameSchema } from '@loki-labs/cezar-plus-contract';
 import type {
   ClusterCorpusStatus,
   ClusterDispatchFrame,
@@ -9,7 +9,7 @@ import type {
   ClusterProjectKey,
   ClusterRepoFreshness,
   ClusterTodoPlacement,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { ClusterHomeOptions } from './node-identity.ts';
 
 /**

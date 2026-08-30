@@ -455,8 +455,8 @@ error, and it is NOT this change —
 src/server/contract-parity.runs.test.ts(99,12): error TS2344: Type '"schema-is-wider"' does not satisfy the constraint 'true'
 ```
 
-This worktree has an EMPTY `node_modules`, so `@loki-labs/better-cezar-contract` resolves up to
-`/var/lib/cezar/loki-labs/cezar/node_modules/@loki-labs/better-cezar-contract`, a symlink into
+This worktree has an EMPTY `node_modules`, so `@loki-labs/cezar-plus-contract` resolves up to
+`/var/lib/cezar/loki-labs/cezar/node_modules/@loki-labs/cezar-plus-contract`, a symlink into
 the MAIN checkout's `packages/contract` — where run `ef9901e3` has an uncommitted
 `z.object({ continued: z.literal(true) })` added to `messageResponseSchema`. My worktree's
 `runs-api.ts` does not answer `continued`, so the parity assert reads the server as narrower.

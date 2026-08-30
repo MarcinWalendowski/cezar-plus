@@ -11,7 +11,7 @@ specifically to update that repo's skills, and the **Open Mercato logo serving a
 favicon and brand mark**. Underneath all four sits the npm scope itself — `@open-mercato/cezar`
 and its three siblings, ~513 references across ~364 files.
 
-All four go. The scope is renamed to `@loki-labs/better-cezar*`. `DEFAULT_SKILLS_REPOS` becomes `[]`.
+All four go. The scope is renamed to `@loki-labs/cezar-plus*`. `DEFAULT_SKILLS_REPOS` becomes `[]`.
 
 The dated record is **not** rewritten: `.ai/specs/`, `.ai/runs/`, `.ai/analysis/` and the
 historical part of `CHANGELOG.md` keep saying Open Mercato, because that is what happened.
@@ -74,9 +74,9 @@ one file to swap.
 
 ### C. The npm scope
 
-`@open-mercato/cezar{,-web,-contract,-api-client}` → `@loki-labs/better-cezar*` (the owner's
+`@open-mercato/cezar{,-web,-contract,-api-client}` → `@loki-labs/cezar-plus*` (the owner's
 choice, on the `@loki-labs/*` convention already used in the workspace). The unscoped alias
-`cezar-cli` → `@loki-labs/better-cezar-cli`:
+`cezar-cli` → `@loki-labs/cezar-plus-cli`:
 `cezar-cli` is upstream's published package, and a fork that can attempt to publish over it is a
 mistake waiting for a credential that happens to work.
 
@@ -101,7 +101,7 @@ A new negative control pins exactly that, because a strip-based exemption is the
 rot into a blindfold:
 
 ```ts
-expect(FORBIDDEN_RE.test(scannable("'@loki-labs/better-cezar' posts to lokimessages.com"))).toBe(true)
+expect(FORBIDDEN_RE.test(scannable("'@loki-labs/cezar-plus' posts to lokimessages.com"))).toBe(true)
 expect(FORBIDDEN_RE.test(scannable('the loki workspace'))).toBe(true)
 expect(FORBIDDEN_RE.test(scannable('@loki-labs/some-other-package'))).toBe(true)
 ```

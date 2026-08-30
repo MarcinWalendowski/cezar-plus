@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
-import type { RunEvent } from '@loki-labs/better-cezar-contract';
+import type { RunEvent } from '@loki-labs/cezar-plus-contract';
 
 /**
  * Tool-economy metrics for a run, derived from its NDJSON transcript

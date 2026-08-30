@@ -1,5 +1,5 @@
 {
-  "name": "@loki-labs/better-cezar",
+  "name": "@loki-labs/cezar-plus",
   "version": "0.10.0",
   "description": "Local cockpit for running and tracking AI agent tasks in your repo. Uses your logged-in `claude` CLI and `gh` — zero config, zero database.",
   "license": "MIT",
@@ -52,8 +52,8 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@loki-labs/better-cezar-api-client": "^0.10.0",
-    "@loki-labs/better-cezar-contract": "^0.10.0",
+    "@loki-labs/cezar-plus-api-client": "^0.10.0",
+    "@loki-labs/cezar-plus-contract": "^0.10.0",
     "@types/node": "^20.14.0",
     "@types/ws": "^8.18.1",
     "esbuild": "^0.28.1",
@@ -63,7 +63,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/MarcinWalendowski/cezar",
+    "url": "https://github.com/MarcinWalendowski/cezar-plus",
     "directory": "packages/cezar"
   },
   "publishConfig": {

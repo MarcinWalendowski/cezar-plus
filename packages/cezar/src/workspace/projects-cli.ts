@@ -145,7 +145,7 @@ async function addCommand(root: string, io: ProjectsCommandIo): Promise<number> 
   // is served happily but never registered, and asking for it explicitly does
   // not buy an exemption.
   if (!(await shouldRegisterProject(root))) {
-    io.error(`refusing to register ${root} — cezar task worktrees and your home directory are not projects`);
+    io.error(`refusing to register ${root} — cezar-plus task worktrees and your home directory are not projects`);
     return 1;
   }
   const known = new Set((await loadWorkspaceConfig()).projects.map((p) => p.id));

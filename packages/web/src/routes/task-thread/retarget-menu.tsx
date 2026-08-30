@@ -1,6 +1,6 @@
 import { PlayIcon } from 'lucide-react'
 
-import type { ApiRun, Runner } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, Runner } from '@loki-labs/cezar-plus-api-client'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -28,6 +28,12 @@ import { useRetargetAction } from './retarget-engine'
  * `usableRunners()` reports as connected, and the runner the task is already on is disabled rather
  * than hidden — "you are already here" is information, and hiding it would make a two-provider
  * host's menu look like it has one choice.
+ *
+ * Under a global engine lock `useRetargetAction` hands over a list of one
+ * (`.ai/specs/2026-08-29-global-provider-toggle.md`, D2 rank 4), so this menu narrows with it and
+ * says why. The one item may then be the disabled "(current)" row: a task already on the locked
+ * provider genuinely has nowhere to be moved to, and the reason line is what separates that from
+ * a menu that looks broken.
  */
 export function RetargetMenuButton({ run, className }: { run: ApiRun; className?: string }) {
   const action = useRetargetAction(run)
@@ -58,6 +64,14 @@ export function RetargetMenuButton({ run, className }: { run: ApiRun; className?
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuLabel>Run on…</DropdownMenuLabel>
+        {action.lock ? (
+          <DropdownMenuLabel
+            data-slot="retarget-menu-lock-note"
+            className="max-w-56 text-[11px] font-normal text-muted-foreground"
+          >
+            Locked to {action.lock} by the global engine setting.
+          </DropdownMenuLabel>
+        ) : null}
         {action.runners.map((id) => (
           <DropdownMenuItem
             key={id}

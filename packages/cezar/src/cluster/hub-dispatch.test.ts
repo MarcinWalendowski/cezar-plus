@@ -5,7 +5,7 @@ import {
   type ClusterActiveRun,
   type ClusterCapacity,
   type ClusterFreshnessFrame,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { createHubDispatcher, DEFAULT_DISPATCH_TIMEOUT_MS, type HubDispatcherDeps } from './hub-dispatch.ts';
 import type { PlacementCandidate, PlacementRequest } from './placement.ts';
 import type { ClusterLinkServer } from './link-server.ts';

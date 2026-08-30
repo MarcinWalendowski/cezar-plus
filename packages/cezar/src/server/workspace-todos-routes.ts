@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { workspaceTodosQuerySchema, type WorkspaceTodosResponse } from '@loki-labs/better-cezar-contract';
+import { workspaceTodosQuerySchema, type WorkspaceTodosResponse } from '@loki-labs/cezar-plus-contract';
 import type { ProjectApiEnv } from './server.ts';
 import { queryZodValidator } from './validators.ts';
 import { WorkspaceTodoIndex, type WorkspaceTodoProjectSource } from '../workspace/todo-index.ts';

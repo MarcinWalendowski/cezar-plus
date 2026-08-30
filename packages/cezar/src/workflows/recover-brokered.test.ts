@@ -122,8 +122,8 @@ describe('recover() re-attaches a run whose broker is still alive (P4)', () => {
     expect(record?.status).toBe('running');
     expect(record?.error).toBeUndefined();
     expect(record?.steps.find((s) => s.id === 'implement')?.status).toBe('running');
-    expect(events(id).join('\n')).toContain('cezar restarted — this run kept going');
-    expect(events(id).join('\n')).not.toContain('interrupted — cezar process exited during the run');
+    expect(events(id).join('\n')).toContain('cezar-plus restarted — this run kept going');
+    expect(events(id).join('\n')).not.toContain('interrupted — cezar-plus process exited during the run');
   });
 
   it('falls through to the legacy path when the broker pid is DEAD', async () => {

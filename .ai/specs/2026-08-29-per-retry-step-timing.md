@@ -1524,9 +1524,9 @@ order:
 | --- | --- |
 | `npm run typecheck` | contract → client → server → web (`package.json:38`); `pretypecheck` builds the server first |
 | `npm test` | the `vitest run` suite (`package.json:31`); V1, V2, V3, V6 and V7 all land here, as does the `design-guardian.test.ts` rule V3e now leans on |
-| `npm run test:unit` | `-w @loki-labs/better-cezar` (`package.json:33`) |
+| `npm run test:unit` | `-w @loki-labs/cezar-plus` (`package.json:33`) |
 | `npm run build` | server + web + `check:pack` + build stamp (`package.json:16`) |
-| `npm run test:package` | `-w @loki-labs/better-cezar` (`package.json:34`); the packaged-artifact pass |
+| `npm run test:package` | `-w @loki-labs/cezar-plus` (`package.json:34`); the packaged-artifact pass |
 
 **All five must pass before the commit.** None of them, and not all five together, is sufficient
 for Done: the runtime E2E in V5 **and the browser E2E in V5b** are both separately required, and

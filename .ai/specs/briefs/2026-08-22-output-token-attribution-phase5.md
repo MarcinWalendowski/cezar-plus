@@ -120,7 +120,7 @@ figure was a chars÷4 residual guess over the biggest line item in the run.
 
 - **No evidence of a deploy having run for this change.** cezar's own deploy mechanism was not
   located in this brief's time budget (`grep deploy package.json` surfaced only
-  `server-deploy` for `@loki-labs/better-cezar`, unrelated). The workspace `CLAUDE.md`'s "standing
+  `server-deploy` for `@loki-labs/cezar-plus`, unrelated). The workspace `CLAUDE.md`'s "standing
   authorization" section names `chat/`, `bubble-trade/`, and `cezar/` — cezar's deploy step, if any,
   is not the `chat/tools/deploy` mechanism documented for the `chat` monorepo. **Whoever runs the
   `deploy` step of this chain needs to find or confirm cezar's actual deploy path before assuming

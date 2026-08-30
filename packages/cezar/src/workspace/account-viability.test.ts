@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseAgentRoute } from '@loki-labs/better-cezar-contract';
+import { parseAgentRoute } from '@loki-labs/cezar-plus-contract';
 import { ProviderAuthService } from '../core/provider-auth.ts';
 import {
   accountUsageKey,

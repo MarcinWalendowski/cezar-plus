@@ -1,5 +1,5 @@
 import { postAnalytics } from '@/api/client'
-import { ANALYTICS_MAX_EVENTS_PER_BATCH } from '@loki-labs/better-cezar-api-client'
+import { ANALYTICS_MAX_EVENTS_PER_BATCH } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * Product-usage events for the Filed board (`.ai/specs/2026-08-25-split-active-backlog-tables.md`,

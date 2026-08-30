@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CLUSTER_ALLOCATE_KIND_SPEC_NUMBER, type ClusterNodeId } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_ALLOCATE_KIND_SPEC_NUMBER, type ClusterNodeId } from '@loki-labs/cezar-plus-contract';
 import { allocate, allocationsPath, nextSpecNumberFrom, readAllocations, type AllocateOptions } from './allocate.ts';
 
 /**

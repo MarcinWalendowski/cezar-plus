@@ -718,7 +718,7 @@ It is the release record for the change and is worthless landing separately.
    > task worktree.
 
    Never a bare `git push`, never `upstream`. `git remote -v` in this checkout shows `origin` only
-   (`https://github.com/MarcinWalendowski/cezar.git`), so there is no `upstream` here to reach by
+   (`https://github.com/MarcinWalendowski/cezar-plus.git`), so there is no `upstream` here to reach by
    accident, the rule stands regardless. Verify immediately, before anything is deployed:
 
 ```bash

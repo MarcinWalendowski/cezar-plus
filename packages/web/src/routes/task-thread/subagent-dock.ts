@@ -1,4 +1,4 @@
-import type { ToolStatus, UiItem, UiToolItem } from '@loki-labs/better-cezar-api-client'
+import type { ToolStatus, UiItem, UiToolItem } from '@loki-labs/cezar-plus-api-client'
 
 import { splitToolTitle } from './thread-groups'
 import type { ThreadEntry, ThreadTurn } from './thread-state'

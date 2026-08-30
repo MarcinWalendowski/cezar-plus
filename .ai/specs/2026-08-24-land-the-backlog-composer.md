@@ -732,7 +732,7 @@ Nothing below `POST /todos` is new; `cezar todo add` has exercised it since
   analytics discriminator; `author.via === 'todo-create-route'` is what distinguishes an HTTP-route
   todo from `cli-todo-add`.
 - `CreateTodoInput` / `CreateTodoResponse` are already generated into
-  `@loki-labs/better-cezar-api-client`.
+  `@loki-labs/cezar-plus-api-client`.
 
 **One client-only model change**, `packages/web/src/routes/new-task-draft.ts:41-46,140,203-210`:
 

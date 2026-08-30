@@ -9,7 +9,7 @@ import {
   type ListOrgInvitesResponse,
   type RedeemInviteResponse,
   type RevokeInviteResponse,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { jsonZodValidator } from '../server/validators.ts';
 import { identityDir } from '../paths.ts';
 import type { SessionResolver } from '../server/server.ts';
@@ -291,7 +291,7 @@ export function createInviteRoutes(deps: InviteRouteDeps): Hono {
             return c.json(
               {
                 error:
-                  'you already belong to another organization on this deployment, and cezar cannot switch between them yet — this invite has NOT been used up, so it can still be redeemed by an account with no organization',
+                  'you already belong to another organization on this deployment, and cezar-plus cannot switch between them yet — this invite has NOT been used up, so it can still be redeemed by an account with no organization',
               },
               409,
             );

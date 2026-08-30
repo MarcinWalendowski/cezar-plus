@@ -1,4 +1,4 @@
-import type { ClusterNodeId, WorkflowDef } from '@loki-labs/better-cezar-contract';
+import type { ClusterNodeId, WorkflowDef } from '@loki-labs/cezar-plus-contract';
 import {
   isTombstoned,
   markStarted,
@@ -13,7 +13,7 @@ import {
 import { resolveTodoWorkflow, type RunManager } from './workflows/run.ts';
 import type { RunRecord } from './runs/store.ts';
 import { inheritAuthor } from './runs/task-author.ts';
-import type { TaskAuthorVia } from '@loki-labs/better-cezar-contract';
+import type { TaskAuthorVia } from '@loki-labs/cezar-plus-contract';
 import { mayStartWithoutHub } from './cluster/dispatch.ts';
 
 /**

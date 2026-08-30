@@ -3,7 +3,7 @@ import type {
   ClusterAccountGrantDecision,
   ClusterNodeId,
   StoredClusterLease,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { ClusterHomeOptions } from './node-identity.ts';
 import { acquireLease, leasesHeldBy, readLeases, releaseLease } from './leases.ts';
 import { ASSUMED_LIMIT_COOLDOWN_MS } from '../workspace/agent-account-usage.ts';

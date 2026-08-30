@@ -37,7 +37,7 @@ import type {
   clusterTodosAppendResponseSchema,
   clusterTodosBackupResponseSchema,
   clusterTodosSnapshotResponseSchema,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { AppType } from './app-type.ts';
 
 /**
@@ -164,7 +164,7 @@ describe('src/contract cluster schemas match the cluster routes exactly', () => 
   // (Note for anyone re-checking this: `packages/cezar/tsconfig.json` EXCLUDES `*.test.ts`, so
   // running tsc against it makes every assertion in this file silently vacuous — a deliberately
   // wrong `Exact<{a: string}, Overview200>` passes. `tsconfig.test.json` is the one that enforces
-  // it, and is what `npm run typecheck -w @loki-labs/better-cezar` runs.)
+  // it, and is what `npm run typecheck -w @loki-labs/cezar-plus` runs.)
   type EnrollRevokeParam = InferRequestType<
     (typeof client.api.v1.cluster.enroll)[':codeId']['$delete']
   >['param'];

@@ -1,5 +1,5 @@
 import { join, sep } from 'node:path';
-import type { WorkspaceGrantProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
+import type { WorkspaceGrantProject, WorkspaceWorktree } from '@loki-labs/cezar-plus-contract';
 import { listProjects } from './projects.ts';
 
 /**

@@ -2,7 +2,7 @@ import { cleanup, render } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import type { KnowledgeDocument } from '@loki-labs/better-cezar-api-client'
+import type { KnowledgeDocument } from '@loki-labs/cezar-plus-api-client'
 
 import { DocumentReader, parseCorrectionTrail } from './document'
 

@@ -167,3 +167,53 @@ describe('autoNamingActive', () => {
     expect(autoNamingActive({ CEZ_DRY_RUN: '1', CEZ_AUTONAME: '0' })).toBe(false);
   });
 });
+
+/**
+ * D4c of `.ai/specs/2026-08-29-global-provider-toggle.md` — auto-naming builds its runner straight
+ * from `config.defaultRunner` and is behind no entry gate, so the lock has to be handed to it
+ * explicitly or the platform switch leaves task naming on the other provider.
+ */
+describe('generateRunName under a workspace provider lock', () => {
+  async function nameWith(runnerLock?: 'claude' | 'codex'): Promise<string[]> {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const root = mkdtempSync(join(tmpdir(), 'cez-namer-lock-'));
+    const asked: string[] = [];
+    try {
+      const { generateRunName } = await import('./auto-name.ts');
+      await generateRunName(
+        root,
+        { task: 'rename the button' },
+        {
+          ...(runnerLock ? { runnerLock } : {}),
+          runnerFactory: (backend) => {
+            asked.push(backend);
+            return {
+              backend,
+              async run() {
+                return { text: '{"title":"renaming the button"}' };
+              },
+              startSession() {
+                throw new Error('not used by the namer');
+              },
+              async interrupt() {},
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any;
+          },
+        },
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    return asked;
+  }
+
+  it('CONTROL: with no lock it names on the project default', async () => {
+    await expect(nameWith()).resolves.toEqual(['claude']);
+  }, 30_000);
+
+  it('names on the locked provider instead', async () => {
+    await expect(nameWith('codex')).resolves.toEqual(['codex']);
+  }, 30_000);
+});

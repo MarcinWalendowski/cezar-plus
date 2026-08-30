@@ -26,7 +26,7 @@ the manifests keep-ours is exactly what "skips" the upstream release commit. The
 the merge-base to `1912f2f2`, so the next sync starts clean.
 
 **Our divergence from upstream is almost entirely one mechanical fact:** the
-`@open-mercato/cezar*` → `@loki-labs/better-cezar*` rename (plus additive features in new files).
+`@open-mercato/cezar*` → `@loki-labs/cezar-plus*` rename (plus additive features in new files).
 Every web-file conflict below is the one import line; the two heavyweight files (`client.ts`,
 `app-shell.tsx`) are our backup + agent-account-usage additions, and `app-shell.tsx` **auto-merges
 anyway**.
@@ -66,7 +66,7 @@ resolved merge, which skips them by construction *and* advances the base.
 Two facts explain every conflict:
 
 1. **The rename is mechanical and total.** `@open-mercato/cezar-contract|-api-client|-web|cezar`
-   and the `cezar-cli` alias became `@loki-labs/better-cezar-*`. In web source this is a single
+   and the `cezar-cli` alias became `@loki-labs/cezar-plus-*`. In web source this is a single
    `import` line per file, so any upstream commit touching such a file conflicts on exactly that
    line — resolved by keeping our specifier. (Verified: `engine-pills.tsx`, `run-history.ts`
    diffs are import-only.)
@@ -94,10 +94,10 @@ Two facts explain every conflict:
 
 | file | resolution |
 |---|---|
-| `packages/contract/package.json` | **keep ours** (`@loki-labs/better-cezar-contract`, 0.10.0) |
+| `packages/contract/package.json` | **keep ours** (`@loki-labs/cezar-plus-contract`, 0.10.0) |
 | `packages/api-client/package.json` | **keep ours** (name, version, `^0.10.0` internal pin) |
 | `packages/cezar/package.json` | **keep ours** |
-| `packages/web/package.json` | **keep ours** (`@loki-labs/better-cezar-web`) |
+| `packages/web/package.json` | **keep ours** (`@loki-labs/cezar-plus-web`) |
 | `alias-cezar/package.json` | **keep ours** (name, version, pin, `repository` field) |
 | `package-lock.json` | **do not hand-merge** — resolve manifests first, then `npm install` to regenerate |
 | `CHANGELOG.md` | **union** — keep our auth/orgs/backup record incl. `CORRECTED` lead-ins (doctrine 3a); add upstream's new entries. Taking "theirs" deletes our record. |
@@ -166,7 +166,7 @@ range, so no health-fixture tax and no route-parity byte-identity risk from new 
 - **Sidebar footer (`89837ebb`):** `app-shell.test.tsx` (which item truncates) — the e2e is
   upstream's and needs a browser provider, so runtime E2E stays QA Needed.
 - **Post-merge sanity:** `git merge-base origin/main upstream/main` now `1912f2f2`; the 6 manifests
-  still name `@loki-labs/better-cezar*` at 0.10.0; README unchanged where we own it.
+  still name `@loki-labs/cezar-plus*` at 0.10.0; README unchanged where we own it.
 - **Runtime E2E (Done vs QA Needed):** launch the cockpit, hand a GitHub issue to the agent picking
   a second claude login, confirm the run uses it; confirm the sidebar footer holds on a nightly
   version string. Until run: **QA Needed**.

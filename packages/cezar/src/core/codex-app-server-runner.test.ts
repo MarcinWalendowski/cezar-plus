@@ -88,7 +88,7 @@ describe('a teardown cezar initiated (codex app-server)', () => {
     expect(events.some((e) => e.type === 'error')).toBe(false);
     expect(events.at(-1)).toEqual({ type: 'done' });
     expect(
-      events.some((e) => e.type === 'note' && e.message.includes('terminated by cezar (code 143)')),
+      events.some((e) => e.type === 'note' && e.message.includes('terminated by cezar-plus (code 143)')),
     ).toBe(true);
   }, 15_000);
 

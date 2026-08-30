@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { UiState } from '@loki-labs/better-cezar-contract';
+import type { UiState } from '@loki-labs/cezar-plus-contract';
 
 /**
  * `.ai/cezar/ui-state.json` — small GUI preferences the cockpit persists (files, not a DB).

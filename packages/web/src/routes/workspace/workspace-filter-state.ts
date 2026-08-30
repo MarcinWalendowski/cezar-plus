@@ -1,4 +1,4 @@
-import type { WorkspaceUiState } from '@loki-labs/better-cezar-api-client'
+import type { WorkspaceUiState } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * Pure filter-state logic for `/workspace/tasks` (W4.10,

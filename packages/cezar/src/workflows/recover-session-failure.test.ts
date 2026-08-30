@@ -125,7 +125,7 @@ describe('recover() contains backend session failures (#562)', () => {
     });
     store.updateStep(record.id, 'work', {
       status: 'failed',
-      error: 'interrupted — cezar process exited during the run',
+      error: 'interrupted — cezar-plus process exited during the run',
     });
     store.addStep(record.id, { id: 'continue-1', name: 'Continue', kind: 'agent' });
     store.updateStep(record.id, 'continue-1', {

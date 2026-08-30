@@ -157,3 +157,60 @@ describe('classifyTask', () => {
     for (const c of TASK_CLASSES) expect(specs[0]!.systemPrompt, c).toContain(`"${c}"`);
   });
 });
+
+/**
+ * D4c of `.ai/specs/2026-08-29-global-provider-toggle.md`: the classifier is one of four model
+ * calls that never touch `RunManager`, so nothing in the dispatch wiring reaches it. A lock that
+ * visibly fails to move classification is a lock with a hole in it, and this is the assertion
+ * that would fail before the lock was threaded here.
+ */
+describe('classifyTask under a workspace provider lock', () => {
+  const savedHome = process.env.CEZ_HOME;
+  let home: string;
+  let root: string;
+
+  beforeAll(() => {
+    home = mkdtempSync(join(realpathSync(tmpdir()), 'cez-classify-lock-home-'));
+    root = mkdtempSync(join(realpathSync(tmpdir()), 'cez-classify-lock-root-'));
+    process.env.CEZ_HOME = home;
+  });
+  afterAll(() => {
+    if (savedHome === undefined) delete process.env.CEZ_HOME;
+    else process.env.CEZ_HOME = savedHome;
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /** Two observables, not one: WHICH backend the factory was asked for, and the cheap-model pin
+   *  that hangs off it. The second is what proves the whole per-runner lookup moved rather than
+   *  just the factory argument. */
+  function classifyWith(runnerLock?: 'claude' | 'codex') {
+    const { runner, specs } = scriptedRunner([JSON.stringify({ class: 'tiny' })]);
+    const asked: string[] = [];
+    return {
+      asked,
+      specs,
+      promise: classifyTask(root, 'rename the button', {
+        runnerFactory: (backend) => {
+          asked.push(backend);
+          return runner;
+        },
+        ...(runnerLock ? { runnerLock } : {}),
+      }),
+    };
+  }
+
+  it('CONTROL: with no lock it classifies on the project default (claude here)', async () => {
+    const c = classifyWith();
+    await c.promise;
+    expect(c.asked).toEqual(['claude']);
+    expect(c.specs[0]?.model).toBe('haiku');
+  });
+
+  it('classifies on the locked provider instead, cheap model and all', async () => {
+    const c = classifyWith('codex');
+    await c.promise;
+    expect(c.asked).toEqual(['codex']);
+    expect(c.specs[0]?.model).toBe('gpt-5.6-luna');
+  });
+});

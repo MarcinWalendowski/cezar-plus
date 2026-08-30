@@ -44,7 +44,7 @@ import {
   startWorkspaceTodo,
   retryProviderAuth,
 } from './client'
-import { setApiScope } from '@loki-labs/better-cezar-api-client'
+import { setApiScope } from '@loki-labs/cezar-plus-api-client'
 
 /** The one seam under test: every call must go through `fetch` and nothing else. */
 const fetchMock = vi.fn<typeof fetch>()
@@ -648,7 +648,7 @@ describe('history responses are validated at the boundary (#827)', () => {
     const error = (await getRunHistory('run-1').catch((e: unknown) => e)) as ApiError
     expect(error).toBeInstanceOf(ApiError)
     expect(error.status).toBe(200)
-    expect(error.message).toBe('the cezar server answered /runs/run-1/history with an unexpected body')
+    expect(error.message).toBe('the cezar-plus server answered /runs/run-1/history with an unexpected body')
   })
 
   it('rejects a 200 whose page carries a non-array `events`', async () => {
@@ -664,7 +664,7 @@ describe('history responses are validated at the boundary (#827)', () => {
     expect(error).toBeInstanceOf(ApiError)
     expect(error.status).toBe(200)
     expect(error.message).toBe(
-      'the cezar server answered /runs/run-1/history-context with an unexpected body',
+      'the cezar-plus server answered /runs/run-1/history-context with an unexpected body',
     )
   })
 
@@ -687,7 +687,7 @@ describe('history responses are validated at the boundary (#827)', () => {
  * A Cloudflare Access app in front of a hosted deployment answers **every** path with a 302 to
  * `https://<team>.cloudflareaccess.com/…` once its cookie is gone. `fetch` follows redirects by
  * default, so that bounce was chased off-origin, rejected by CORS, and surfaced as a `TypeError`
- * — which this module reported as "cannot reach the cezar server", blaming a server that was
+ * — which this module reported as "cannot reach the cezar-plus server", blaming a server that was
  * answering fine. The tab then sat there, still showing the cockpit, waiting.
  *
  * So the assertion is not merely "an error is thrown" — an error was ALWAYS thrown. It is that

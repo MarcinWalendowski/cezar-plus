@@ -3,7 +3,7 @@ import {
   analyticsEventsRequestSchema,
   type AnalyticsEvent,
   type AnalyticsEventsResponse,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { jsonZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';
 import { appendAnalyticsEvent } from '../workspace/analytics-log.ts';

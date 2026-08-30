@@ -84,7 +84,7 @@
 
 import { followupsEnabled } from '../handoff.ts';
 import { autoAccountsEnabled } from '../workspace/agent-accounts-auto.ts';
-import type { AuthProvider, Capabilities } from '@loki-labs/better-cezar-contract';
+import type { AuthProvider, Capabilities } from '@loki-labs/cezar-plus-contract';
 
 /** Every IPv4 address in 127.0.0.0/8, anchored. Anchoring is load-bearing: a
  *  `startsWith('127.')` test also matches attacker-controlled *hostnames* like
@@ -182,7 +182,7 @@ export function isLoopbackHostHeader(host: string | null | undefined): boolean {
  * something other than `'none'`.
  *
  * `'supervisor'` added 2026-08-07 (D10, phase 6/7 fill unit 5 — see `authProviderSchema`'s own
- * doc comment, `@loki-labs/better-cezar-contract`, for what this value means and does not mean). This
+ * doc comment, `@loki-labs/cezar-plus-contract`, for what this value means and does not mean). This
  * function needed exactly the one added literal below — the boot gate, the D4 project-team
  * registry seam (`server/server.ts#openProjectTeamRegistry`) and every other reader of this
  * function's return value already treat "any non-`'none'` provider" uniformly.
@@ -199,7 +199,7 @@ export function resolveAuthProvider(env: NodeJS.ProcessEnv = process.env): AuthP
  *
  * **Deliberately its own reader and NOT a member of `resolveCapabilities`/`capabilitiesSchema`**,
  * exactly like `resolveAuthProvider` above and for the same reason (see `authProviderSchema`'s
- * docblock in `@loki-labs/better-cezar-contract`): the plan requires the flag-off `/api/v1/health`
+ * docblock in `@loki-labs/cezar-plus-contract`): the plan requires the flag-off `/api/v1/health`
  * body to stay byte-identical to today, and a required capability key would grow it and force the
  * fixture-wide edit that makes the health-payload control meaningless. The cockpit learns whether
  * backup is on from `GET /api/v1/backup`'s own `enabled` field, never from health — the same way

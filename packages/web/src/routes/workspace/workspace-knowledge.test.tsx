@@ -10,7 +10,7 @@ import type {
   WorkspaceKnowledgeDomainsResponse,
   WorkspaceKnowledgeResult,
   WorkspaceKnowledgeSearchResponse,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 
 import { WorkspaceKnowledgeRoute } from './workspace-knowledge'
 

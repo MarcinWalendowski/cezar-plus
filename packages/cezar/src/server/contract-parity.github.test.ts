@@ -10,7 +10,7 @@ import type {
   githubPrChangesDataSchema,
   githubPrMergeStateResponseSchema,
   githubRefStatusDataSchema,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type {
   changesPayloadSchema,
   reclaimWorktreesResponseSchema,
@@ -19,7 +19,7 @@ import type {
   repoResponseSchema,
   worktreeEntrySchema,
   worktreesResponseSchema,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { AppType } from './app-type.ts';
 
 /**

@@ -5,7 +5,7 @@ import type {
   ClusterNodeId,
   ClusterPlacementResult,
   ClusterProjectKey,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { buildDispatch, type BuildDispatchInput } from './dispatch.ts';
 import { placeRun, type PlacementCandidate, type PlacementRequest } from './placement.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';

@@ -14,7 +14,7 @@ import type {
   ProviderStatusResponse,
   RunEvent,
   RunStatus,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 
 import { TaskThreadRoute, ThreadView } from './task-thread'
 import { buildTranscriptRows, mainTranscriptSections } from './session-transcript'

@@ -229,7 +229,7 @@ export async function readAccountIdentity(
   if (provider === 'codex') return readCodexIdentity(configDir);
   return {
     available: false,
-    reason: 'OpenCode keeps its login outside its config folder, so cezar cannot read it.',
+    reason: 'OpenCode keeps its login outside its config folder, so cezar-plus cannot read it.',
     fields: [],
   };
 }

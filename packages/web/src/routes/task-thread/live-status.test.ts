@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { RunEvent, UiItem } from '@loki-labs/better-cezar-api-client'
+import type { RunEvent, UiItem } from '@loki-labs/cezar-plus-api-client'
 
 import { IDLE_TIMEOUT_MS, QUIET_MS, STALE_MS, lastEventAt, lastLine, liveStatus } from './live-status'
 import { reduceThread } from './thread-state'

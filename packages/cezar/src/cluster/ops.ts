@@ -12,7 +12,7 @@ import {
   type ClusterOpsFrame,
   type ClusterProjectKey,
   type ClusterTodoFields,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { TodoItem } from '../todos.ts';
 
 /**

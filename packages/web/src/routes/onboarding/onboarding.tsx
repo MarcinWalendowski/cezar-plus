@@ -20,7 +20,7 @@ import type {
   RenameOnboardingTeamInput,
   Role,
   Team,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { useHealth } from '@/api/queries'
 // The local brand glyph, not a lucide icon — `app-shell.tsx`'s own "Clone from GitHub…" menu
 // item uses this exact one, and lucide dropped brand icons.
@@ -131,7 +131,7 @@ export function OnboardingRoute() {
             icon={<TriangleAlertIcon />}
             tone="danger"
             title="Could not check sign-in status"
-            subtitle={probe.error instanceof Error ? probe.error.message : 'The cezar server did not answer.'}
+            subtitle={probe.error instanceof Error ? probe.error.message : 'The cezar-plus server did not answer.'}
             actions={
               <Button variant="outline" onClick={() => void probe.refetch()}>
                 Try again
@@ -145,7 +145,7 @@ export function OnboardingRoute() {
             icon={<LockIcon />}
             tone="neutral"
             title="Sign-in isn't set up on this deployment"
-            subtitle="This cezar instance runs without authentication — there is no organization to onboard into."
+            subtitle="This cezar-plus instance runs without authentication — there is no organization to onboard into."
           />
         ) : wizard.step === 'sign-in' ? (
           <SignInStep />
@@ -328,7 +328,7 @@ function NeedsInviteStep({ onClaimed }: { onClaimed: (result: { org: Org; team: 
       icon={<MailQuestionIcon />}
       tone="neutral"
       title="You need an invite to join this deployment"
-      subtitle="You're signed in, but this cezar already belongs to an organization. Ask one of its owners to invite you — until then there is nothing here for you to set up."
+      subtitle="You're signed in, but this cezar-plus already belongs to an organization. Ask one of its owners to invite you — until then there is nothing here for you to set up."
       actions={
         claiming ? undefined : (
           <Button variant="outline" data-slot="onboarding-claim-open" onClick={() => setClaiming(true)}>

@@ -4,7 +4,7 @@ import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { FsBrowseResponse, Org, Role, Team } from '@loki-labs/better-cezar-api-client'
+import type { FsBrowseResponse, Org, Role, Team } from '@loki-labs/cezar-plus-api-client'
 
 import { OnboardingRoute } from './onboarding'
 

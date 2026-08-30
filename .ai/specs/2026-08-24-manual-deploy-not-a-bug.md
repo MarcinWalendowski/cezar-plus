@@ -257,7 +257,7 @@ Tests in `postconditions.test.ts` beside `:284`, all against the **backend-red p
 
 Plus one test for D2b, in `handoff-gate.test.ts` beside `:61`: park a manual-deploy handoff, resolve it while the recheck is **still red**, and assert the persisted `pendingHandoff.reason` is the concise handoff reason, contains no probe source (`set -u` is the cheap marker), and is under 2,000 characters. Without this test the D2b regression is invisible to every gate, since the first park looks correct.
 
-**Phase 3: cezar's own target file (D3, D4-second-half).** `.ai/deploy-targets.json`: rewrite both `manualReason` strings to name the command and the Resolve step, and add the fourth dated `$comment` entry. Data only, no code, no test, but re-run `npm run test:unit -w @loki-labs/better-cezar` because `postconditions.ts` parses this file at runtime and a JSON typo is a red deploy step for every future run.
+**Phase 3: cezar's own target file (D3, D4-second-half).** `.ai/deploy-targets.json`: rewrite both `manualReason` strings to name the command and the Resolve step, and add the fourth dated `$comment` entry. Data only, no code, no test, but re-run `npm run test:unit -w @loki-labs/cezar-plus` because `postconditions.ts` parses this file at runtime and a JSON typo is a red deploy step for every future run.
 
 **Phase 4: the record (D4-first-half).** Four writes, and the phase is not done until all four exist:
 

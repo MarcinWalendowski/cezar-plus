@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import type { ClusterNodeId, ClusterProjectKey, ClusterTodoFields } from '@loki-labs/better-cezar-contract';
+import type { ClusterNodeId, ClusterProjectKey, ClusterTodoFields } from '@loki-labs/cezar-plus-contract';
 import { backupAndAppendTodosPreservingIds, backupTodos, readTodos, type TodoItem } from '../todos.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';
 

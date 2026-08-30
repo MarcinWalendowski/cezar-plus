@@ -1,6 +1,6 @@
 # Publishing — stable releases and npm previews
 
-How cezar reaches npm. Two paths, deliberately separate
+How cezar-plus reaches npm. Two paths, deliberately separate
 (spec: `.ai/specs/2026-07-18-npm-preview-publish.md`, issue #482):
 
 - **Stable releases** (`latest`) are **owner-driven and manual**: a maintainer
@@ -18,8 +18,8 @@ Three packages are in the release, always at the same version; two of them ship:
 
 | Package | Ships? | What it is |
 |---|---|---|
-| `@loki-labs/better-cezar-api-client` | **no — `private`** | the typed client and shared contract types (`packages/api-client`) |
-| `@loki-labs/better-cezar` | yes | the service + CLI, ships the built cockpit (`packages/cezar`) |
+| `@loki-labs/cezar-plus-api-client` | **no — `private`** | the typed client and shared contract types (`packages/api-client`) |
+| `@loki-labs/cezar-plus` | yes | the service + CLI, ships the built cockpit (`packages/cezar`) |
 | `cezar-cli` | yes | the unscoped bin alias, so `npx cezar-cli` works (`alias-cezar`) |
 
 That table is also the **publish order**, and it is load-bearing: each package
@@ -151,7 +151,7 @@ On **npmjs.com** (as an owner of the npm org and of the `cezar-cli` package):
      reports that as a misleading `E404 Not Found - PUT <name>` rather than a
      `403`. Every package added to the release set fails its first publish
      until the token can create packages in the scope —
-     `@loki-labs/better-cezar-api-client` was the first to hit this.
+     `@loki-labs/cezar-plus-api-client` was the first to hit this.
 4. For every package: Settings → *Publishing access* → **"Require two-factor
    authentication or an automation or granular access token"** (CI publishes
    with the token; humans still need 2FA).

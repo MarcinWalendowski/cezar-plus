@@ -8,7 +8,7 @@ import {
   type ClusterPresenceFrame,
   type ClusterProjectAdvert,
   type StoredClusterNode,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { createEnrollmentCode, redeemEnrollmentCode } from './enrollment.ts';
 import { hashRequestBody, signNodeHttpPrincipal, verifyNodeHttpPrincipal, type NodeHttpPrincipal } from './node-auth.ts';
 import { ensureNodeIdentity } from './node-identity.ts';

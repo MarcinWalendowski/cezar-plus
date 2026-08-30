@@ -1,5 +1,5 @@
 import { resolveAuthProvider, resolveCapabilities } from './server/capabilities.ts';
-import type { AuthProvider } from '@loki-labs/better-cezar-contract';
+import type { AuthProvider } from '@loki-labs/cezar-plus-contract';
 
 /**
  * D1's boot gate (spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`), as a pure decision
@@ -75,7 +75,7 @@ export interface AuthBootGate {
  * missing login screen.
  */
 const REFUSAL =
-  '\ncezar refuses to boot: hosted mode with no authentication exposes shell execution to\n' +
+  '\ncezar-plus refuses to boot: hosted mode with no authentication exposes shell execution to\n' +
   'anyone who can reach this port (POST /api/v1/workflows → spawn bash). Set CEZ_AUTH, or\n' +
   'CEZ_ALLOW_UNAUTHENTICATED=1 if your network is the perimeter.\n';
 

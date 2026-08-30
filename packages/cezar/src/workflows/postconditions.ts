@@ -2,7 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import type { TestAttestation } from '@loki-labs/better-cezar-contract';
+import type { TestAttestation } from '@loki-labs/cezar-plus-contract';
 
 /**
  * STEP POST-CONDITIONS (`.ai/specs/2026-08-20-steps-green-only-when-verified.md`).

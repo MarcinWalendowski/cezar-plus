@@ -4,7 +4,7 @@ import { Link as RouterLink, useNavigate } from 'react-router'
 
 import { onWorkspaceEvent } from '@/api/global-events'
 import { useCheckoutProject, useProjects } from '@/api/queries'
-import type { CheckoutProgressEvent } from '@loki-labs/better-cezar-api-client'
+import type { CheckoutProgressEvent } from '@loki-labs/cezar-plus-api-client'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -118,7 +118,7 @@ export function CloneProjectDialog({
         <DialogHeader>
           <DialogTitle>Clone from GitHub</DialogTitle>
           <DialogDescription>
-            cezar clones with <code>gh</code> into your checkout root and adds the result as a project.
+            cezar-plus clones with <code>gh</code> into your checkout root and adds the result as a project.
           </DialogDescription>
         </DialogHeader>
 

@@ -1549,7 +1549,7 @@ this worktree at that path, unlike the 2026-08-23 brief):
 - `packages/cezar/src/runs/store.ts:742,776,853,1348`: `RunStore extends EventEmitter`, plus the
   `getRun`/`updateRun`/`flush` signatures the guard's structural `RunExitGuardStore` must match
 - `packages/contract/src/runs.ts:39`: `RunStatus` is exported, which the inline
-  `import('@loki-labs/better-cezar-contract').RunStatus` annotations in `index.ts` depend on
+  `import('@loki-labs/cezar-plus-contract').RunStatus` annotations in `index.ts` depend on
 - `packages/cezar/package.json:35-42` and root `package.json` scripts, `vitest.config.ts`
   (`include: ['src/**/*.test.ts']`), `.ai/agentic.config.json:8-16` (five validation commands,
   no `lint`), and `grep -c '^test(' test/e2e/*.test.ts` → 18, `package-cli` 1: all four of the

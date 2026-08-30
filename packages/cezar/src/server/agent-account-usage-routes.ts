@@ -3,7 +3,7 @@ import {
   agentAccountRouteId,
   type AccountUsageResponse,
   type AccountUsageRow,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { probeClaudeAccount, probeClaudeUsage, probeCodexQuota } from '../core/agent-account-probe.ts';
 import { PROFILE_CAPABLE_PROVIDERS } from '../core/agent-profiles.ts';
 import {

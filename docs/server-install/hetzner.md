@@ -1,6 +1,6 @@
 # Remote access — Hetzner (one process per organization)
 
-Host cezar on a Linux box where **each organization gets its own unix user, its
+Host cezar-plus on a Linux box where **each organization gets its own unix user, its
 own home, and its own process**, behind a real sign-in (OIDC or Google) instead
 of one shared password.
 
@@ -11,7 +11,7 @@ and you want a boundary *between* tenants. Pick `ubuntu-vps` when one shared
 login in front of one shared cockpit is what you actually want — it is a much
 smaller install.
 
-**How it's wired.** Every cezar process stays loopback-bound. **nginx** is the
+**How it's wired.** Every cezar-plus process stays loopback-bound. **nginx** is the
 only public surface. One extra process, the **supervisor**, terminates auth: it
 runs the OIDC/Google flow, owns the session cookie, and owns the only copy of
 the identity store. For a request to an org's hostname, nginx asks the
@@ -165,7 +165,7 @@ You will be asked for:
 |---|---|
 | Auth provider | `oidc` or `google`. With `google` the issuer is pinned; with `oidc` you also give the issuer URL and discovery runs against `<issuer>/.well-known/openid-configuration`. |
 | OAuth client ID / client secret | Register `https://login.example.com/auth/callback` as the redirect URI with your provider. |
-| Bootstrap claim code | Leave blank and cezar mints a random one at every start and prints it to its own log. Type one to pin it. See [Claiming the deployment](#claiming-the-deployment). |
+| Bootstrap claim code | Leave blank and cezar-plus mints a random one at every start and prints it to its own log. Type one to pin it. See [Claiming the deployment](#claiming-the-deployment). |
 | Let's Encrypt email | Renewal notices. |
 
 Steps it runs: `supervisor-user` → `supervisor-systemd` → `nginx` → `tls` →
@@ -229,7 +229,7 @@ are easy to inspect.
 Each org's unit is hardened: `NoNewPrivileges`, `PrivateTmp`,
 `ProtectSystem=full`, `ProtectProc=invisible`, `ProtectControlGroups`,
 `ProtectKernelTunables`, `RestrictSUIDSGID`. **`ProtectHome` is deliberately
-absent** — cezar's whole job is reading and writing that user's own home
+absent** — cezar-plus's whole job is reading and writing that user's own home
 (`CEZ_HOME`, the project root, the agent CLIs' credentials), so protecting it
 would break the product; the `0700` home is the actual lock.
 

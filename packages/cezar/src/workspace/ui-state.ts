@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import type { WorkspaceUiState } from '@loki-labs/better-cezar-contract';
+import type { WorkspaceUiState } from '@loki-labs/cezar-plus-contract';
 import { workspaceUiStatePath } from '../paths.ts';
 import { atomicWriteJsonSync } from './config.ts';
 

@@ -1,6 +1,6 @@
 import { Link } from 'react-router'
 
-import type { ApiRun } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun } from '@loki-labs/cezar-plus-api-client'
 import { Pill } from '@/components/pill'
 
 function taskWord(count: number): string {

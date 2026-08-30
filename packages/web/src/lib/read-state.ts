@@ -1,4 +1,4 @@
-import type { RunRecord } from '@loki-labs/better-cezar-api-client'
+import type { RunRecord } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * The read/unread grammar for *done items* (#unread-done-items) — the email-style "which

@@ -4,7 +4,7 @@ import { createElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { Runner } from '@loki-labs/better-cezar-api-client'
+import type { LockableRunner, Runner } from '@loki-labs/cezar-plus-api-client'
 
 import { engineBody, engineRunBody, type EnginePick, type ResolvedEngine, useResolvedEngine } from './engine-pills'
 
@@ -25,6 +25,7 @@ const resolved = (over: Partial<ResolvedEngine> = {}): ResolvedEngine => ({
   providerError: false,
   accounts: [],
   account: null,
+  lock: null,
   ...over,
 })
 
@@ -61,6 +62,7 @@ function stubResolverFetch({
   profiles = [],
   selections = {},
   repoRoot = '/repo',
+  runnerLock,
 }: {
   providers: unknown
   providerStatus?: number
@@ -70,6 +72,9 @@ function stubResolverFetch({
   profiles?: ReturnType<typeof profile>[]
   selections?: Record<string, Partial<Record<Runner, string>>>
   repoRoot?: string
+  /** The global engine lock on `GET /workspace/config`. Omitted by default — the shape this file
+   *  served before the lock existed, and the shape an older server still sends. */
+  runnerLock?: LockableRunner | null
 }) {
   vi.stubGlobal(
     'fetch',
@@ -101,6 +106,8 @@ function stubResolverFetch({
         })
       }
       if (path.endsWith('/repo')) return jsonResponse({ info: { root: repoRoot } })
+      if (path.endsWith('/workspace/config'))
+        return jsonResponse(runnerLock === undefined ? {} : { runnerLock })
       return jsonResponse({})
     }),
   )
@@ -395,5 +402,100 @@ describe('useResolvedEngine agent accounts', () => {
 
     expect(result.current.accounts).toEqual([])
     expect(engineRunBody(result.current)).toEqual(engineBody(result.current))
+  })
+})
+
+/**
+ * The global engine lock, at the shared resolver (`.ai/specs/2026-08-29-global-provider-toggle.md`,
+ * D2 rank 5 / D6a, V5d).
+ *
+ * `useResolvedEngine` is what the Inbox quick-start and the GitHub hand-off both start runs
+ * through, so these are the cases that keep those two surfaces honest without a suite each. They
+ * assert the BODY as well as the resolved runner: the pill and the request agreeing is the whole
+ * point, and the production report was a pill that said codex over a run that was claude.
+ */
+describe('useResolvedEngine engine lock', () => {
+  const BOTH_CONNECTED = {
+    providers: [
+      { provider: 'claude', status: 'connected', enabled: true },
+      { provider: 'codex', status: 'connected', enabled: true },
+    ],
+  }
+
+  it('overrides an explicit pick, and sends the lock', async () => {
+    stubResolverFetch({ providers: BOTH_CONNECTED, runnerLock: 'codex' })
+
+    const { result } = renderResolved({ runner: 'claude', model: null, account: null })
+    await waitFor(() => expect(result.current.lock).toBe('codex'))
+
+    expect(result.current.runner).toBe('codex')
+    expect(engineBody(result.current).runner).toBe('codex')
+  })
+
+  it('honours the pick on Auto — the control', async () => {
+    // Without this the case above passes against a resolver that ignores the pick outright.
+    stubResolverFetch({ providers: BOTH_CONNECTED, runnerLock: null })
+
+    const { result } = renderResolved({ runner: 'claude', model: null, account: null })
+    await waitFor(() => expect(result.current.canRun).toBe(true))
+
+    expect(result.current.lock).toBeNull()
+    expect(result.current.runner).toBe('claude')
+  })
+
+  it('sends the locked runner even when nothing was picked and it equals the project default', async () => {
+    // `runnerOverride` omits a runner that IS the server's own default, which is right for an
+    // untouched pill and wrong for a lock: omission means "you decide", and the pill is not
+    // offering a decision any more. It reaches the same provider either way here — that is exactly
+    // why it has to be asserted rather than assumed from a green run.
+    stubResolverFetch({ providers: BOTH_CONNECTED, projectDefault: 'claude', runnerLock: 'claude' })
+
+    const { result } = renderResolved()
+    await waitFor(() => expect(result.current.lock).toBe('claude'))
+
+    expect(result.current.runnerExplicit).toBe(true)
+    expect(engineBody(result.current).runner).toBe('claude')
+  })
+
+  it('omits it on Auto with the same inputs — the control', async () => {
+    stubResolverFetch({ providers: BOTH_CONNECTED, projectDefault: 'claude', runnerLock: null })
+
+    const { result } = renderResolved()
+    await waitFor(() => expect(result.current.canRun).toBe(true))
+
+    expect(engineBody(result.current).runner).toBeUndefined()
+  })
+
+  it('drops a foreign provider\'s account id (D6a)', async () => {
+    // An account id is provider-scoped, so carrying a codex login onto a claude-locked run names a
+    // login that provider does not have. It fails as a routing miss several layers down, where
+    // nothing left says the lock is why.
+    stubResolverFetch({
+      providers: BOTH_CONNECTED,
+      profiles: [profile('claude', 'default', 'Default'), profile('codex', 'work', 'Codex Work')],
+      runnerLock: 'claude',
+    })
+
+    const { result } = renderResolved({ runner: 'codex', model: null, account: 'work' })
+    await waitFor(() => expect(result.current.runner).toBe('claude'))
+
+    expect(result.current.account).toBeNull()
+    expect('agentProfile' in engineRunBody(result.current)).toBe(false)
+  })
+
+  it('ignores a lock naming a provider this host cannot run (D3)', async () => {
+    // Availability outranks the lock, server-side and here: `downgradePinnedRunner` still moves
+    // work off a locked provider with no runnable account, so a picker fixed to it would promise
+    // something dispatch will not do.
+    stubResolverFetch({
+      providers: { providers: [{ provider: 'claude', status: 'connected', enabled: true }] },
+      runnerLock: 'codex',
+    })
+
+    const { result } = renderResolved()
+    await waitFor(() => expect(result.current.canRun).toBe(true))
+
+    expect(result.current.lock).toBeNull()
+    expect(result.current.runner).toBe('claude')
   })
 })

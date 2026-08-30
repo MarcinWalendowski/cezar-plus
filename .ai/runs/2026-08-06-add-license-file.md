@@ -16,7 +16,7 @@ evaluating it for adoption.
 
 ## Scope
 
-The repository is a **monorepo** (root `cezar-monorepo`, private, publishes nothing; workspaces
+The repository is a **monorepo** (root `cezar-plus-monorepo`, private, publishes nothing; workspaces
 `packages/{contract,api-client,cezar,web}`, of which only `@open-mercato/cezar` is publishable).
 That shapes the fix into two places:
 

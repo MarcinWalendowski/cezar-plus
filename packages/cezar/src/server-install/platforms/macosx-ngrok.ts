@@ -211,7 +211,7 @@ async function resolveCezarArgv(ctx: InstallContext): Promise<string[]> {
   // No runnable cezar → installing a KeepAlive agent would make launchd
   // respawn-throttle a permanently failing job across reboots. Fail the step.
   throw new StepAborted(
-    `could not locate a runnable cezar (${entry} missing, no global ${OFFICIAL_CLI_PKG}) — ` +
+    `could not locate a runnable cezar-plus (${entry} missing, no global ${OFFICIAL_CLI_PKG}) — ` +
       `install it (npm i -g ${OFFICIAL_CLI_PKG}) or build the checkout, then re-run with --reconfigure autostart`,
   );
 }

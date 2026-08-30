@@ -1,4 +1,4 @@
-import type { DiffStat } from '@loki-labs/better-cezar-api-client'
+import type { DiffStat } from '@loki-labs/cezar-plus-api-client'
 import { cn } from '@/lib/utils'
 
 /**

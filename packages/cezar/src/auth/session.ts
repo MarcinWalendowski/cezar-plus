@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import type { AuthProvider } from '@loki-labs/better-cezar-contract';
+import type { AuthProvider } from '@loki-labs/cezar-plus-contract';
 import { identityDir } from '../paths.ts';
 import { resolveAuthProvider } from '../server/capabilities.ts';
 import type { Principal, SessionResolver } from '../server/server.ts';

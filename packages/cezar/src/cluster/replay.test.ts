@@ -1,4 +1,4 @@
-import { CLUSTER_FRAME_MAX_BYTES, CLUSTER_PROTOCOL, clusterOpSchema } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_FRAME_MAX_BYTES, CLUSTER_PROTOCOL, clusterOpSchema } from '@loki-labs/cezar-plus-contract';
 import { describe, expect, it } from 'vitest';
 import type { TodoItem } from '../todos.ts';
 import type { ReplicaFanoutTarget } from './replica-fanout.ts';

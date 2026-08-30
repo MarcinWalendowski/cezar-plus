@@ -15,7 +15,7 @@ import {
   type ProjectListEntry,
   type ProjectsResponse,
   type WorkspaceConfigResponse,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
@@ -360,7 +360,7 @@ function RegistryTable({
   return (
     <SettingsField
       title="Registered projects"
-      hint={`Every folder cezar has run in, plus the ones added from the GUI. “Tags” group connected repositories — give the API, the web app and the design system a shared “storefront” tag and the global Tasks page can show all three as one piece of work. “Max parallel” caps how many of that project's tasks run at once; the workspace limit (${workspaceMax}) still applies as an overall ceiling, so a per-project value above it has no extra effect until the workspace limit is raised. Removing a project only unregisters it — no files on disk are deleted.`}
+      hint={`Every folder cezar-plus has run in, plus the ones added from the GUI. “Tags” group connected repositories — give the API, the web app and the design system a shared “storefront” tag and the global Tasks page can show all three as one piece of work. “Max parallel” caps how many of that project's tasks run at once; the workspace limit (${workspaceMax}) still applies as an overall ceiling, so a per-project value above it has no extra effect until the workspace limit is raised. Removing a project only unregisters it — no files on disk are deleted.`}
     >
       {teamOptions.length > 0 ? (
         <div className="mb-2 flex items-center gap-2">
@@ -512,7 +512,7 @@ function ProjectRow({
           aria-label={`Remove ${project.name} from the workspace — unregisters it, no files are deleted`}
           // The boot project is refused server-side too (it re-registers itself at every start);
           // disabling here means the user gets the explanation before the click, not after.
-          title={isBoot ? 'cezar is serving this project — it re-registers itself at every start' : undefined}
+          title={isBoot ? 'cezar-plus is serving this project — it re-registers itself at every start' : undefined}
           disabled={disabled || isBoot}
           onClick={onRemove}
         >

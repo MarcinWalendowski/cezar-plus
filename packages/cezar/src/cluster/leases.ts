@@ -9,7 +9,7 @@ import {
   type ClusterLeaseResponse,
   type ClusterNodeId,
   type StoredClusterLease,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { atomicWriteJsonSync } from '../workspace/config.ts';
 import { clusterHomeDir, type ClusterHomeOptions } from './node-identity.ts';
 

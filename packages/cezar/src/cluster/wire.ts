@@ -3,7 +3,7 @@ import type {
   ClusterPairing,
   StoredClusterNode,
   StoredClusterPairing,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 
 /**
  * Stored cluster rows → their wire shapes. **One definition, imported by both callers** —

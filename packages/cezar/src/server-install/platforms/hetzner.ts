@@ -355,7 +355,7 @@ async function resolveHetznerExecStart(ctx: InstallContext): Promise<string> {
     globalBin = out.split('\n').map((s) => s.trim()).filter(Boolean).pop();
     if (!globalBin) {
       ctx.ui.warn(
-        `Could not locate a built cezar to run (${entry} missing, no global cezar-cli) — ` +
+        `Could not locate a built cezar-plus to run (${entry} missing, no global cezar-cli) — ` +
           `install it (npm i -g cezar-cli) or build the checkout, then re-run with --reconfigure.`,
       );
     }
@@ -505,7 +505,7 @@ function supervisorSystemdStep(): InstallStep {
         lines.push(`CEZ_OIDC_CLIENT_ID=${String(clientId).trim()}`, `CEZ_OIDC_CLIENT_SECRET=${String(clientSecret).trim()}`);
 
         const bootstrapAnswer = await ctx.ui.text({
-          message: 'Pin a bootstrap claim code? (blank = cezar mints + prints a random one at every start, D8 amendment 2)',
+          message: 'Pin a bootstrap claim code? (blank = cezar-plus mints + prints a random one at every start, D8 amendment 2)',
           placeholder: '',
         });
         const bootstrapToken = bootstrapAnswer === CANCEL ? '' : String(bootstrapAnswer).trim();
@@ -1136,7 +1136,7 @@ function workerResourcesStep(): InstallStep {
       const path = `${orgCezHome(username)}/config.json`;
       await sudoStep(ctx, {
         description:
-          `Write ${path} — maxParallel: 8, maxHeavySteps: 2 (D14's CX43-worker row). cezar's own ` +
+          `Write ${path} — maxParallel: 8, maxHeavySteps: 2 (D14's CX43-worker row). cezar-plus's own ` +
           'config.json schema merges this with its other defaults the first time it boots here.',
         command: writeUserFileCommand(username, path, `${JSON.stringify(WORKER_RESOURCES_CONFIG, null, 2)}\n`),
         verify: (c) => verifyCommand(c, 'test', ['-f', path]),

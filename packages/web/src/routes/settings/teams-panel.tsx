@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Building2Icon, LockIcon, LogInIcon, TriangleAlertIcon } from 'lucide-react'
 import { useState } from 'react'
 
-import type { CreateTeamInput, RenameTeamInput, Team } from '@loki-labs/better-cezar-api-client'
+import type { CreateTeamInput, RenameTeamInput, Team } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -54,7 +54,7 @@ export function TeamsPanel() {
         icon={<TriangleAlertIcon />}
         tone="danger"
         title="Could not load workspaces"
-        subtitle={probe.error instanceof Error ? probe.error.message : 'The cezar server did not answer.'}
+        subtitle={probe.error instanceof Error ? probe.error.message : 'The cezar-plus server did not answer.'}
         actions={
           <Button variant="outline" onClick={() => void probe.refetch()}>
             Try again
@@ -74,7 +74,7 @@ function TeamsBody({ probe }: { probe: TeamsProbe }) {
         icon={<LockIcon />}
         tone="neutral"
         title="Sign-in isn't set up on this deployment"
-        subtitle="This cezar instance runs without authentication — there is no organization to manage workspaces for."
+        subtitle="This cezar-plus instance runs without authentication — there is no organization to manage workspaces for."
         heading="h2"
       />
     )
@@ -110,7 +110,7 @@ function TeamsBody({ probe }: { probe: TeamsProbe }) {
         icon={<LogInIcon />}
         tone="primary"
         title="Sign in to manage workspaces"
-        subtitle="This cezar instance requires sign-in. Continue with your identity provider to see and manage your organization's workspaces."
+        subtitle="This cezar-plus instance requires sign-in. Continue with your identity provider to see and manage your organization's workspaces."
         actions={
           <Button asChild data-slot="teams-sign-in">
             <a href="/auth/login">Sign in</a>

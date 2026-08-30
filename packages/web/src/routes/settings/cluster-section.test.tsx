@@ -9,8 +9,8 @@ import type {
   ClusterNode,
   ClusterOverviewResponse,
   ClusterProtocol,
-} from '@loki-labs/better-cezar-api-client'
-import { clusterQueuedReasonSchema } from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
+import { clusterQueuedReasonSchema } from '@loki-labs/cezar-plus-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { ClusterSection } from './cluster-section'
 
@@ -62,8 +62,8 @@ function enrollResponse(over: Partial<ClusterEnrollResponse> = {}): ClusterEnrol
     code: 'cezj_opaque',
     expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
     commands: {
-      join: 'npx -y @loki-labs/better-cezar@0.10.0 cluster join cezj_opaque',
-      provision: 'npx -y @loki-labs/better-cezar@0.10.0 server-install --platform hetzner --role worker',
+      join: 'npx -y @loki-labs/cezar-plus@0.10.0 cluster join cezj_opaque',
+      provision: 'npx -y @loki-labs/cezar-plus@0.10.0 server-install --platform hetzner --role worker',
     },
     ...over,
   }
@@ -308,8 +308,8 @@ describe('the cluster section', () => {
     serve({
       enroll: enrollResponse({
         commands: {
-          join: 'npx -y @loki-labs/better-cezar@0.10.0 cluster join cezj_realcode',
-          provision: 'npx -y @loki-labs/better-cezar@0.10.0 server-install --platform hetzner --role worker',
+          join: 'npx -y @loki-labs/cezar-plus@0.10.0 cluster join cezj_realcode',
+          provision: 'npx -y @loki-labs/cezar-plus@0.10.0 server-install --platform hetzner --role worker',
         },
       }),
     })
@@ -320,7 +320,7 @@ describe('the cluster section', () => {
 
     await waitFor(() =>
       expect(document.querySelector('[data-slot="cluster-join-command"]')?.textContent).toContain(
-        'npx -y @loki-labs/better-cezar@0.10.0 cluster join cezj_',
+        'npx -y @loki-labs/cezar-plus@0.10.0 cluster join cezj_',
       ),
     )
 

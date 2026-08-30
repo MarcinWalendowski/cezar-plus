@@ -10,7 +10,7 @@ import {
   type ListTeamsResponse,
   type RenameTeamResponse,
   type Team as WireTeam,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { jsonZodValidator, paramZodValidator } from '../server/validators.ts';
 import { identityDir } from '../paths.ts';
 import type { SessionResolver } from '../server/server.ts';

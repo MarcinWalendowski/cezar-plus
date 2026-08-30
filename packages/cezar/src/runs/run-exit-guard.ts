@@ -1,4 +1,4 @@
-import type { RunRecord, RunStatus } from '@loki-labs/better-cezar-contract';
+import type { RunRecord, RunStatus } from '@loki-labs/cezar-plus-contract';
 
 export const RUN_KEEPALIVE_MS = 1_000;
 export const RUN_WEDGE_TICKS = 3;
@@ -24,7 +24,7 @@ export interface RunWedgeState {
 
 function exitError(status: RunStatus, reason?: string): string {
   const detail = reason ? `: ${reason}` : '';
-  return `cezar exited before the run finished: the process ran out of work while the run was still ${status}${detail}`;
+  return `cezar-plus exited before the run finished: the process ran out of work while the run was still ${status}${detail}`;
 }
 
 function failNonTerminalRun(
@@ -78,7 +78,7 @@ export function runWedgeTick(options: {
     }
     if (options.state.misses < RUN_WEDGE_TICKS) return;
 
-    console.error(`cezar exited before the run finished: its run record is missing from the store (${options.runId})`);
+    console.error(`cezar-plus exited before the run finished: its run record is missing from the store (${options.runId})`);
     process.exitCode = 1;
     options.settle('failed');
     options.clearKeepAlive();

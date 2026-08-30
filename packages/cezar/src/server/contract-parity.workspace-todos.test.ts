@@ -2,7 +2,7 @@ import type { InferRequestType, InferResponseType } from 'hono/client';
 import { hc } from 'hono/client';
 import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
-import type { workspaceTodosResponseSchema } from '@loki-labs/better-cezar-contract';
+import type { workspaceTodosResponseSchema } from '@loki-labs/cezar-plus-contract';
 import type { AppType } from './app-type.ts';
 
 /**

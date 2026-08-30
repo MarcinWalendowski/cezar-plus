@@ -2,8 +2,8 @@ import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { ClusterCorpusBody, ClusterCorpusDoc, ClusterCorpusManifestResponse } from '@loki-labs/better-cezar-contract';
-import { CLUSTER_CORPUS_BATCH_MAX_PATHS, CLUSTER_CORPUS_DEFAULT_SCOPE } from '@loki-labs/better-cezar-contract';
+import type { ClusterCorpusBody, ClusterCorpusDoc, ClusterCorpusManifestResponse } from '@loki-labs/cezar-plus-contract';
+import { CLUSTER_CORPUS_BATCH_MAX_PATHS, CLUSTER_CORPUS_DEFAULT_SCOPE } from '@loki-labs/cezar-plus-contract';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LINK_PRINCIPAL_MAX_AGE_MS } from '../../cluster/enrollment.ts';
 import {

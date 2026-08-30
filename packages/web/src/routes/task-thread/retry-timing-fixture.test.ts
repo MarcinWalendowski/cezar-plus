@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { StepState } from '@loki-labs/better-cezar-api-client'
+import type { StepState } from '@loki-labs/cezar-plus-api-client'
 import record from '../../../e2e/fixtures/retry-timing-run.record.json'
 import { stepAttempts, stepElapsed } from './step-timing'
 
@@ -20,7 +20,7 @@ import { stepAttempts, stepElapsed } from './step-timing'
  *
  * It asserts the two things the E2E's strings are computed from — the stored shape, and what the
  * pure readers make of it — not the rendering, which `step-rail.test.tsx` already covers against
- * its own fixtures. The `web` package deliberately does not depend on `@loki-labs/better-cezar-contract`,
+ * its own fixtures. The `web` package deliberately does not depend on `@loki-labs/cezar-plus-contract`,
  * so the shape is checked structurally rather than by running the zod schema.
  */
 describe('the retry-timing E2E fixture, checked where the E2E cannot run', () => {

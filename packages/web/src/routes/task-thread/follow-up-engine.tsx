@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react'
 
 import { continueRun } from '@/api/client'
 import { queryKeys, useConfig, useEngineAdvisory, useRunnerModels } from '@/api/queries'
-import type { ApiRun, ContinueResponse, ImageInput, Runner } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, ContinueResponse, ImageInput, Runner } from '@loki-labs/cezar-plus-api-client'
 import { PickerPill, RunnerPill } from '@/components/picker-pill'
 import {
   modelsForRunner,
@@ -56,7 +56,7 @@ export function useContinueAction(run: ApiRun): ContinueAction {
   const [pickedModel, setPickedModel] = useState<string | null>(null)
 
   const continuation = useContinuationProvider(run, pickedRunner)
-  const { runners, canContinue, currentRunner, runner } = continuation
+  const { runners, canContinue, currentRunner, runner, lock } = continuation
   // The catalog belongs to the runner this continuation would use (#794), so switching the
   // runner pill re-reads that backend's own models. Only a run that can actually be continued
   // fetches at all — every other thread (running, queued, closed with no session) would be
@@ -106,6 +106,7 @@ export function useContinueAction(run: ApiRun): ContinueAction {
             runners={runners}
             value={runner}
             advisory={advisory}
+            lockedTo={lock}
             onPick={(next) => {
               setPickedRunner(next)
               setPickedModel(null) // a runner switch invalidates the previous model pick

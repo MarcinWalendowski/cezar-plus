@@ -1,4 +1,4 @@
-import type { RunRecord } from '@loki-labs/better-cezar-api-client'
+import type { RunRecord } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * How the task list is bucketed, sorted and collapsed — the pure half of the sidebar quick-list

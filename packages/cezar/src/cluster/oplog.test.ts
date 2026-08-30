@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ClusterOp } from '@loki-labs/better-cezar-contract';
+import type { ClusterOp } from '@loki-labs/cezar-plus-contract';
 import { appendOps, compactOpLog, opLogPath, readOps, truncateOpLog } from './oplog.ts';
 import { deriveTodoOps, newOpId } from './ops.ts';
 import type { TodoItem } from '../todos.ts';

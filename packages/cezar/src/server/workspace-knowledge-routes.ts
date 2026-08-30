@@ -5,7 +5,7 @@ import {
   type WorkspaceKnowledgeDocumentResponse,
   type WorkspaceKnowledgeDomainsResponse,
   type WorkspaceKnowledgeSearchResponse,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { resolveCapabilities } from './capabilities.ts';
 import type { ProjectApiEnv } from './server.ts';
 import {

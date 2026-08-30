@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { runStatusSchema as contractRunStatusSchema } from '@loki-labs/better-cezar-contract';
+import { runStatusSchema as contractRunStatusSchema } from '@loki-labs/cezar-plus-contract';
 import { RunStore, runRecordSchema } from './store.ts';
 import { appendSpecReviewEntry } from './spec-review-log.ts';
 import { localCliAuthor } from './task-author.ts';

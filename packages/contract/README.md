@@ -8,7 +8,7 @@ Three consumers, one definition:
 - **the server** (`src/server/server.ts`) validates requests with these schemas and types each
   handler's payload by the matching response schema, so the schema is the source of the route
   type rather than a second opinion about it;
-- **`@loki-labs/better-cezar-api-client`** copies this directory in at `prebuild` (see
+- **`@loki-labs/cezar-plus-api-client`** copies this directory in at `prebuild` (see
   `scripts/sync-contract.mjs`) and re-exports the schemas and the inferred types;
 - **the cockpit** imports both from the api-client — the types to compile against, the schemas
   when it wants to validate before sending.

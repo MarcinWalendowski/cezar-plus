@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import type { CheckoutProgressEvent, RunEvent as WebRunEvent } from '@loki-labs/better-cezar-api-client';
+import type { CheckoutProgressEvent, RunEvent as WebRunEvent } from '@loki-labs/cezar-plus-api-client';
 import type { RunEvent } from '../runs/store.ts';
 
 /**
  * What is left of the hand-written mirror — and only that.
  *
  * This file used to pin 58 shapes, because every response type was declared twice: once by the
- * server and once by hand in the api-client. `@loki-labs/better-cezar-contract` removed the
+ * server and once by hand in the api-client. `@loki-labs/cezar-plus-contract` removed the
  * duplication, and `contract-parity*.test.ts` now checks each schema against the ROUTE it
  * describes, which is a strictly better comparison — the route IS the wire, whereas the pairs
  * below compare against the server's internal types.

@@ -1,5 +1,5 @@
 import { basename, join } from 'node:path';
-import type { KnowledgeDocument, KnowledgeFacetBucket } from '@loki-labs/better-cezar-contract';
+import type { KnowledgeDocument, KnowledgeFacetBucket } from '@loki-labs/cezar-plus-contract';
 import { KnowledgeStore } from '../knowledge/store.ts';
 import { tokenize, type KnowledgeStatusForSearch } from '../knowledge/search.ts';
 

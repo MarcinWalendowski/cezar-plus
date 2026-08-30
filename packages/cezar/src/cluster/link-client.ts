@@ -12,7 +12,7 @@ import {
   type ClusterUplinkFrame,
   type ClusterWatermark,
   type StoredClusterNodeIdentity,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { resolveEdgeAuthHeaders } from './edge-auth.ts';
 import { signClusterFrame } from './enrollment.ts';
 import {

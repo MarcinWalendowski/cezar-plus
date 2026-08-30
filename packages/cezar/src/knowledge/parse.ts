@@ -6,7 +6,7 @@ import {
   type KnowledgeDocType,
   type KnowledgeSource,
   type KnowledgeStatus,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { resolveKnowledgeFormat, runFormatAdapter, type KnowledgeFormat } from './adapters.ts';
 
 /**

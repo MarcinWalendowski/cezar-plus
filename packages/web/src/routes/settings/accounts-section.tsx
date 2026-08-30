@@ -32,7 +32,7 @@ import {
   type ProviderId,
   type Runner,
   type SetWorkspaceConfigInput,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { QuotaBars } from '@/components/account-usage-panel'
 import { CenteredState } from '@/components/centered-state'
 import {
@@ -915,7 +915,7 @@ function AccountDetails({
               {/* The label is cezar's own; the folder is the account. Saying so here is what keeps
                   Rename from reading as "point this at a different directory". */}
               <span className="text-xs text-muted-foreground">
-                Renaming changes what cezar calls this account, not its folder.
+                Renaming changes what cezar-plus calls this account, not its folder.
               </span>
             </>
           )}

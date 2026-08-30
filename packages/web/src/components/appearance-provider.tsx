@@ -111,6 +111,6 @@ export function AppearanceProvider({ children }: { children: React.ReactNode }) 
 
 export function useAppearance(): AppearanceContextValue {
   const context = React.useContext(AppearanceContext)
-  if (!context) throw new Error('cezar: useAppearance() must be called inside <AppearanceProvider>')
+  if (!context) throw new Error('cezar-plus: useAppearance() must be called inside <AppearanceProvider>')
   return context
 }

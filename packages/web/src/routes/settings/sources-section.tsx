@@ -7,7 +7,7 @@ import type {
   CreateSourceConnectionInput,
   SourceConnectionWire,
   SourceProviderInfo,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { SourceStatusBadge } from '@/components/source-status-badge'
 import { Button } from '@/components/ui/button'
@@ -77,7 +77,7 @@ export function SourcesSection() {
           icon={<PlugZapIcon />}
           tone="neutral"
           title="External sources are off"
-          subtitle="Set CEZ_SOURCES=1 and restart cezar to turn them on."
+          subtitle="Set CEZ_SOURCES=1 and restart cezar-plus to turn them on."
           heading="h2"
         />
       )}

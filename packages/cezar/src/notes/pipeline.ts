@@ -1,4 +1,4 @@
-import type { ApproveNoteInput, ApproveNoteResponse } from '@loki-labs/better-cezar-contract';
+import type { ApproveNoteInput, ApproveNoteResponse } from '@loki-labs/cezar-plus-contract';
 import type { TaskAuthor } from '../runs/task-author.ts';
 import type { StoredNote } from './types.ts';
 

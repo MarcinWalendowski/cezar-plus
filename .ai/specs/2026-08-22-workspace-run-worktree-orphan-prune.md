@@ -272,7 +272,7 @@ import { z } from 'zod';
 export class ForeignWorktreeOwnersError extends Error {}
 
 /**
- * Deliberately NOT the contract's `runRecordSchema` (`@loki-labs/better-cezar-contract`,
+ * Deliberately NOT the contract's `runRecordSchema` (`@loki-labs/cezar-plus-contract`,
  * `packages/contract/src/runs.ts:219`) — that is the **API** shape, which is stricter than the
  * **on-disk** one this module actually reads: the contract requires `archived: z.boolean()` where
  * the store's own loader (`runs/store.ts:120`, `archived: z.boolean().default(false)`) tolerates

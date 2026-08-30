@@ -1,4 +1,4 @@
-import type { ProjectListEntry } from '@loki-labs/better-cezar-api-client'
+import type { ProjectListEntry } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * The tag vocabulary of a workspace — what makes tagging the SECOND repo cheap.

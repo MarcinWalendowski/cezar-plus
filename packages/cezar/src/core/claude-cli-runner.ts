@@ -331,7 +331,7 @@ export class ClaudeCliRunner implements AgentRunner {
       if (terminatedByCezar && isSignalTerminationExit(exitCode)) {
         onEvent?.({
           type: 'note',
-          message: `claude CLI did not exit on its own after close; terminated by cezar (code ${exitCode})`,
+          message: `claude CLI did not exit on its own after close; terminated by cezar-plus (code ${exitCode})`,
         });
         onEvent?.({ type: 'done' });
         return { text, toolCalls, tokensUsed, sessionId: spec.sessionId };
@@ -409,7 +409,7 @@ export class ClaudeCliRunner implements AgentRunner {
       // Reachable only if a caller asks for a broker in a source tree. Loud rather than silent:
       // falling back here would make "is this run brokered?" unanswerable from the outside, and
       // the whole point of `brokerAvailable()` is that the caller decides that BEFORE spawning.
-      throw new Error('run broker requested but this cezar has no built entry point to re-exec');
+      throw new Error('run broker requested but this cezar-plus has no built entry point to re-exec');
     }
     if (!request.instanceId) throw new Error('fresh broker launch requires an instance id');
     // Fault injection for `.ai/specs/2026-08-22-bounded-transient-broker-retry.md` Verification
@@ -1064,7 +1064,7 @@ function emitBrokeredTerminalEvents(ctx: {
   if (ctx.terminatedByCezar && isSignalTerminationExit(code)) {
     onEvent?.({
       type: 'note',
-      message: `claude CLI did not exit on its own after close; terminated by cezar (code ${code})`,
+      message: `claude CLI did not exit on its own after close; terminated by cezar-plus (code ${code})`,
     });
     onEvent?.({ type: 'done' });
     return;

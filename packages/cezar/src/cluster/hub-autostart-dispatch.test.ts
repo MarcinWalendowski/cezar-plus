@@ -2,7 +2,7 @@ import { dirname, join } from 'node:path';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { StoredClusterNodeIdentity, WorkflowDef } from '@loki-labs/better-cezar-contract';
+import type { StoredClusterNodeIdentity, WorkflowDef } from '@loki-labs/cezar-plus-contract';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { workspaceConfigPath } from '../paths.ts';
 import { peersPath } from './peers.ts';

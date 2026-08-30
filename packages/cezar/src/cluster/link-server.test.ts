@@ -12,7 +12,7 @@ import {
   type ClusterDownlinkFrame,
   type ClusterUplinkFrame,
   type StoredClusterNodeIdentity,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { signClusterFrame } from './enrollment.ts';
 import {
   authenticateLinkUpgrade,

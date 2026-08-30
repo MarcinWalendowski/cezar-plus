@@ -7,7 +7,7 @@ import type {
   ClusterProjectKey,
   ClusterQueuedReason,
   ClusterTodoPlacement,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 
 /**
  * Where a run goes — label matching, headroom, and **queue-with-reason** (spec

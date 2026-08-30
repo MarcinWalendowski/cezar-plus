@@ -1,4 +1,4 @@
-import type { LockableRunner } from '@loki-labs/better-cezar-contract';
+import type { LockableRunner } from '@loki-labs/cezar-plus-contract';
 import type { RunnerId } from '../core/agent-runner.ts';
 
 /** The outcome of consulting the global provider lock at one dispatch decision

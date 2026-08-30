@@ -1,7 +1,7 @@
 import { useEffect, useState, type ImgHTMLAttributes } from 'react'
 import { createPortal } from 'react-dom'
 
-import { resolveApiUrl } from '@loki-labs/better-cezar-api-client'
+import { resolveApiUrl } from '@loki-labs/cezar-plus-api-client'
 import { cn } from '@/lib/utils'
 
 /**

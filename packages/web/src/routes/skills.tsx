@@ -7,7 +7,7 @@ import { Link } from '@/lib/project-router'
 
 import { refreshSkills } from '@/api/client'
 import { queryKeys, useImportableSkills, useSkills, useWorkflows } from '@/api/queries'
-import type { Skill } from '@loki-labs/better-cezar-api-client'
+import type { Skill } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { ImportSkillsPanel } from '@/components/skills-import-panel'
 import { SkillDetailBody, SkillSourceTag } from '@/components/skill-detail'

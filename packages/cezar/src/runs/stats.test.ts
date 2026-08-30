@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { countTokens } from 'gpt-tokenizer';
 
-import type { RunEvent } from '@loki-labs/better-cezar-contract';
+import type { RunEvent } from '@loki-labs/cezar-plus-contract';
 import {
   computeRunStats,
   dispatchIdsByStructure,

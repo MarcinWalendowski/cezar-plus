@@ -8,7 +8,7 @@ import {
   type KnowledgeProposal,
   type KnowledgeSupersedeProposal,
   type KnowledgeUpsertProposal,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { readCatalog } from './catalog.ts';
 import { projectKnowledgeRoot, resolveWritablePath, workspaceKnowledgeRoot } from './paths.ts';
 import type { CatalogEntry } from './types.ts';

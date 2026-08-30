@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { ApiError, continueRun, createRunPr } from '@/api/client'
 import { queryKeys } from '@/api/queries'
-import type { ApiRun, RunStatus } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, RunStatus } from '@loki-labs/cezar-plus-api-client'
 import { TwinkleBackdrop } from '@/components/centered-state'
 import { RunDiff } from '@/components/run-diff'
 import { Button } from '@/components/ui/button'
@@ -57,7 +57,7 @@ function stopBanner(
         Icon: ClockIcon,
         headline: 'Stopped — the agent went silent, work is incomplete.',
         detail:
-          'The backend produced no output for long enough that cezar stopped it rather than let ' +
+          'The backend produced no output for long enough that cezar-plus stopped it rather than let ' +
           'it hold a slot, and it had already been resumed once. The work on disk is intact — ' +
           'read what it got through, then send it back or accept what is here.',
       }

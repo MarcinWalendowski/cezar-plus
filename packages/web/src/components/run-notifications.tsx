@@ -2,7 +2,7 @@ import { hashKey, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef } from 'react'
 
 import { queryKeys, useWorkspaceUiState } from '@/api/queries'
-import type { ApiRun, RunStatus } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, RunStatus } from '@loki-labs/cezar-plus-api-client'
 import {
   diffRunTransitions,
   normalizeNotifications,

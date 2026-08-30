@@ -1,4 +1,4 @@
-import { getApiBaseUrl } from '@loki-labs/better-cezar-api-client'
+import { getApiBaseUrl } from '@loki-labs/cezar-plus-api-client'
 import type {
   CreateTeamInput,
   CreateTeamResponse,
@@ -6,7 +6,7 @@ import type {
   RenameTeamInput,
   RenameTeamResponse,
   Team,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 
 import { ApiError, NO_REDIRECT, throwIfIdentityGate } from '@/api/client'
 
@@ -79,7 +79,7 @@ export async function listOrgTeams(signal?: AbortSignal): Promise<Team[]> {
     })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
-    throw new ApiError(0, 'cannot reach the cezar server (/auth/teams)', { cause })
+    throw new ApiError(0, 'cannot reach the cezar-plus server (/auth/teams)', { cause })
   }
   throwIfIdentityGate(res, '/auth/teams')
   if (!isJsonResponse(res)) {
@@ -143,7 +143,7 @@ async function fetchAuth(path: string, init: RequestInit = {}): Promise<Response
     res = await fetch(authUrl(path), { ...init, credentials: 'include', ...NO_REDIRECT })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
-    throw new ApiError(0, `cannot reach the cezar server (${path})`, { cause })
+    throw new ApiError(0, `cannot reach the cezar-plus server (${path})`, { cause })
   }
   // An identity gate in front of cezar answers these routes too — and `/auth/onboarding` is the
   // one whose 401 the cockpit reads as "signed out", so a gate swallowing it is exactly how the
@@ -184,7 +184,7 @@ async function sendJson<T>(path: string, method: string, json: unknown): Promise
   const body = parseJsonBody(await res.text())
   if (!res.ok) throw new ApiError(res.status, errorMessageFrom(res.status, res.statusText, body))
   if (body === undefined) {
-    throw new ApiError(res.status, `the cezar server answered ${path} with a non-JSON body`)
+    throw new ApiError(res.status, `the cezar-plus server answered ${path} with a non-JSON body`)
   }
   return body as T
 }

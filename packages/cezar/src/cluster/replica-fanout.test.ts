@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CLUSTER_FRAME_MAX_BYTES, CLUSTER_OPS_PER_FRAME_MAX, type ClusterOp } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_FRAME_MAX_BYTES, CLUSTER_OPS_PER_FRAME_MAX, type ClusterOp } from '@loki-labs/cezar-plus-contract';
 import { planReplicaFanout, type ReplicaFanoutTarget } from './replica-fanout.ts';
 
 /**

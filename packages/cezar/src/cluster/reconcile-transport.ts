@@ -5,7 +5,7 @@ import {
   type ClusterNodeId,
   type ClusterProjectKey,
   type StoredClusterTodoRecord,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { resolveEdgeAuthHeaders } from './edge-auth.ts';
 import { signedNodeRequestHeaders } from './node-auth.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';

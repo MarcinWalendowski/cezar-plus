@@ -1,7 +1,7 @@
 # A step is green only when its goal was verified
 
 **Status: IMPLEMENTED and PUSHED 2026-08-20 — commit `57fc8807` on `origin/main`
-(github.com/MarcinWalendowski/cezar), 10 files, +1301/-5. Typecheck exit 0; the three touched
+(github.com/MarcinWalendowski/cezar-plus), 10 files, +1301/-5. Typecheck exit 0; the three touched
 test files 148/148. NOT YET DEPLOYED — deploy is step 6 of this same run — and NOT YET OBSERVED
 on a live run: the mechanism is proven by test only, so this is QA NEEDED, not done. Do not
 upgrade this line without that observation (todo `aad60921`).**

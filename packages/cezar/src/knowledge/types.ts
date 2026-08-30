@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { knowledgeDocumentSchema, type KnowledgeDocument } from '@loki-labs/better-cezar-contract';
+import { knowledgeDocumentSchema, type KnowledgeDocument } from '@loki-labs/cezar-plus-contract';
 
 /**
  * Storage-side types (W2.1): the catalog cache and manifest schemas, and the `.ai/cezar/config.json`

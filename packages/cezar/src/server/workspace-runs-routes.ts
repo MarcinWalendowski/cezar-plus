@@ -2,7 +2,7 @@ import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { type WorkspaceRunsResponse } from '@loki-labs/better-cezar-contract';
+import { type WorkspaceRunsResponse } from '@loki-labs/cezar-plus-contract';
 import { resolveCapabilities } from './capabilities.ts';
 import { queryZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';

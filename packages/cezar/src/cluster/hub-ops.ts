@@ -1,4 +1,4 @@
-import type { ClusterAckFrame, ClusterAckResult, ClusterOp, ClusterOpsFrame } from '@loki-labs/better-cezar-contract';
+import type { ClusterAckFrame, ClusterAckResult, ClusterOp, ClusterOpsFrame } from '@loki-labs/cezar-plus-contract';
 
 /**
  * What the hub DOES with an `ops` frame once it arrives — the real thing `hub-router.ts`'s `ops`

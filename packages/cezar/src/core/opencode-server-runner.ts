@@ -397,7 +397,7 @@ class OpencodeSession implements AgentSession {
    * (`core/agent-runner.ts:126-128`).
    */
   private async bootstrap(): Promise<void> {
-    const created = await this.http('POST', '/session', { title: 'cezar task' });
+    const created = await this.http('POST', '/session', { title: 'cezar-plus task' });
     this.sessionId = stringField(created, 'id');
     if (!this.sessionId) throw new Error('opencode did not return a session id');
     this.emit({ type: 'session', sessionId: this.sessionId });

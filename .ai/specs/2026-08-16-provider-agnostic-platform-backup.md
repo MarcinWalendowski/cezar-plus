@@ -44,7 +44,7 @@ Key loss ⇒ no restore, by design.
 
 ## Constraints (this is a released package — they win)
 
-- **`@loki-labs/better-cezar` is released; backward compatibility wins. Additive only.** No
+- **`@loki-labs/cezar-plus` is released; backward compatibility wins. Additive only.** No
   reshaping of existing files, no breaking of existing routes. (This is the *opposite* of the
   `chat/` pre-launch rule.)
 - **No new runtime dependency (D7).** Budget is hono, @hono/node-server, yaml, zod, smol-toml,

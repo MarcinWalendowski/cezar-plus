@@ -194,11 +194,11 @@ these numbers were treated as an AC record.
 - `npm run build:server && npm run build:web` (both required — `test:package` needs the tarball to
   contain `web/dist/index.html`; a server-only build makes case 5 fail on that assertion for a
   reason that has nothing to do with this bug, a trap this step fell into and is naming so a later
-  step doesn't repeat it) followed by `npm run test:package -w @loki-labs/better-cezar`:
+  step doesn't repeat it) followed by `npm run test:package -w @loki-labs/cezar-plus`:
   **15/15 pass**, including case 5 ("the release tarball installs and runs the dry-run CLI
   workflow"), the exact case the handoff reported red — against the parent checkout's dependency
   tree, not a real in-worktree install.
-- `npm run test -w @loki-labs/better-cezar` (the repo's own gate — never `npx vitest`, which
+- `npm run test -w @loki-labs/cezar-plus` (the repo's own gate — never `npx vitest`, which
   `AGENTS.md:283-286` forbids for fetching an unpinned vitest off the registry instead of fixing a
   missing local install): **9/9 pass** on `brokered-session.test.ts`, including the P1 (ref state)
   and P2 (give-up rejection, `spawnFailed` precedence) cases the keepalive spec added — again
@@ -528,13 +528,13 @@ scrub=$(env | sed -n 's/^\(CEZ_[A-Z0-9_]*\)=.*/\1/p' \
         | grep -vxE 'CEZ_(HANDOFF_FILE|TASK_ID)' | sed 's/^/-u /')
 tmp=/tmp/cez-gate-$$ && mkdir -p $tmp
 env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm ci
-npm run build:server && npm run build:web   # NOT just `npm run build -w @loki-labs/better-cezar`
+npm run build:server && npm run build:web   # NOT just `npm run build -w @loki-labs/cezar-plus`
                                               # — that alone leaves web/dist missing and fails
                                               # case 5 on an unrelated assertion
                                               # ("release tarball should contain web/dist/index.html")
                                               # that looks nothing like the exit-0 bug and is easy
                                               # to misdiagnose as a recurrence of it.
-npm run test:package -w @loki-labs/better-cezar
+npm run test:package -w @loki-labs/cezar-plus
 ```
 
 `origin/main` is not behind local `main` — it is **14 commits ahead** (`git rev-parse origin/main`
@@ -704,12 +704,12 @@ check, and packed-release E2E 25/25 recorded above.
    this spec's direct-diff proof (`git show 954c6a55^:packages/cezar/src/core/claude-cli-runner.ts
    | grep -c broker` → `0`; same at `954c6a55` → non-zero, `spawnBroker`/`opts.broker` present).
 2. **AC2** — the scrubbed, in-tree recipe from Phase 2 (`npm ci` under the full `CEZ_*` scrub, then
-   `npm run build:server && npm run build:web && npm run test:package -w @loki-labs/better-cezar`)
+   `npm run build:server && npm run build:web && npm run test:package -w @loki-labs/cezar-plus`)
    on `main`, after merging `origin/main`, exits 0 with `# pass 15` / `# fail 0` in the `node
    --test` TAP summary. This step's own run (TLDR) is indicative only — parent-checkout
    `node_modules`, pre-merge `main` — so treat it as a smoke check, not the AC2 measurement.
 3. **AC3** — two independent proofs, both indicatively collected this step and reproducible:
-   - `npm run test -w @loki-labs/better-cezar` (or root `npm test`) → `brokered-session.test.ts`
+   - `npm run test -w @loki-labs/cezar-plus` (or root `npm test`) → `brokered-session.test.ts`
      `9 passed (9)`, including the P1 `hasRef()` assertion and the P2 give-up-rejects-`result` /
      `spawnFailed`-precedence cases. Run after the scrubbed, in-tree install (Phase 2) — never
      `npx vitest`, which `AGENTS.md:283-286` forbids by name: "reaching for `npx vitest` when the
@@ -762,10 +762,10 @@ check, and packed-release E2E 25/25 recorded above.
   commits ahead of `HEAD`/`main`, not behind; `git log --oneline HEAD..origin/main` names
   `1c225e7e` and `18707bf1` among the missing commits.
 - **Freshly executed this step** (not cited from any prior document): `npm run build:server`,
-  `npm run build:web`, `npm run test:package -w @loki-labs/better-cezar` (twice — once
+  `npm run build:web`, `npm run test:package -w @loki-labs/cezar-plus` (twice — once
   server-build-only, red for unrelated reasons; once with both builds, 15/15 green); the
   `brokered-session.test.ts` suite (9/9 green), run via the repo's own `npm run test -w
-  @loki-labs/better-cezar` gate, never `npx vitest` (forbidden by `AGENTS.md:283-286`). All of the
+  @loki-labs/cezar-plus` gate, never `npx vitest` (forbidden by `AGENTS.md:283-286`). All of the
   above resolved into the parent checkout's `node_modules` — this worktree's own install is empty
   (`ls node_modules | wc -l` → `0`) — so these numbers are indicative, not the AC2/AC3 record; see
   TLDR and Phase 2. Logs retained in this worktree's `.ai/cezar/tmp/*-9bf5030d.log` for this

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import type { RunRecord, RunStatus, StepState } from '@loki-labs/better-cezar-api-client'
+import type { RunRecord, RunStatus, StepState } from '@loki-labs/cezar-plus-api-client'
 
 import { ApiError } from '@/api/client'
 import {
@@ -81,7 +81,7 @@ describe('resumeAfterIdleTeardown', () => {
   it.each([
     new ApiError(409, 'no agent session to resume'),
     new ApiError(409, 'cannot continue a waiting run'),
-    new ApiError(0, 'cannot reach the cezar server'),
+    new ApiError(0, 'cannot reach the cezar-plus server'),
   ])('does not retry a non-transitional refusal: %s', async (error) => {
     const resume = vi.fn().mockRejectedValue(error)
     const wait = vi.fn().mockResolvedValue(undefined)

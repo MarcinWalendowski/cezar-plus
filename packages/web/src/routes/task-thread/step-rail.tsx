@@ -8,7 +8,7 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 
-import type { Runner, StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
+import type { Runner, StepState, StepStatus } from '@loki-labs/cezar-plus-api-client'
 import { LiveDuration } from '@/components/live-duration'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { formatDuration } from '@/lib/format'

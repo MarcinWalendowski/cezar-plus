@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CLUSTER_PROTOCOL } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_PROTOCOL } from '@loki-labs/cezar-plus-contract';
 import { persistNodeCredential } from './enrollment.ts';
 import { ensureNodeIdentity, nodeIdentityPath } from './node-identity.ts';
 import { applyPairingAction, upsertNode } from './peers.ts';

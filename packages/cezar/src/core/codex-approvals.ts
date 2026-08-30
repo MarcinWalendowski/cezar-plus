@@ -39,7 +39,7 @@ export function codexApprovalNote(
     : method === PERMISSIONS_APPROVAL_METHOD
       ? 'session permissions'
       : 'session approval';
-  let note = `codex asked for ${method}; cezar auto-approved (${decision}), bypass permissions`;
+  let note = `codex asked for ${method}; cezar-plus auto-approved (${decision}), bypass permissions`;
 
   if (method !== PERMISSIONS_APPROVAL_METHOD && commandDecisionWasFallback(params.availableDecisions)) {
     note += `; offered decisions: ${formatOfferedDecisions(params.availableDecisions)}`;

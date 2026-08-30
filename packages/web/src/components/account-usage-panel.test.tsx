@@ -3,7 +3,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { AccountUsageResponse, AccountUsageRow } from '@loki-labs/better-cezar-api-client'
+import type { AccountUsageResponse, AccountUsageRow } from '@loki-labs/cezar-plus-api-client'
 import { AccountUsagePanel } from './account-usage-panel'
 
 /**

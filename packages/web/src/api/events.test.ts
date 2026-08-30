@@ -9,7 +9,7 @@ import {
   parseWorkspaceEvent,
   type GlobalEvent,
 } from './events'
-import type { ApiRun, RunRecord } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, RunRecord } from '@loki-labs/cezar-plus-api-client'
 
 function run(id: string, over: Partial<RunRecord> = {}): RunRecord {
   return {

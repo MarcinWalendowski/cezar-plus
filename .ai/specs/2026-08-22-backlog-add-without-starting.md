@@ -200,7 +200,7 @@ export async function createTodo(input: CreateTodoInput): Promise<CreateTodoResp
 }
 ```
 
-`CreateTodoInput`/`CreateTodoResponse` already exist in `@loki-labs/better-cezar-api-client`
+`CreateTodoInput`/`CreateTodoResponse` already exist in `@loki-labs/cezar-plus-api-client`
 (generated from `createTodoInputSchema`/`createTodoResponseSchema`,
 `packages/contract/src/skills.ts:138-155`) — no
 contract change. A thin `useCreateTodo()` `useMutation` wrapper in `queries.ts` (same file every

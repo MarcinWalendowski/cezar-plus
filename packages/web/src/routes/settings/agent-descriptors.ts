@@ -1,4 +1,4 @@
-import type { AgentConfigFile, Runner } from '@loki-labs/better-cezar-api-client'
+import type { AgentConfigFile, Runner } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * Per-agent descriptor driving the Settings → Agent config pane (spec

@@ -13,23 +13,23 @@ describe('documentTitleOf', () => {
       name: 'project and page',
       projectName: 'Storefront',
       pageLabel: 'Tasks',
-      expected: 'Storefront — Tasks · cezar',
+      expected: 'Storefront — Tasks · cezar-plus',
     },
     {
       name: 'project only',
       projectName: 'Storefront',
       pageLabel: null,
-      expected: 'Storefront · cezar',
+      expected: 'Storefront · cezar-plus',
     },
     {
       name: 'page only',
       projectName: null,
       pageLabel: 'Settings',
-      expected: 'Settings · cezar',
+      expected: 'Settings · cezar-plus',
     },
-    { name: 'neither part', projectName: null, pageLabel: null, expected: 'cezar' },
-    { name: 'empty project', projectName: '', pageLabel: 'Tasks', expected: 'Tasks · cezar' },
-    { name: 'blank parts', projectName: '  ', pageLabel: '\t', expected: 'cezar' },
+    { name: 'neither part', projectName: null, pageLabel: null, expected: 'cezar-plus' },
+    { name: 'empty project', projectName: '', pageLabel: 'Tasks', expected: 'Tasks · cezar-plus' },
+    { name: 'blank parts', projectName: '  ', pageLabel: '\t', expected: 'cezar-plus' },
   ])('formats $name', ({ projectName, pageLabel, expected }) => {
     expect(documentTitleOf({ projectName, pageLabel })).toBe(expected)
   })
@@ -37,7 +37,7 @@ describe('documentTitleOf', () => {
 
 describe('useDocumentTitle', () => {
   beforeEach(() => {
-    document.title = 'cezar'
+    document.title = 'cezar-plus'
   })
 
   it('updates the existing writer when its truthful inputs change', () => {
@@ -50,8 +50,8 @@ describe('useDocumentTitle', () => {
       { initialProps },
     )
 
-    expect(document.title).toBe('Storefront — Tasks · cezar')
+    expect(document.title).toBe('Storefront — Tasks · cezar-plus')
     rerender({ projectName: 'Back office', pageLabel: null })
-    expect(document.title).toBe('Back office · cezar')
+    expect(document.title).toBe('Back office · cezar-plus')
   })
 })

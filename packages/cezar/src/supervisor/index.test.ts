@@ -10,7 +10,7 @@ import {
   type SupervisorBootGateIo,
 } from './index.ts';
 import { resolveBootstrapClaim } from '../auth/bootstrap-claim.ts';
-import type { AuthProvider } from '@loki-labs/better-cezar-contract';
+import type { AuthProvider } from '@loki-labs/cezar-plus-contract';
 import { IdentityStore } from '../auth/identity-store.ts';
 import { OrgProcessRegistryStore } from './org-registry-store.ts';
 
@@ -207,7 +207,7 @@ describe('supervisorBootLines — the bootstrap code reaches the journal', () =>
       claim: generated(),
       hasOrg: false,
     });
-    expect(lines[0]).toContain('cezar supervisor');
+    expect(lines[0]).toContain('cezar-plus supervisor');
     expect(lines[0]).toContain('oidc');
     expect(lines[0]).toContain('4400');
   });

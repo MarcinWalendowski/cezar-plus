@@ -1,4 +1,4 @@
-import type { Skill, WorkflowDef } from '@loki-labs/better-cezar-api-client'
+import type { Skill, WorkflowDef } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * The shared skill presentation rules (#377/#380): the ⌘K palette, the composer's `/`

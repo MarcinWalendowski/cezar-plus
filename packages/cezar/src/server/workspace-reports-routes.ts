@@ -16,7 +16,7 @@ import {
   type ReportStatus,
   type ReportStatusSource,
   type ReportTriageRow,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { readWorkspaceReportsConfig } from '../reports-config.ts';
 import { readReportTriage, updateReportTriage } from '../reports-triage.ts';
 import { createTodo, readTodos } from '../todos.ts';

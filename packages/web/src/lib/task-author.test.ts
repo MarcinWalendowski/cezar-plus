@@ -1,4 +1,4 @@
-import type { TaskAuthor } from '@loki-labs/better-cezar-api-client'
+import type { TaskAuthor } from '@loki-labs/cezar-plus-api-client'
 import { describe, expect, it } from 'vitest'
 import {
   UNATTRIBUTED_LABEL,
@@ -55,7 +55,7 @@ describe('authorLabel', () => {
 
   it('renders an absent author as unattributed, not as a kind', () => {
     expect(authorLabel(undefined)).toBe(UNATTRIBUTED_LABEL)
-    expect(authorLabel(undefined)).not.toBe('cezar')
+    expect(authorLabel(undefined)).not.toBe('cezar-plus')
   })
 
   it('shows a kind it has never heard of as itself', () => {

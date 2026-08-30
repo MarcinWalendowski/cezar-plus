@@ -1,7 +1,7 @@
 import { ArrowRightIcon } from 'lucide-react'
 import { Link } from '@/lib/project-router'
 
-import type { Skill } from '@loki-labs/better-cezar-api-client'
+import type { Skill } from '@loki-labs/cezar-plus-api-client'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { isProjectSkill } from '@/lib/skills'
 import { cn } from '@/lib/utils'

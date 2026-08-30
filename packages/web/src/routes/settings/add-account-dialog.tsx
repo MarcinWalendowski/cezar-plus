@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
 import { useCreateAgentProfile } from '@/api/queries'
-import type { FsBrowseDir, ProviderId } from '@loki-labs/better-cezar-api-client'
+import type { FsBrowseDir, ProviderId } from '@loki-labs/cezar-plus-api-client'
 import { FolderBrowser } from '@/components/folder-browser'
 import { Button } from '@/components/ui/button'
 import {

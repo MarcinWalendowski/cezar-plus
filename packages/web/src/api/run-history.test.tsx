@@ -3,7 +3,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { RunHistoryContext, RunHistoryPage } from '@loki-labs/better-cezar-api-client'
+import type { RunHistoryContext, RunHistoryPage } from '@loki-labs/cezar-plus-api-client'
 import { getRunHistory, getRunHistoryContext } from './client'
 import { useRunHistory } from './run-history'
 
@@ -183,7 +183,7 @@ describe('useRunHistory', () => {
     process.on('unhandledRejection', unhandled)
     mockHistory
       .mockResolvedValueOnce(page(100))
-      .mockRejectedValue(new Error('the cezar server answered /runs/run-1/history with an unexpected body'))
+      .mockRejectedValue(new Error('the cezar-plus server answered /runs/run-1/history with an unexpected body'))
     mockContext.mockResolvedValue(context())
     const { wrapper } = harness()
     const { result } = renderHook(() => useRunHistory('run-1'), { wrapper })

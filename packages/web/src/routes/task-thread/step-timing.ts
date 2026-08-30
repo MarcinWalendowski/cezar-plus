@@ -1,4 +1,4 @@
-import type { StepAttempt, StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
+import type { StepAttempt, StepState, StepStatus } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * Step clocks and the status sets they share with the rail (spec

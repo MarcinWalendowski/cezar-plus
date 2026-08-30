@@ -1,8 +1,8 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { AgentProfile } from '@loki-labs/better-cezar-api-client'
+import type { AgentProfile } from '@loki-labs/cezar-plus-api-client'
 import { agentPickerRows } from './default-agent-picker'
-import { ADVISORY_NOTE, RunnerPill, parseChoiceValue } from './picker-pill'
+import { ADVISORY_NOTE, RunnerPill, lockDisclosure, parseChoiceValue } from './picker-pill'
 
 /**
  * The two pool surfaces (`.ai/specs/2026-08-16-agent-account-usage-routing.md`, Phase C).
@@ -168,6 +168,159 @@ describe('advisory disclosure — RunnerPill', () => {
     expect(rows).toHaveLength(2)
     expect(rows.some((row) => row.textContent?.includes(ADVISORY_NOTE))).toBe(false)
     expect(onPick).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * The global engine lock, at the pill (`.ai/specs/2026-08-29-global-provider-toggle.md`, D6 / V5d).
+ *
+ * This is where the six Phase-3 surfaces get their menu behaviour from — the composer, the
+ * follow-up composer, "Run on…", the Inbox quick-start, the GitHub hand-off and `EnginePills` all
+ * render through `RunnerPill` — so the cases live here once rather than six times, and every
+ * locked case is paired with the unlocked control that catches an implementation which simply
+ * narrows the menu all the time.
+ *
+ * The bug this closes is the one the owner reported from production: Codex checked in the
+ * composer, Codex on the shell bar, `anthropic/sonnet` in the run. Dispatch now honours the lock;
+ * without this half the pill still renders as though the provider were the user's to pick.
+ */
+describe('engine lock — RunnerPill', () => {
+  const openMenu = () => fireEvent.pointerDown(screen.getByRole('button', { name: 'Runner' }))
+  const BOTH = ['claude', 'codex'] as const
+  const oneEach = [
+    { provider: 'claude' as const, id: 'default', label: 'Default', configDir: '~/.claude' },
+    { provider: 'codex' as const, id: 'default', label: 'Default', configDir: '~/.codex' },
+  ]
+  const twoClaude = [
+    { provider: 'claude' as const, id: 'default', label: 'Default', configDir: '~/.claude' },
+    { provider: 'claude' as const, id: 'work', label: 'Work', configDir: '~/.claude-work' },
+  ]
+
+  it('offers the locked provider and no other', async () => {
+    render(
+      <RunnerPill runners={BOTH} value="claude" accounts={oneEach} lockedTo="codex" onPick={() => {}} />,
+    )
+    openMenu()
+    const rows = await screen.findAllByRole('menuitemradio')
+    expect(rows.map((row) => row.textContent)).toEqual([expect.stringContaining('codex')])
+  })
+
+  it('offers both, unlocked — the control', async () => {
+    // Without this the assertion above passes against a pill that narrowed to one row for every
+    // host, which is the same picker breakage in the other direction.
+    render(<RunnerPill runners={BOTH} value="claude" accounts={oneEach} onPick={() => {}} />)
+    openMenu()
+    const rows = await screen.findAllByRole('menuitemradio')
+    expect(rows).toHaveLength(2)
+  })
+
+  it('shows the locked provider on the pill even when the caller passes a stale value', async () => {
+    // Defence in depth for the six call sites. Each resolves the lock itself for its REQUEST; if
+    // one forgets, the label must still never name a provider the menu does not contain, because
+    // that reads as "codex is selected" while every row says claude.
+    render(
+      <RunnerPill runners={BOTH} value="claude" accounts={oneEach} lockedTo="codex" onPick={() => {}} />,
+    )
+    expect(screen.getByRole('button', { name: 'Runner' }).textContent).toContain('codex')
+  })
+
+  it('keeps the locked provider\'s own account rows', async () => {
+    // D6a: the provider is fixed, the ACCOUNT is not. A lock that collapsed claude's two logins
+    // into one row would take away a choice the lock says nothing about.
+    render(
+      <RunnerPill runners={BOTH} value="claude" accounts={twoClaude} lockedTo="claude" onPick={() => {}} />,
+    )
+    openMenu()
+    const rows = await screen.findAllByRole('menuitemradio')
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining('Default'),
+      expect.stringContaining('Work'),
+    ])
+  })
+
+  it('offers no foreign-provider account id under a lock', async () => {
+    // The D6a case that fails silently: a codex account id sent for a claude run is not a login
+    // the server can resolve, and the pool/account ladder has no reason to say so.
+    render(
+      <RunnerPill
+        runners={BOTH}
+        value="codex"
+        accounts={[...twoClaude, { provider: 'codex' as const, id: 'work', label: 'Codex Work', configDir: '~/.codex-work' }]}
+        lockedTo="claude"
+        onPick={() => {}}
+      />,
+    )
+    openMenu()
+    const rows = await screen.findAllByRole('menuitemradio')
+    expect(rows.some((row) => row.textContent?.includes('Codex Work'))).toBe(false)
+  })
+
+  it('drops the provider-spanning `balance · everything` row, and keeps the per-agent one', async () => {
+    // `pool:*` picks the PROVIDER at dispatch, which is the one thing a lock overrides (D5), so
+    // offering it would put a control on screen whose stated meaning the server has replaced.
+    // `pool:claude` spreads over the locked provider's own logins and survives untouched.
+    render(
+      <RunnerPill runners={BOTH} value="claude" accounts={twoClaude} pools lockedTo="claude" onPick={() => {}} />,
+    )
+    openMenu()
+    const labels = (await screen.findAllByRole('menuitemradio')).map((row) => row.textContent)
+    expect(labels.some((label) => label?.includes('balance · everything'))).toBe(false)
+    expect(labels.some((label) => label?.includes('claude · balance'))).toBe(true)
+  })
+
+  it('keeps the everything row unlocked — the control', async () => {
+    render(
+      <RunnerPill runners={BOTH} value="claude" accounts={twoClaude} pools onPick={() => {}} />,
+    )
+    openMenu()
+    const labels = (await screen.findAllByRole('menuitemradio')).map((row) => row.textContent)
+    expect(labels.some((label) => label?.includes('balance · everything'))).toBe(true)
+  })
+
+  it('says why, in place of the advisory line', async () => {
+    // Both halves in one case on purpose: the lock note appearing is worth nothing if the advisory
+    // sentence is still sitting underneath it saying the provider is a preference.
+    render(
+      <RunnerPill
+        runners={BOTH}
+        value="claude"
+        accounts={oneEach}
+        advisory
+        lockedTo="codex"
+        onPick={() => {}}
+      />,
+    )
+    openMenu()
+    expect(await screen.findByText(lockDisclosure('codex'))).not.toBeNull()
+    expect(screen.queryByText(ADVISORY_NOTE)).toBeNull()
+  })
+
+  it('does not swallow a row — the lock note is a footer, not an option', async () => {
+    // Same hazard as the advisory note's own case: a disclosure that renders as a selectable row
+    // is a control the user can try to pick, and picking it would call `onPick` with its text.
+    const onPick = vi.fn()
+    render(
+      <RunnerPill runners={BOTH} value="claude" accounts={oneEach} lockedTo="codex" onPick={onPick} />,
+    )
+    openMenu()
+    const rows = await screen.findAllByRole('menuitemradio')
+    expect(rows).toHaveLength(1)
+    expect(rows.some((row) => row.textContent?.includes(lockDisclosure('codex')))).toBe(false)
+    expect(onPick).not.toHaveBeenCalled()
+  })
+
+  it('is not a lock at all when the locked provider is not connected', async () => {
+    // D3, at the pill: the toggle overrides every SETTING and never AVAILABILITY. `downgradePinned`
+    // Runner still moves work off a locked provider whose accounts are all gone, so a menu holding
+    // one unrunnable row would be a dead end that also contradicts what dispatch will do.
+    render(
+      <RunnerPill runners={['claude']} value="claude" accounts={oneEach} advisory lockedTo="codex" onPick={() => {}} />,
+    )
+    openMenu()
+    const rows = await screen.findAllByRole('menuitemradio')
+    expect(rows.map((row) => row.textContent)).toEqual([expect.stringContaining('claude')])
+    expect(await screen.findByText(ADVISORY_NOTE)).not.toBeNull()
+    expect(screen.queryByText(lockDisclosure('codex'))).toBeNull()
   })
 })
 

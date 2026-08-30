@@ -71,7 +71,7 @@ import { registerAndAdoptProject, suppressBootRegistration } from './registered-
 // The cluster CLI (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`). Every one of these is a
 // filesystem/HTTP call against `~/.cezar/cluster` — no server, no auth wall — which is what lets
 // `cez cluster active` be a read an agent can make from inside a run (D19 rung 4).
-import { CLUSTER_PROTOCOL, type ClusterCorpusSubmitResponse } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_PROTOCOL, type ClusterCorpusSubmitResponse } from '@loki-labs/cezar-plus-contract';
 import { createEnrollmentCode, joinCluster, leaveCluster } from './cluster/enrollment.ts';
 import {
   ensureNodeIdentity,
@@ -90,7 +90,7 @@ import { clusterActiveAsOfFrom, clusterActiveRunsFrom } from './server/cluster-r
 // dynamic import, and two bindings of one name in one file is a shadow waiting to be misread.
 import { loadServerState as loadInstalledServerState } from './server-install/state.ts';
 
-const HELP = `cezar — local cockpit for AI agent tasks in your repo
+const HELP = `cezar-plus — local cockpit for AI agent tasks in your repo
 
 Usage:
   cezar                     start the cockpit (server + GUI) for the current repo
@@ -126,7 +126,7 @@ Usage:
   cezar backup              encrypted platform backup (CEZ_BACKUP=1): status ·
                             run · snapshots · verify · gc · restore [--snapshot
                             <id>] [--force]
-  cezar server-install      interactive wizard to host cezar on a server
+  cezar server-install      interactive wizard to host cezar-plus on a server
   cezar server-deploy       redeploy a new version (reload the service) + verify
                               --strategy=blue-green   stage a release, smoke-boot it, flip, probe,
                                                       auto-roll-back (spec 2026-08-19)
@@ -172,7 +172,7 @@ Options:
       --bind-host <host>      host the cockpit binds (default 127.0.0.1). Use with
                               --external-proxy when the proxy runs in a container and
                               cannot reach loopback (e.g. docker bridge 172.17.0.1).
-                              cezar has NO built-in auth — never expose this publicly.
+                              cezar-plus has NO built-in auth — never expose this publicly.
       --yes                   server-install: accept safe defaults (never auto-sudo)
       --reconfigure <ids>     server-install: force re-run of step id(s), comma-separated
       --reinstall             server-install: force re-run of every step (full reinstall)
@@ -866,7 +866,7 @@ async function serveCommand(
   void checkForUpdate(pkgName, version).then((latest) => {
     if (!latest) return;
     update.latest = latest;
-    console.log(`\n  ⬆ cezar ${latest} is available (running ${version}) — restart with: npx ${pkgName}@latest\n`);
+    console.log(`\n  ⬆ cezar-plus ${latest} is available (running ${version}) — restart with: npx ${pkgName}@latest\n`);
   });
 
   const drain = new DrainController({ drainMs: resolveDrainMs(process.env) });
@@ -877,7 +877,7 @@ async function serveCommand(
   // auth (see `server-install --external-proxy`). Say so, loudly, every start.
   if (bindHost && !['127.0.0.1', 'localhost', '::1'].includes(bindHost)) {
     console.log(
-      `\n  ⚠ binding ${bindHost}:${port} — cezar has no built-in auth.\n` +
+      `\n  ⚠ binding ${bindHost}:${port} — cezar-plus has no built-in auth.\n` +
         `    Only do this behind a reverse proxy that enforces authentication,\n` +
         `    and make sure this interface is not reachable from the internet.\n`,
     );
@@ -915,7 +915,7 @@ async function serveCommand(
   }, port);
   const url = `http://localhost:${port}`;
 
-  console.log(`\n  cezar v${version} — ${repoRoot}`);
+  console.log(`\n  cezar-plus v${version} — ${repoRoot}`);
   console.log(`  ${repo ? `branch ${repo.branch}` : 'not a git repository (tasks run in place, one at a time; repo view is empty)'}`);
   for (const check of checks) {
     const mark = check.available ? '✓' : '✗';
@@ -1157,9 +1157,9 @@ async function runCommand(
   // (spec 2026-08-21-task-author-provenance). There is no session and no request here.
   let runId: string | undefined;
   let settled = false;
-  let pendingFinal: import('@loki-labs/better-cezar-contract').RunStatus | undefined;
-  let resolveFinal: ((status: import('@loki-labs/better-cezar-contract').RunStatus) => void) | undefined;
-  const settle = (status: import('@loki-labs/better-cezar-contract').RunStatus): void => {
+  let pendingFinal: import('@loki-labs/cezar-plus-contract').RunStatus | undefined;
+  let resolveFinal: ((status: import('@loki-labs/cezar-plus-contract').RunStatus) => void) | undefined;
+  const settle = (status: import('@loki-labs/cezar-plus-contract').RunStatus): void => {
     if (settled) return;
     if (!resolveFinal) {
       pendingFinal = status;
@@ -1191,11 +1191,11 @@ async function runCommand(
   runId = run.id;
   // `review` is terminal here too (spec 009) — headless runs must not hang on
   // the GUI's review gate; the diff waits on the task branch/cockpit instead.
-  const onRun = (r: import('@loki-labs/better-cezar-contract').RunRecord): void => {
+  const onRun = (r: import('@loki-labs/cezar-plus-contract').RunRecord): void => {
     if (r.id === run.id && ['done', 'review', 'failed', 'cancelled'].includes(r.status)) settle(r.status);
   };
   store.on('run', onRun);
-  const final = await new Promise<import('@loki-labs/better-cezar-contract').RunStatus>((resolveStatus) => {
+  const final = await new Promise<import('@loki-labs/cezar-plus-contract').RunStatus>((resolveStatus) => {
     resolveFinal = resolveStatus;
     const current = store.getRun(run.id);
     if (pendingFinal) settle(pendingFinal);
@@ -1283,7 +1283,7 @@ async function serverCommand(
       const { createClackUi } = await import('./server-install/ui.ts');
       const answer = await createClackUi().text({
         message:
-          'This host already runs a cezar cockpit. Enter a NEW domain to host a second, independent instance — ' +
+          'This host already runs a cezar-plus cockpit. Enter a NEW domain to host a second, independent instance — ' +
           'or leave blank to manage/redeploy the existing one.',
         placeholder: 'shop.example.com',
       });
@@ -2042,9 +2042,9 @@ function readOwnName(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as { name?: string };
-    return pkg.name ?? '@loki-labs/better-cezar';
+    return pkg.name ?? '@loki-labs/cezar-plus';
   } catch {
-    return '@loki-labs/better-cezar';
+    return '@loki-labs/cezar-plus';
   }
 }
 

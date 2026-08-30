@@ -9,7 +9,7 @@ import {
   type ClusterNodeLabel,
   type ClusterNodeRole,
   type StoredClusterNodeIdentity,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { readAccountIdentity } from '../agent-config/account-identity.ts';
 import { chooseIsolation, probeIsolationCapabilities, type BrokerIsolation } from '../core/broker-isolation.ts';
 import { agentHomePaths, cezarHomeDir } from '../paths.ts';

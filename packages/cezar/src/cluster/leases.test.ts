@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { ClusterLease } from '@loki-labs/better-cezar-contract';
+import type { ClusterLease } from '@loki-labs/cezar-plus-contract';
 import { clusterHomeDir } from './node-identity.ts';
 import {
   DEFAULT_LEASE_TTL_MS,

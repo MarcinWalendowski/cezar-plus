@@ -8,7 +8,7 @@ import {
   type TodoItem,
   type UpdateTodoInput,
   type WorkspaceTodoEntry,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 
 /**
  * The pure half of the global Tasks page's "Filed" section (2026-08-17-filed-tasks-table-

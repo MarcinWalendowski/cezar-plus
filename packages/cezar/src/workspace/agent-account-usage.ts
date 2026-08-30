@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
-import { accountUsageKey } from '@loki-labs/better-cezar-contract';
+import { accountUsageKey } from '@loki-labs/cezar-plus-contract';
 import type { ProviderId } from '../core/provider-auth.ts';
 import { agentAccountUsagePath } from '../paths.ts';
 import { atomicWriteJsonSync } from './config.ts';
@@ -170,7 +170,7 @@ export type AgentAccountUsageStore = z.infer<typeof storeSchema>;
 /**
  * The key everything in this file is stored under: **provider AND account id**, never the id alone.
  *
- * MOVED 2026-08-23 to `@loki-labs/better-cezar-contract` (`usage-hold.ts`) and re-exported here, so
+ * MOVED 2026-08-23 to `@loki-labs/cezar-plus-contract` (`usage-hold.ts`) and re-exported here, so
  * every importer in this package keeps its import. It had to leave: the cockpit now renders which
  * account a queued task is held on, and the browser cannot import this file — it reads
  * `node:fs/promises` at the top. A second spelling in the web package would have been a key that
