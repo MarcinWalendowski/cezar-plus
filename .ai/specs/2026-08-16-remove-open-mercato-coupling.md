@@ -54,6 +54,13 @@ and does not have to be redone as earlier phases delete files.
 - Delete `.ai/skills/om-prepare-test-env/`.
 - Rewrite the Manage-skills panel: it stops naming a vendor and describes what it actually does.
 
+**CORRECTED 2026-08-30 by `.ai/specs/2026-08-30-close-open-mercato-residue.md`.** This claim was
+false as shipped: `gatedSkillsRepos` answered the empty set on every one of its four code paths,
+including the "someone configures a team repo" case this paragraph describes — naming a repo was
+exactly the branch that returned `none`. The gate stayed dead, not live, until the 2026-08-30 spec
+rewrote it to return the effective `skillsRepos` instead of probing the raw file for presence. The
+original text follows unchanged:
+
 **`gatedSkillsRepos` stays.** It is the opt-out gate for *any* default skills repo, not an
 Open-Mercato-specific mechanism, and it becomes live again the moment someone configures a team
 repo of their own in `.ai/cezar/config.json`.
@@ -174,7 +181,7 @@ Every guard names the mutation that must turn it red.
 | Guard | File | Mutation |
 |---|---|---|
 | The default skills config offers no repo | `packages/cezar/src/config.test.ts` | Restore `open-mercato/skills` to `DEFAULT_SKILLS_REPOS` |
-| No source file names Open Mercato outside the dated record | new structural test | Reintroduce the string anywhere under `packages/*/src` |
+| No source file names Open Mercato outside the dated record | **NOT implemented on 2026-08-16 — no such test existed; delivered 2026-08-30 by `.ai/specs/2026-08-30-close-open-mercato-residue.md`**, `packages/cezar/src/notifications/transports/webhook.test.ts` | Reintroduce the string anywhere under `packages/{cezar,web,contract,api-client}/src` |
 | The brand asset the server serves is the one the bundle asks for | `packages/cezar/src/server/static-ui.test.ts` | Point `index.html` at a path the allowlist omits |
 
 Gates in order, **`npm test -- <path>`, never `npx vitest`**, judged by **exit code**:

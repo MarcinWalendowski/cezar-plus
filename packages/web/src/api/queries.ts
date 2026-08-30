@@ -1398,7 +1398,7 @@ export function useSkills(enabled = true) {
   return skills
 }
 
-/** The opt-in catalog for the "Import skills" panel — the default (vendor) repo's full skill
+/** The opt-in catalog for the "Import skills" panel — the configured team repos' full skill
  *  list, regardless of import state. Same fast-then-`wait=1` convergence as `useSkills`: the
  *  panel renders whatever the cache holds immediately, then the cold-clone wait fills it in. */
 export function useImportableSkills(enabled = true) {

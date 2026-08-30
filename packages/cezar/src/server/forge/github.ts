@@ -2031,7 +2031,7 @@ export async function createDraftPr(input: DraftPrInput): Promise<DraftPrOutcome
   // DRY-RUN (CEZ_DRY_RUN=1): no push, no gh — simulate success with a fake PR
   // URL so the whole review → PR flow is testable without GitHub.
   if (process.env.CEZ_DRY_RUN === '1') {
-    return { ok: true, url: 'https://github.com/open-mercato/demo/pull/777', dryRun: true };
+    return { ok: true, url: 'https://github.com/acme/demo/pull/777', dryRun: true };
   }
 
   const remote = await execTool(['remote', 'get-url', 'origin'], worktree, 'git');

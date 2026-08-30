@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { workspaceUiStateSchema } from '@loki-labs/cezar-plus-contract';
-import { cezarHomeDir, workspaceConfigPath } from '../paths.ts';
+import { cezarHomeDir, workspaceConfigPath, workspaceUiStatePath } from '../paths.ts';
 import { readUiState } from '../ui-state.ts';
 import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from './config.ts';
 import { mergeWriteWorkspaceUiState } from './ui-state.ts';
@@ -138,9 +138,35 @@ const migration001: WorkspaceMigration = {
   },
 };
 
+/**
+ * Migration 002 — `schemaVersion 1 → 2` (Risks 1 of the 2026-08-30 spec that closed the residue
+ * left by the earlier team-skills default-repo removal). Deletes the stale `importedSkills`
+ * curation from the GLOBAL `~/.cezar/ui-state.json`, if present.
+ *
+ * `gatedSkillsRepos` (`../config.ts`) now returns the EFFECTIVE `skillsRepos` instead of the
+ * empty set unconditionally, so a curation array left over from before the default repo was
+ * removed — one that names only skills from a repo that no longer exists — would otherwise
+ * filter a newly-configured team repo's catalog down to nothing the moment this ships. Deleting
+ * the key restores the tri-state's ABSENT reading (keep everything — the non-breaking half of
+ * the contract `BACKWARD_COMPATIBILITY.md:195` protects). Not a filter-the-stale-names pass:
+ * deciding which names are stale needs the team-skill cache, which a boot-time migration must
+ * not wait on.
+ */
+const migration002: WorkspaceMigration = {
+  to: 2,
+  id: '002-drop-stale-imported-skills',
+  async run() {
+    const raw = await readRawObject(workspaceUiStatePath());
+    if (!raw || !('importedSkills' in raw)) return; // nothing to drop — idempotent by inspection
+    await mergeWriteWorkspaceUiState((state) => {
+      delete (state as Record<string, unknown>).importedSkills;
+    });
+  },
+};
+
 /** All known migrations. Kept in ascending `to` order; `runMigrations` sorts
  *  defensively anyway. */
-export const WORKSPACE_MIGRATIONS: readonly WorkspaceMigration[] = [migration001];
+export const WORKSPACE_MIGRATIONS: readonly WorkspaceMigration[] = [migration001, migration002];
 
 /**
  * Run every pending workspace migration — called at boot before anything else

@@ -26,9 +26,8 @@ export type SkillsRepoSource = z.infer<typeof skillsRepoSchema>;
  * in `.ai/cezar/config.json`. It used to default to `open-mercato/skills`, which supplied 37 of
  * the 47 skills in a live catalog and crowded the composer picker with a vendor's names.
  *
- * `gatedSkillsRepos` (src/skills.ts) still treats whatever is listed here as the *default*
- * (opt-out-able) tier, so configuring a repo restores that behaviour for it — the gate was never
- * Open-Mercato-specific and is left intact.
+ * `gatedSkillsRepos` (this file, below) curates whatever repos are listed here: the repos
+ * listed in `skillsRepos` are the team tier, and curation (`importedSkills`) applies to them.
  */
 export const DEFAULT_SKILLS_REPOS: SkillsRepoSource[] = [];
 
@@ -297,40 +296,17 @@ async function ownWorktreeRetention(repoRoot: string): Promise<number | undefine
 }
 
 /**
- * The default skills repos that are *opt-in per skill* (the "import OM skills"
- * flow): the set of repo identifiers a user must explicitly import from before
- * their skills join the catalog. This is exactly `DEFAULT_SKILLS_REPOS` when the
- * repo has NOT configured its own `skillsRepos` — the zero-config majority — and
- * empty once a repo takes control by setting `skillsRepos` (then everything it
- * lists auto-loads, unchanged).
+ * The team-tier repos that are *opt-in per skill*: the set of repo identifiers a user must
+ * explicitly import from before their skills join the catalog. This is exactly the effective
+ * `skillsRepos` — empty for a zero-config install, whatever is configured otherwise — so
+ * curation applies to every team repo an operator opts into.
  *
- * `loadConfig` cannot answer this: the schema's `.default(DEFAULT_SKILLS_REPOS)`
- * materializes the key, so a parsed config can't tell "the user chose these" from
- * "the user said nothing". So we probe the raw file for the key's presence — the
- * same reason `ownWorktreeRetention` below reads the raw JSON.
+ * `loadConfig` already degrades a missing file, malformed JSON and a non-object root to the
+ * schema default (`[]`), so this reads through it rather than re-reading the raw file.
  */
 export async function gatedSkillsRepos(repoRoot: string): Promise<Set<string>> {
-  const none = new Set<string>();
-  let raw: string;
-  try {
-    raw = await readFile(join(repoRoot, '.ai/cezar', 'config.json'), 'utf8');
-  } catch {
-    // No file — the defaults are in effect, so they are the opt-in set.
-    return new Set(DEFAULT_SKILLS_REPOS.map((r) => r.repo));
-  }
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') {
-      return new Set(DEFAULT_SKILLS_REPOS.map((r) => r.repo));
-    }
-    // The user took control of the source list — nothing is gated; a value the
-    // schema would refuse degrades to the default too (same as `loadConfig`).
-    if ((parsed as Record<string, unknown>).skillsRepos !== undefined) return none;
-    return new Set(DEFAULT_SKILLS_REPOS.map((r) => r.repo));
-  } catch {
-    // Malformed JSON degrades to the default (which loadConfig also does).
-    return new Set(DEFAULT_SKILLS_REPOS.map((r) => r.repo));
-  }
+  const config = await loadConfig(repoRoot);
+  return new Set(config.skillsRepos.map((r) => r.repo));
 }
 
 /**
