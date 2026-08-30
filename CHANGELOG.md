@@ -1,5 +1,28 @@
 # Unreleased
 
+## ⚠️ Breaking
+
+- 🔓 **`gatedSkillsRepos` now gates a configured `skillsRepos`, instead of never gating anything**
+  (spec `.ai/specs/2026-08-30-close-open-mercato-residue.md`). The 2026-08-16 removal left
+  `gatedSkillsRepos` answering the empty set on every one of its four code paths — including the
+  "someone configures a team repo" branch the record promised would restore it — so
+  `GET /api/v1/skills/importable` always answered `[]`, the "Manage skills" row could never
+  render, and `filterImportedTeamSkills`/`importedSkills` curation was a no-op for two weeks. It
+  now returns the repos in the **effective** `skillsRepos`: curation applies to whatever team
+  repos an operator opts into, and the Manage-skills panel — ~500 lines of tested but unreachable
+  UI — becomes reachable for the first time since 2026-08-16.
+
+  **Migration `002-drop-stale-imported-skills`** deletes a stale `importedSkills` array from the
+  global `~/.cezar/ui-state.json` on boot, if present: an operator who curated before 2026-08-16
+  holds only `om-*` names that no longer exist, and without this the gate becoming live would
+  filter a newly-configured team repo's catalog down to empty on upgrade. Absence still means
+  "not curated, keep all" — the migration only removes a selection that has been inert (and named
+  skills that no longer exist) since the vendor repo was removed; it never rewrites a live
+  selection.
+
+  `BACKWARD_COMPATIBILITY.md:195` stated the old (dead) semantics as a protected contract —
+  corrected in place in the same commit.
+
 ## Added
 
 - 📄 **Task detail gets a Spec tab, rendered as a feed: spec, then review, then spec again, until
@@ -1325,8 +1348,14 @@
   supplied **37 of 47 catalog skills** — every `om-*` entry — and crowded the composer picker with
   a vendor's names. A zero-config cockpit now gets exactly the skills on the machine
   (`.ai/skills`, `~/.claude/skills`, …); a team repo is opt-in via `skillsRepos` in
-  `.ai/cezar/config.json`. `gatedSkillsRepos` is untouched and becomes live again for whatever
-  repo you name there.
+  `.ai/cezar/config.json`.
+
+  **CORRECTED 2026-08-30 by `.ai/specs/2026-08-30-close-open-mercato-residue.md`.** The next
+  sentence was false as shipped: `gatedSkillsRepos` answered the empty set on every one of its
+  code paths, including the "someone names a repo" case it describes — that was exactly the
+  branch that returned `none`. The gate stayed dead until the 2026-08-30 spec rewrote it (see the
+  new Breaking entry above). Original text: ~~`gatedSkillsRepos` is untouched and becomes live
+  again for whatever repo you name there.~~
 
   Deleted with it: `src/skills-banner.ts` (the 5-line promo printed on every `serve`) and
   `CEZ_NO_BANNER`; the whole skills-update feature — `src/skills-update.ts`, the three

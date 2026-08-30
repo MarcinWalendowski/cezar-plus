@@ -451,3 +451,78 @@ describe('upstream purity (spec Verification #10, whole tree)', () => {
     expect(FORBIDDEN_RE.test('a generic webhook notifier for ntfy and Slack')).toBe(false);
   });
 });
+
+describe('no vendor naming (spec .ai/specs/2026-08-30-close-open-mercato-residue.md, finding 4)', () => {
+  // The guard the 2026-08-16 spec's own Verification table named and never got — row 2, "No
+  // source file names Open Mercato outside the dated record | new structural test". Mirrors the
+  // "upstream purity" scan above, for the vendor this fork removed rather than the one it forked
+  // from.
+  //
+  // Scope is all FOUR workspace packages that publish source, not just the two the purity scan
+  // above covers: `packages/contract/src/runs.ts` is a real hit a `{cezar,web}`-only scan would
+  // miss, and `packages/api-client/src` has zero hits today — the entire reason to include it
+  // now, before something lands there uncaught.
+  const FORBIDDEN_RE = /open[- ]mercato/i;
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..', '..');
+  const TEXT_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|css|html|json|ndjson|md|txt|svg)$/i;
+  const SCAN_ROOTS = ['cezar', 'web', 'contract', 'api-client'].map((pkg) =>
+    join(repoRoot, 'packages', pkg, 'src'),
+  );
+
+  /** Class exemptions — 24 of the 32 hits this spec measured at HEAD, none of them a place
+   *  vendor coupling could hide, so listing them individually would be a list nobody rereads. */
+  const isExemptClass = (relPath: string): boolean =>
+    /\.test\.(ts|tsx)$/.test(relPath) || relPath.includes('/__fixtures__/');
+
+  /** The "legitimate" row of finding 3's table — dated citations and ported-design provenance
+   *  credits the 2026-08-16 carve-out protects. Exactly five, short enough to actually reread;
+   *  a class exemption is a standing licence, spent only where the class is genuinely uniform. */
+  const ALLOWLIST = new Set([
+    'packages/cezar/src/config.ts',
+    'packages/web/src/lib/tasks-table.ts',
+    'packages/web/src/routes/settings/projects-section.tsx',
+    'packages/web/src/components/skills-import-panel.tsx',
+    'packages/contract/src/runs.ts',
+  ]);
+
+  function listFiles(dir: string): string[] {
+    return readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && TEXT_EXT.test(entry.name))
+      .map((entry) => join(entry.parentPath, entry.name));
+  }
+
+  const files = SCAN_ROOTS.flatMap(listFiles);
+
+  it('no source file under packages/{cezar,web,contract,api-client}/src spells open-mercato outside the allowlist', () => {
+    // A walk that found nothing would pass this vacuously — the scan has to be shown to have run.
+    expect(files.length).toBeGreaterThan(500);
+
+    const hits = files.filter((file) => FORBIDDEN_RE.test(readFileSync(file, 'utf8')));
+    const offenders = hits
+      .map((file) => file.slice(repoRoot.length + 1))
+      .filter((relPath) => !isExemptClass(relPath) && !ALLOWLIST.has(relPath));
+    expect(offenders).toEqual([]);
+
+    // Non-blinding control: an allowlist entry naming a file with no hit left in it must fail
+    // rather than linger, so the list shrinks by itself instead of accumulating.
+    const hitPaths = new Set(hits.map((file) => file.slice(repoRoot.length + 1)));
+    for (const allowed of ALLOWLIST) {
+      expect(hitPaths.has(allowed)).toBe(true);
+    }
+  });
+
+  it('negative control: the allowlist exempts by exact file path, not substring', () => {
+    const isAllowlisted = (relPath: string) => ALLOWLIST.has(relPath);
+    expect(isAllowlisted('packages/cezar/src/config.ts')).toBe(true);
+    // A path that merely CONTAINS an allowlisted path as a substring must not be exempt — the
+    // check is exact-membership, not a substring test a mutation could widen.
+    expect(isAllowlisted('packages/cezar/src/config.ts.bak')).toBe(false);
+    expect(isAllowlisted('vendored/packages/cezar/src/config.ts')).toBe(false);
+  });
+
+  it('negative control: the scan actually catches the word when present, and ignores unrelated prose', () => {
+    expect(FORBIDDEN_RE.test('cloned from open-mercato/skills')).toBe(true);
+    expect(FORBIDDEN_RE.test('an open mercato of ideas')).toBe(true);
+    expect(FORBIDDEN_RE.test('a generic webhook notifier for ntfy and Slack')).toBe(false);
+  });
+});

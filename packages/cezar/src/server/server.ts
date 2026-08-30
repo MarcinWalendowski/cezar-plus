@@ -4772,11 +4772,10 @@ export function createApp(deps: ServerDeps) {
       return c.json(await discoverSkills(repoRoot));
     })
 
-    // The opt-in catalog for the "Import skills" panel: every skill a default
-    // (vendor) repo offers, regardless of import state, so the panel can present
-    // them all with a per-skill toggle. Empty when no default repo is configured
-    // (cezar ships none), and empty once a repo configures its own `skillsRepos`
-    // (nothing is gated then). `wait=1` lets the
+    // The opt-in catalog for the "Import skills" panel: every skill a configured
+    // team repo offers, regardless of import state, so the panel can present
+    // them all with a per-skill toggle. Empty when no team repo is configured
+    // (cezar ships none). `wait=1` lets the
     // panel wait out a cold team-skill cache, same as `GET /skills` (spec 005).
     .get('/skills/importable', queryZodValidator(waitQuery), async (c) => {
       const repoRoot = c.get('project').root;

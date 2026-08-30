@@ -49,24 +49,33 @@ const WORKFLOWS: WorkflowsResponse = {
 
 let requests: Array<{ method: string; url: string; body?: unknown }> = []
 
+const json = (payload: unknown, status = 200) =>
+  new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } })
+
 function serve({
   skills = SKILLS,
   refreshed = SKILLS,
   importable = [],
+  importableError = false,
   workspaceUiState = {},
+  analytics = () => json({ accepted: 1 }, 202),
 }: {
   skills?: Skill[]
   refreshed?: Skill[]
   importable?: { name: string; description?: string }[]
+  /** `GET /skills/importable` answers 500 instead of `importable` — for the "an errored list is
+   *  not a reachable surface" analytics case. */
+  importableError?: boolean
   workspaceUiState?: Record<string, unknown>
+  /** Overridable so a test can make the analytics POST reject without touching any other route
+   *  (Analytics guard: a rejecting transport must not reach the checkbox state or the toast). */
+  analytics?: () => Response
 } = {}) {
   requests = []
   // The selection lives in the GLOBAL ui-state (`/api/v1/workspace/ui-state`), whose PUT answers the
   // MERGED state; the Manage panel relies on that echo to reconcile its optimistic write, so the
   // stub must merge and return rather than answer `{}`.
   let global: Record<string, unknown> = { ...workspaceUiState }
-  const json = (payload: unknown) =>
-    new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } })
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -81,7 +90,9 @@ function serve({
       if (url === '/api/v1/skills' && method === 'GET') return json(skills)
       if (url === '/api/v1/skills/refresh' && method === 'POST') return json(refreshed)
       // Both the fast read and the ?wait=1 convergence read hit this endpoint.
-      if (url.startsWith('/api/v1/skills/importable')) return json(importable)
+      if (url.startsWith('/api/v1/skills/importable')) {
+        return importableError ? json({ error: 'boom' }, 500) : json(importable)
+      }
       if (url === '/api/v1/workflows') return json(WORKFLOWS)
       if (url === '/api/v1/launch-key') return json({ key: 'sekret' })
       if (url === '/api/v1/ui-state') return json({}) // per-repo prefs — unused by the panel
@@ -90,10 +101,17 @@ function serve({
         global = { ...global, ...(body as Record<string, unknown>) }
         return json(global)
       }
+      if (url === '/api/v1/workspace/analytics/events' && method === 'POST') return analytics()
       return new Promise<never>(() => {})
     }),
   )
 }
+
+/** Analytics POSTs the panel/route sent, decoded — one request may batch several `events`. */
+const analyticsEvents = () =>
+  requests
+    .filter((r) => r.method === 'POST' && r.url === '/api/v1/workspace/analytics/events')
+    .flatMap((r) => (r.body as { events: { name: string; props: Record<string, unknown> }[] }).events)
 
 /** Seeds the step-3.2 route gates — boot id (legacy redirect) + registry (known-check) — so a
  *  flat entry URL lands scoped immediately. The boot project mounts UNSCOPED, so the exact
@@ -271,20 +289,20 @@ describe('the Manage skills panel (opt-out team skills)', () => {
       )
       .at(-1)?.body as { importedSkills: string[] } | undefined
 
-  it('shows the pinned "Manage skills" entry only when a vendor repo has default skills', async () => {
+  it('shows the pinned "Manage skills" entry only when a team repo has importable skills', async () => {
     serve({ importable: IMPORTABLE })
     renderAt('/skills')
     await waitFor(() => expect(document.querySelector('[data-slot="import-skills-row"]')).not.toBeNull())
   })
 
-  it('hides the entry when there are no default skills (repo configured its own skillsRepos)', async () => {
+  it('hides the entry when there are no importable skills', async () => {
     serve({ importable: [] })
     renderAt('/skills')
     await waitFor(() => expect(rowNames()).toHaveLength(3))
     expect(document.querySelector('[data-slot="import-skills-row"]')).toBeNull()
   })
 
-  it('enables every default skill by default (opt-out), and unchecking one curates it away', async () => {
+  it('enables every team skill by default (opt-out), and unchecking one curates it away', async () => {
     serve({ importable: IMPORTABLE }) // uiState {} → not curated → all on
     renderAt('/skills?skill=__import')
     await waitFor(() => expect(importRows()).toEqual(['pr-create', 'code-review']))
@@ -331,7 +349,7 @@ describe('the Manage skills panel (opt-out team skills)', () => {
     await waitFor(() => expect(lastPut()?.importedSkills.sort()).toEqual(['code-review', 'pr-create']))
   })
 
-  it('"Remove all" clears the default catalog, then "Enable all" restores it', async () => {
+  it('"Remove all" clears the team catalog, then "Enable all" restores it', async () => {
     serve({ importable: IMPORTABLE }) // default: all on
     renderAt('/skills?skill=__import')
     await waitFor(() => expect(importRows()).toHaveLength(2))
@@ -431,6 +449,173 @@ describe('the Manage skills panel (opt-out team skills)', () => {
     expect(
       document.querySelector('[data-slot="import-row"][data-skill="code-review"]')?.getAttribute('data-imported'),
     ).toBe('true')
+  })
+
+  describe('analytics (skills.manage_opened / skills.curation_changed)', () => {
+    it('skills.manage_opened fires once, with the importable count, once the panel loads a non-empty list', async () => {
+      serve({ importable: IMPORTABLE })
+      renderAt('/skills?skill=__import')
+      await waitFor(() => expect(importRows()).toHaveLength(2))
+      await waitFor(() =>
+        expect(analyticsEvents().filter((e) => e.name === 'skills.manage_opened')).toEqual([
+          { name: 'skills.manage_opened', props: { importableCount: 2 } },
+        ]),
+      )
+    })
+
+    it('skills.manage_opened does not fire when the importable list is empty', async () => {
+      serve({ importable: [] })
+      renderAt('/skills?skill=__import')
+      await waitFor(() =>
+        expect(document.querySelector('[data-slot="skills-import-panel"]')?.textContent).toContain(
+          'no team skills',
+        ),
+      )
+      expect(analyticsEvents().some((e) => e.name === 'skills.manage_opened')).toBe(false)
+    })
+
+    it('skills.manage_opened does not fire when the importable request errors', async () => {
+      serve({ importableError: true })
+      renderAt('/skills?skill=__import')
+      // The error branch (`importable.isError`) returns a bare CenteredState, not wrapped in the
+      // panel's own `data-slot` — same shape as the catalog's own `skillsQuery.isError` early
+      // return. `useImportableSkills` has no `retry: false` (query-client.ts's default retries a
+      // 5xx once), so this needs a longer timeout than the default 1000ms.
+      await waitFor(
+        () => expect(document.body.textContent).toContain('Could not load importable skills'),
+        { timeout: 5000 },
+      )
+      expect(analyticsEvents().some((e) => e.name === 'skills.manage_opened')).toBe(false)
+    })
+
+    it('skills.curation_changed fires only after the PUT resolves, with the action and the offered counts', async () => {
+      serve({ importable: IMPORTABLE }) // opt-out default: both start enabled
+      renderAt('/skills?skill=__import')
+      await waitFor(() => expect(importRows()).toEqual(['pr-create', 'code-review']))
+
+      fireEvent.click(
+        document.querySelector('[data-slot="import-row"][data-skill="pr-create"] [data-slot="import-toggle"]')!,
+      )
+      await waitFor(() => expect(lastPut()?.importedSkills).toEqual(['code-review']))
+      await waitFor(() =>
+        expect(analyticsEvents().filter((e) => e.name === 'skills.curation_changed')).toEqual([
+          { name: 'skills.curation_changed', props: { action: 'disable', selected: 1, total: 2 } },
+        ]),
+      )
+
+      fireEvent.click(
+        document.querySelector('[data-slot="import-row"][data-skill="pr-create"] [data-slot="import-toggle"]')!,
+      )
+      await waitFor(() => expect(lastPut()?.importedSkills.sort()).toEqual(['code-review', 'pr-create']))
+      await waitFor(() =>
+        expect(analyticsEvents().filter((e) => e.name === 'skills.curation_changed')).toHaveLength(2),
+      )
+      expect(analyticsEvents().filter((e) => e.name === 'skills.curation_changed')[1]).toEqual({
+        name: 'skills.curation_changed',
+        props: { action: 'enable', selected: 2, total: 2 },
+      })
+    })
+
+    it('skills.curation_changed fires for "Remove all" / "Enable all" with the _all actions', async () => {
+      serve({ importable: IMPORTABLE })
+      renderAt('/skills?skill=__import')
+      await waitFor(() => expect(importRows()).toHaveLength(2))
+
+      fireEvent.click(document.querySelector('[data-slot="import-all"]')!)
+      await waitFor(() => expect(lastPut()?.importedSkills).toEqual([]))
+      await waitFor(() =>
+        expect(analyticsEvents().filter((e) => e.name === 'skills.curation_changed')).toEqual([
+          { name: 'skills.curation_changed', props: { action: 'disable_all', selected: 0, total: 2 } },
+        ]),
+      )
+
+      fireEvent.click(document.querySelector('[data-slot="import-all"]')!)
+      await waitFor(() => expect(lastPut()?.importedSkills.sort()).toEqual(['code-review', 'pr-create']))
+      await waitFor(() =>
+        expect(analyticsEvents().filter((e) => e.name === 'skills.curation_changed')).toHaveLength(2),
+      )
+      expect(analyticsEvents().filter((e) => e.name === 'skills.curation_changed')[1]).toEqual({
+        name: 'skills.curation_changed',
+        props: { action: 'enable_all', selected: 2, total: 2 },
+      })
+    })
+
+    it('skills.curation_changed does not fire when the PUT rejects', async () => {
+      serve({ importable: IMPORTABLE, analytics: () => json({ accepted: 1 }, 202) })
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input).replace(/^\/api\/v1\/p\/[^/]+/, '/api/v1')
+          const method = init?.method ?? 'GET'
+          const body = init?.body ? JSON.parse(String(init.body)) : undefined
+          requests.push({ method, url, body })
+          if (url === '/api/v1/skills' && method === 'GET') return json(SKILLS)
+          if (url.startsWith('/api/v1/skills/importable')) return json(IMPORTABLE)
+          if (url === '/api/v1/workflows') return json(WORKFLOWS)
+          if (url === '/api/v1/launch-key') return json({ key: 'sekret' })
+          if (url === '/api/v1/ui-state') return json({})
+          if (url === '/api/v1/workspace/ui-state' && method === 'GET') return json({})
+          if (url === '/api/v1/workspace/ui-state' && method === 'PUT') return json({ error: 'boom' }, 500)
+          if (url === '/api/v1/workspace/analytics/events' && method === 'POST') return json({ accepted: 1 }, 202)
+          return new Promise<never>(() => {})
+        }),
+      )
+      renderAt('/skills?skill=__import')
+      await waitFor(() => expect(importRows()).toHaveLength(2))
+
+      fireEvent.click(
+        document.querySelector('[data-slot="import-row"][data-skill="pr-create"] [data-slot="import-toggle"]')!,
+      )
+      // The rejected PUT surfaces the failure as a danger toast (persist()'s catch path) — waiting
+      // for it is how the test knows the write chain has settled before checking for the event.
+      await waitFor(() => expect(document.querySelector('[data-tone="danger"]')).not.toBeNull())
+      expect(analyticsEvents().some((e) => e.name === 'skills.curation_changed')).toBe(false)
+    })
+
+    it('an analytics failure cannot reach the UI — the checkbox state and toast surface stay untouched', async () => {
+      serve({
+        importable: IMPORTABLE,
+        analytics: () => {
+          throw new Error('analytics endpoint unreachable')
+        },
+      })
+      renderAt('/skills?skill=__import')
+      await waitFor(() => expect(importRows()).toHaveLength(2))
+
+      fireEvent.click(
+        document.querySelector('[data-slot="import-row"][data-skill="pr-create"] [data-slot="import-toggle"]')!,
+      )
+      // The write still lands and the checkbox still reflects it — trackEvent's own rejection
+      // (api/analytics.ts:17 swallows it) never reaches the toggle handler's try/catch.
+      await waitFor(() => expect(lastPut()?.importedSkills).toEqual(['code-review']))
+      await waitFor(() =>
+        expect(
+          document.querySelector('[data-slot="import-row"][data-skill="pr-create"]')?.getAttribute('data-imported'),
+        ).toBeNull(),
+      )
+      expect(document.querySelectorAll('[data-tone="danger"]')).toHaveLength(0)
+    })
+
+    it('no repo or skill name is ever an analytics prop', async () => {
+      serve({ importable: IMPORTABLE })
+      renderAt('/skills?skill=__import')
+      await waitFor(() => expect(importRows()).toHaveLength(2))
+
+      fireEvent.click(
+        document.querySelector('[data-slot="import-row"][data-skill="pr-create"] [data-slot="import-toggle"]')!,
+      )
+      await waitFor(() => expect(lastPut()?.importedSkills).toEqual(['code-review']))
+
+      const events = analyticsEvents()
+      expect(events.length).toBeGreaterThan(0)
+      for (const event of events) {
+        const serialized = JSON.stringify(event.props)
+        expect(serialized).not.toContain('pr-create')
+        expect(serialized).not.toContain('code-review')
+        expect(Object.keys(event.props)).not.toContain('repo')
+        expect(Object.keys(event.props)).not.toContain('skill')
+      }
+    })
   })
 })
 
