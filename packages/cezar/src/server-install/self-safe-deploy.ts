@@ -211,9 +211,22 @@ export interface SystemdRunOptions {
  *
  * `--collect` reaps the transient unit once it exits, so a box does not accumulate failed
  * `cezar-deploy-*` units. `KillMode=process` means that even if something later stops THIS unit,
- * it signals only the main process rather than the tree. `Type=oneshot` with
- * `RemainAfterExit=no` keeps `systemctl` semantics honest: the unit is active exactly while the
- * deploy runs.
+ * it signals only the main process rather than the tree. `Type=exec` with `RemainAfterExit=no`
+ * keeps `systemctl` semantics honest: the unit is active exactly while the deploy runs.
+ *
+ * **CORRECTED 2026-08-30: this was `Type=oneshot`, and it made every caller block for the whole
+ * deploy.** A oneshot start job is not complete until the command EXITS, so `systemd-run` does not
+ * return until the deploy is over — which turned `manual-activation.ts`'s deliberately synchronous
+ * `registerUnit` into a ~62 s freeze of the server's event loop, and with it a 30 s
+ * `TimeoutStopSec` SIGKILL on every Resolve-driven restart. Measured on `prod-host` against
+ * one `/bin/sleep 6`: `Type=oneshot` returned after **6049 ms**, `Type=exec` after **24 ms**.
+ *
+ * `Type=exec` is the fix and `--no-block` is NOT. `exec` completes the start job once the binary
+ * has been execed, so it returns at once AND still fails loudly when the unit cannot start — an
+ * unwritable `append:` target gives rc=1 under both `exec` and `oneshot`, and rc=0 under
+ * `--no-block`. That rc=0 is precisely the silent launch failure
+ * `.ai/specs/2026-08-29-resolve-runs-the-deployment.md` S3a exists to close.
+ * Spec: `.ai/specs/2026-08-30-activation-blocks-the-event-loop.md`.
  */
 export function buildSystemdRunArgv(opts: SystemdRunOptions): string[] {
   const argv = [
@@ -222,7 +235,7 @@ export function buildSystemdRunArgv(opts: SystemdRunOptions): string[] {
     ...(opts.user ? ['--user'] : []),
     `--unit=${transientUnitName(opts.releaseId)}`,
     '--collect',
-    '--property=Type=oneshot',
+    '--property=Type=exec',
     '--property=RemainAfterExit=no',
     '--property=KillMode=process',
     `--property=StandardOutput=append:${opts.logPath ?? deployLogPath(opts.releaseId)}`,
