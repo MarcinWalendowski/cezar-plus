@@ -191,11 +191,21 @@ export interface ActivationHost {
   /**
    * Register the transient unit and REPORT whether registration succeeded.
    *
-   * `systemd-run` returns as soon as the unit is queued — it does not wait for the command — so
-   * this can be synchronous and still not block the click. Being synchronous is the point: the
-   * first version spawned this detached with `stdio: 'ignore'` and took the lock regardless, so a
-   * launch that failed for either reason above was INDISTINGUISHABLE from one that worked, and
-   * left a 15-minute lock over nothing running. Measured on the first production press.
+   * `systemd-run` returns as soon as the unit's binary has been execed — it does not wait for the
+   * command to FINISH — so this can be synchronous and still not block the click. Being
+   * synchronous is the point: the first version spawned this detached with `stdio: 'ignore'` and
+   * took the lock regardless, so a launch that failed for either reason above was
+   * INDISTINGUISHABLE from one that worked, and left a 15-minute lock over nothing running.
+   * Measured on the first production press.
+   *
+   * **CORRECTED 2026-08-30 — that first sentence was FALSE, and this call was the freeze.** The
+   * unit `buildSystemdRunArgv` built was `Type=oneshot`, whose start job does not complete until
+   * the command EXITS, so `spawnSync` here blocked node's event loop for the entire ~62 s
+   * activation: no SIGTERM handler ran, no drain, no `store.flush()`, and the restart the
+   * activation itself triggers could only end in a 30 s `TimeoutStopSec` SIGKILL. The type is now
+   * `Type=exec`, which makes the sentence above true. Do NOT "fix" a future slow launch here by
+   * spawning detached or by adding `--no-block`: both restore the silent failure this reports.
+   * Spec: `.ai/specs/2026-08-30-activation-blocks-the-event-loop.md`.
    */
   registerUnit(argv: string[], env: NodeJS.ProcessEnv, cwd: string): { ok: boolean; error?: string };
   /** The no-systemd fallback, which genuinely cannot be waited on. */
