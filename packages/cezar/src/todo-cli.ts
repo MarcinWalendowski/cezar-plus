@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { basename, join, resolve } from 'node:path';
-import { createTodoInputSchema, type TodoKnowledgeRef } from '@loki-labs/better-cezar-contract';
+import { createTodoInputSchema, type TodoKnowledgeRef } from '@loki-labs/cezar-plus-contract';
 import { createTodo, isTombstoned, readTodos, updateTodo, type CreateTodoInput } from './todos.ts';
 import { authorFromAgentEnv } from './runs/task-author.ts';
 import { loadWorkspaceConfig } from './workspace/config.ts';

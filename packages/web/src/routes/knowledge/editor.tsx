@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-import type { KnowledgeDocument } from '@loki-labs/better-cezar-api-client'
+import type { KnowledgeDocument } from '@loki-labs/cezar-plus-api-client'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
@@ -88,7 +88,7 @@ export function DocumentEditor({
     >
       {!writable && (
         <p data-slot="knowledge-editor-readonly" className="text-[12px] text-soft-foreground">
-          Read-only — this document lives on a mount cezar does not write to, or it was mirrored
+          Read-only — this document lives on a mount cezar-plus does not write to, or it was mirrored
           from an external source and needs adopting before it can be edited here.
         </p>
       )}

@@ -20,7 +20,7 @@ import {
   type TransportHealth,
   type TransportHealthCounters,
   type TransportView,
-} from "@loki-labs/better-cezar-contract";
+} from "@loki-labs/cezar-plus-contract";
 import { jsonZodValidator, queryZodValidator } from "./validators.ts";
 import { resolveCapabilities } from "./capabilities.ts";
 import { loadServerState } from "../server-install/state.ts";
@@ -494,7 +494,7 @@ function buildTestNotification(now: number): Notification {
     projectId: "test",
     runIds: [],
     title: "Test notification",
-    body: `Sent from cezar at ${iso}.`,
+    body: `Sent from cezar-plus at ${iso}.`,
     dedupeKey: `test:${randomUUID()}`,
     createdAt: iso,
   };

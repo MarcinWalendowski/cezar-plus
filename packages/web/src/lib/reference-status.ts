@@ -1,4 +1,4 @@
-import type { ReferenceStatus } from '@loki-labs/better-cezar-api-client'
+import type { ReferenceStatus } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * What each PR/issue status MEANS, in one table.

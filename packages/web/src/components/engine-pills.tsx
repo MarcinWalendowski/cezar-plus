@@ -7,7 +7,7 @@ import {
   useRunnerLock,
   useRunnerModels,
 } from '@/api/queries'
-import type { CreateRunInput, LockableRunner, Runner } from '@loki-labs/better-cezar-api-client'
+import type { CreateRunInput, LockableRunner, Runner } from '@loki-labs/cezar-plus-api-client'
 import { PickerPill, RunnerPill, type RunnerAccountChoice } from '@/components/picker-pill'
 import { usableRunners } from '@/lib/provider-status'
 import {

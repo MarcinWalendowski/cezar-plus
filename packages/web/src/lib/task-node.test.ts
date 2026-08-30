@@ -1,4 +1,4 @@
-import type { ClusterActiveRun, ClusterNode } from '@loki-labs/better-cezar-api-client'
+import type { ClusterActiveRun, ClusterNode } from '@loki-labs/cezar-plus-api-client'
 import { describe, expect, it } from 'vitest'
 
 import {

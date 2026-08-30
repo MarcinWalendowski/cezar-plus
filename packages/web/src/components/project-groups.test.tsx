@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { ProjectListEntry, RunRecord } from '@loki-labs/better-cezar-api-client'
+import type { ProjectListEntry, RunRecord } from '@loki-labs/cezar-plus-api-client'
 import { ListViewProvider } from '@/components/list-view'
 import { ProjectGroups, RECENT_LIMIT } from '@/components/project-groups'
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from '@/lib/sidebar-collapse'

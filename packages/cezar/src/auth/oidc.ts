@@ -36,7 +36,7 @@
 import { createHash, createPublicKey, randomBytes, verify as verifySignature } from 'node:crypto';
 import type { JsonWebKey as CryptoJsonWebKey, KeyObject } from 'node:crypto';
 import { z } from 'zod';
-import type { AuthProvider } from '@loki-labs/better-cezar-contract';
+import type { AuthProvider } from '@loki-labs/cezar-plus-contract';
 
 // ---- provider selection --------------------------------------------------------------------
 

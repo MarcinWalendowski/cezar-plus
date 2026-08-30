@@ -9,12 +9,12 @@ import type { SuccessStatusCode } from 'hono/utils/http-status'
  * `hc` reuses the SERVER's own route types, so the contract is the code: a wrong path, a wrong
  * request body or a misread response shape is a compile error, and nothing has to be mirrored
  * by hand. The app type comes from the service package
- * (`import type { AppType } from '@loki-labs/better-cezar/app-type'`) and is supplied by the
+ * (`import type { AppType } from '@loki-labs/cezar-plus/app-type'`) and is supplied by the
  * caller rather than imported here on purpose — this package must stay installable, and
  * usable at runtime, without the server package present:
  *
  * ```ts
- * import type { AppType } from '@loki-labs/better-cezar/app-type'
+ * import type { AppType } from '@loki-labs/cezar-plus/app-type'
  * const cez = createCezarClient<AppType>({ baseUrl: 'http://127.0.0.1:4321' })
  * const res = await cez.api.v1['agent-config'].$get()
  * ```

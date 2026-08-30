@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { healthResponseSchema, type HealthResponse } from '@loki-labs/better-cezar-api-client'
+import { healthResponseSchema, type HealthResponse } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * The `sync-contract` pipeline, end to end.

@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useParams } from 'react-router'
 import { ClockIcon, PlayIcon, PlusIcon, WorkflowIcon, ZapIcon } from 'lucide-react'
-import type { AutomationDefinition, AutomationLogRecord, AutomationsResponse } from '@loki-labs/better-cezar-api-client'
+import type { AutomationDefinition, AutomationLogRecord, AutomationsResponse } from '@loki-labs/cezar-plus-api-client'
 
 import { checkAutomation, createAutomation, getAutomationCheck, getAutomationLog, getAutomations, setAutomationEnabled, updateAutomation } from '@/api/client'
 import { useHealth } from '@/api/queries'
@@ -58,7 +58,7 @@ export function AutomationsRoute({ mode = 'list' }: { mode?: 'list' | 'new' | 'e
           icon={<ZapIcon />}
           tone="neutral"
           title="GitHub automations are off"
-          subtitle="This server does not poll GitHub or launch tasks from it. Set CEZ_AUTOMATIONS=1 and restart cezar to turn automations on."
+          subtitle="This server does not poll GitHub or launch tasks from it. Set CEZ_AUTOMATIONS=1 and restart cezar-plus to turn automations on."
           heading="h2"
         />
       </div>
@@ -100,7 +100,7 @@ export function AutomationsRoute({ mode = 'list' }: { mode?: 'list' | 'new' | 'e
   return (
     <PageFrame
       title="Automations"
-      subtitle="Checks run while cezar is open. No webhook or public URL required."
+      subtitle="Checks run while cezar-plus is open. No webhook or public URL required."
       action={<Button asChild><Link to="/automations/new"><PlusIcon />New automation</Link></Button>}
     >
       {error ? <PageState text={error} /> : !data ? <PageState text="Loading automations…" /> : (
@@ -187,7 +187,7 @@ function AutomationEditor({ automation, onSaved }: { automation?: AutomationDefi
       onSaved()
     } catch (cause) { setError(String(cause)) }
   }
-  return <PageFrame title={automation ? 'Edit automation' : 'New automation'} subtitle="Define a bounded GitHub trigger and the ordinary cezar task it launches.">
+  return <PageFrame title={automation ? 'Edit automation' : 'New automation'} subtitle="Define a bounded GitHub trigger and the ordinary cezar-plus task it launches.">
     <form className="grid max-w-3xl gap-6" onSubmit={submit}>
       <fieldset className="grid gap-4 rounded-xl border p-5"><legend className="px-2 font-semibold">When GitHub changes</legend><div className="grid gap-2"><Label htmlFor="automation-name">Name</Label><Input id="automation-name" value={name} onChange={(event) => setName(event.target.value)} required /></div><div className="flex items-center gap-2 text-sm"><ClockIcon className="size-4" />New issue · every 5 minutes · last 7 days · maximum 25 records</div></fieldset>
       <fieldset className="grid gap-4 rounded-xl border p-5"><legend className="px-2 font-semibold">What task to run</legend><div className="grid gap-2"><Label htmlFor="automation-prompt">Prompt</Label><Textarea id="automation-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={8} required /></div><p className="text-xs text-muted-foreground">Placeholders include {'{{github.number}}'}, {'{{github.title}}'}, {'{{github.url}}'}, and {'{{github.labels}}'}. GitHub content is appended as untrusted context.</p></fieldset>

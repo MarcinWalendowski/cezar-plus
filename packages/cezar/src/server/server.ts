@@ -39,7 +39,7 @@ import {
   createAgentAccountUsageRoutes,
   type AgentAccountUsageRouteDeps,
 } from './agent-account-usage-routes.ts';
-import { CLUSTER_LINK_PATH, isAgentPoolId, parseAgentRoute } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_LINK_PATH, isAgentPoolId, parseAgentRoute } from '@loki-labs/cezar-plus-contract';
 import { inflightFromRuns } from '../workspace/agent-account-usage.ts';
 import { poolCandidates } from '../workspace/agent-route-select.ts';
 import { assessAccountViability, loadViabilityInput, type DispatchRequirement } from '../workspace/account-viability.ts';
@@ -76,7 +76,7 @@ import {
   type CreateTodoResponse,
   type UpdateTodoResponse,
   type WorkspaceTodosResponse,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 // A contract VALUE, like `workspaceUiStateSchema` in workspace/migrations.ts — the request
 // schema this route validates with is the same one the client compiles against.
 import {
@@ -88,7 +88,7 @@ import {
   updateTodoInputSchema,
   lockableRunnerSchema,
   type LockableRunner,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { detectEnvironment } from '../core/backend-detect.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 import type { ContentBlock, RunnerId } from '../core/agent-runner.ts';
@@ -161,7 +161,7 @@ import {
   runEventsQuerySchema,
   runHistoryQuerySchema,
   runIdParamSchema,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { resolveTodoWorkflow, type RunManager } from '../workflows/run.ts';
 import { removeWorktree, worktreeDiff, worktreeDiffStat, worktreeSizeBytes } from '../git-worktree.ts';
 import { isReclaimable, reclaimWorktrees } from '../runs/retention.ts';
@@ -2035,7 +2035,7 @@ export function createApp(deps: ServerDeps) {
       if (drain.isDraining()) {
         c.header('Connection', 'close');
         c.header('Retry-After', '1');
-        return c.json({ error: 'cezar is restarting — retry' }, 503);
+        return c.json({ error: 'cezar-plus is restarting — retry' }, 503);
       }
       const done = drain.begin();
       try {
@@ -3046,7 +3046,7 @@ export function createApp(deps: ServerDeps) {
         return c.json({ error: row.hint ?? 'Authentication could not be verified. Try again.', command }, 409);
       }
       if (!capabilities().localHandoff) {
-        return c.json({ error: 'Run this command on the machine hosting cezar.', command }, 409);
+        return c.json({ error: 'Run this command on the machine hosting cezar-plus.', command }, 409);
       }
       let opened = false;
       try {
@@ -3888,7 +3888,7 @@ export function createApp(deps: ServerDeps) {
       });
       if (!resolved.ok) return c.json({ error: resolved.error }, resolved.status);
       if (!(await shouldRegisterProject(resolved.real))) {
-        return c.json({ error: 'not a project folder: this is your home directory or a cezar task worktree' }, 400);
+        return c.json({ error: 'not a project folder: this is your home directory or a cezar-plus task worktree' }, 400);
       }
       const body: GitPreflightResponse = await preflightGitInit(resolved.real);
       return c.json(body);
@@ -3916,7 +3916,7 @@ export function createApp(deps: ServerDeps) {
       });
       if (!resolved.ok) return c.json({ error: resolved.error }, resolved.status);
       if (!(await shouldRegisterProject(resolved.real))) {
-        return c.json({ error: 'not a project folder: this is your home directory or a cezar task worktree' }, 400);
+        return c.json({ error: 'not a project folder: this is your home directory or a cezar-plus task worktree' }, 400);
       }
       const result = await initGitRepo(resolved.real);
       if (!result.ok) return c.json({ error: result.error }, result.status);
@@ -4026,7 +4026,7 @@ export function createApp(deps: ServerDeps) {
       if (id === bootId) {
         return c.json(
           {
-            error: `cezar is serving ${entry.name} right now — it re-registers itself at every start, so it cannot be removed from here`,
+            error: `cezar-plus is serving ${entry.name} right now — it re-registers itself at every start, so it cannot be removed from here`,
           },
           409,
         );
@@ -4344,7 +4344,7 @@ export function createApp(deps: ServerDeps) {
       return {
         status: 400,
         body: {
-          error: `not a project folder: ${spelled} is your home directory or a cezar task worktree`,
+          error: `not a project folder: ${spelled} is your home directory or a cezar-plus task worktree`,
         },
       };
     }
@@ -5461,7 +5461,7 @@ export function createApp(deps: ServerDeps) {
           return c.json(
             {
               error:
-                'parallel variants need a git repository (each variant runs in its own worktree) — run ×1 here, or start cezar inside a git repo',
+                'parallel variants need a git repository (each variant runs in its own worktree) — run ×1 here, or start cezar-plus inside a git repo',
             },
             400,
           );

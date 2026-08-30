@@ -1,4 +1,4 @@
-import type { RunStatus } from '@loki-labs/better-cezar-contract';
+import type { RunStatus } from '@loki-labs/cezar-plus-contract';
 import type {
   Notification,
   NotificationEvent,

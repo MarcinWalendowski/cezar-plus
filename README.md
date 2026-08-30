@@ -1,6 +1,6 @@
 <div align="center">
 
-# cezar ⚡
+# cezar-plus ⚡
 
 **Parallel coding agents orchestrator** — a local cockpit for running and
 tracking AI coding-agent tasks in your repo.
@@ -11,13 +11,13 @@ tokens, diffs, in a browser cockpit that runs entirely on your machine.
 Your CLI logins, your `gh`, your files. No accounts, no database, no cloud.
 
 🔥 **Fire and forget.** Queue a stack of autonomous coding and maintenance
-tasks and let them run — cezar orchestrates them across isolated worktrees,
+tasks and let them run — cezar-plus orchestrates them across isolated worktrees,
 in parallel. Flip the **Autonomous** flag
 and a run never stops to ask; it just finishes. Leave it on a VPS and you get
 a dev team that's *always on* — a mobile-friendly cockpit you can check from
 your phone, working your backlog while you're away.
 
-[A look inside](#a-look-inside) · [What cezar does best](#what-cezar-does-best) · [What it solves](#what-it-solves) · [Who it's for](#who-its-for) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour) · [Agent backends](#coding-agent-backends) · [Remote access](#remote-access-host-cezar-on-a-server)
+[A look inside](#a-look-inside) · [What cezar-plus is](#what-cezar-plus-is) · [What we improved](#what-we-improved-over-base-cezar) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Core concepts](#core-concepts) · [Cockpit tour](#cockpit-tour) · [Agent backends](#coding-agent-backends) · [Remote access](#remote-access-host-cezar-plus-on-a-server)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Node 20+](https://img.shields.io/badge/Node-20%2B-339933)
@@ -31,7 +31,7 @@ your phone, working your backlog while you're away.
 
 ```bash
 cd your-repo
-npx cezar-cli        # → cockpit at http://localhost:4321
+npx @loki-labs/cezar-plus        # → cockpit at http://localhost:4321
 ```
 
 That's the whole setup. If your `claude` CLI is logged in (Pro/Max) and `gh` is
@@ -52,87 +52,93 @@ Click any thumbnail for the full-size screenshot.
 
 ---
 
-## What cezar does best 🏆
+## What cezar-plus is
 
-Plenty of tools wrap a single coding agent in a nicer window — a "Codex GUI", a
-conductor-style app, one-agent front-ends. cezar's bet is different. Three things
-it does better than any of them:
+A **local cockpit that orchestrates many AI coding agents in parallel**, inside your own
+repo. You type a task; it runs as a workflow in its own git worktree, streaming every step
+to a browser you can open from your laptop or your phone.
 
-- 🪶 **Genuinely zero config.** `npx cezar-cli` in your repo and you're running —
-  no wizard, no API keys, no env vars, no schema, no database. It rides the
-  `claude` / `codex` / `opencode` / `pi` logins and the `gh` you already have, and every
-  missing piece degrades gracefully instead of blocking you.
-- 🖥️ **Built for a server (VPS mode).** cezar is made to live on a **VPS, cloud,
-  or dedicated box** as an always-on janitor for your repo — headless-first, with
-  a mobile-friendly cockpit you drive from anywhere. It's a coding server you can
-  actually watch, not a desktop app bolted onto one machine.
-- 🔀 **Parallel + autonomous orchestration.** The real edge: cezar runs **many
-  agents at once** in isolated worktrees, **queues** the overflow, and pushes each
-  one **autonomously** through skill playbooks — fire-and-forget. This is exactly
-  what single-agent GUIs don't do well: they babysit one agent, while cezar
-  orchestrates a whole team and drains your backlog while you're away.
+- 🔌 **Your machine, your logins.** Shells out to the `claude` / `codex` / `opencode` / `pi`
+  CLI you are already signed into, and the `gh` you already have. No accounts, no API keys,
+  no database, no cloud.
+- 🔀 **Parallel by default.** Every task gets its own git worktree, so agents never fight
+  over your files — or over the branch you are editing. Runs up to `maxParallel` at once
+  and holds the rest in a visible FIFO queue that survives a restart.
+- 🤖 **Autonomous when you want it.** Flip **Autonomous** and a run never parks to ask.
+  Pair it with a **skill** — a Markdown playbook — and hand off "fix this", "upgrade that",
+  "triage these", then walk away.
+- 👀 **Watchable.** Live SSE stream of agent text, every tool call and its result, tokens,
+  cost and peak memory per step, plus the full replay afterwards.
+- ✅ **You keep the merge button.** A run with a diff parks at a **review gate**: read it,
+  type notes straight back into the agent's session, or push a draft PR. Nothing auto-merges.
+- 🖥️ **Built for a server.** Headless-first and mobile-friendly — put it on a VPS and it is
+  an always-on coding team you check from your pocket.
+- 📄 **Plain files.** State lives in `.ai/cezar/` as JSON, NDJSON and Markdown you can `cat`
+  and fix by hand.
 
----
-
-## What it solves
-
-Most "AI coding agent" tooling makes you choose between a **terminal** you can't
-see into once it's running, and a **cloud product** that wants your API key, your
-code on their servers, and an account. cezar is the third option: the agents run
-locally under *your* subscription, a cockpit shows you exactly what they're doing,
-and an orchestrator keeps a whole queue of them moving.
-
-- 👀 **No visibility into a running agent.** A headless `claude` run is a black box
-  until it finishes. cezar streams every step — agent text, each tool call and
-  its result, tokens and cost per step — live, and keeps the full replay.
-- 🧩 **One agent, one working tree, one thing at a time.** Kick off a second task and
-  it fights the first over your files. cezar runs each task in its **own git
-  worktree**, so two (or three) agents work in parallel without stepping on
-  each other — or on the branch you're editing.
-- 🗂️ **A backlog that needs babysitting.** Queue a stack of tasks and cezar
-  **orchestrates** them: it runs up to your parallel limit and holds the rest in
-  an ordered queue. Point it at a GitHub issue and it runs straight on that, so
-  working the tracker down stops being a manual chore. Turn on the opt-in
-  **Inbox** (`CEZ_FOLLOWUPS=1`) and an agent's leftover follow-ups become the
-  next tasks too — one click each.
-- 🤖 **"Autonomous" means you still have to sit there.** Flip the **Autonomous**
-  flag and a run never parks to ask — it keeps going until the task is done. Pair
-  it with a **skill** (a Markdown playbook) and you've got fire-and-forget
-  automation: hand off "fix this", "upgrade that", "triage these" and walk away.
-- ✅ **The agent finishes and you have to trust it.** cezar ends non-trivial runs at
-  a **review gate**: inspect the diff, send notes back into the same session, or
-  push a **draft PR** — never an auto-merge.
-- ♻️ **Losing a session when it fails.** Every run records its `claude` session id.
-  Take it over interactively in one click (`claude --resume <id>`), or continue it
-  in-process from the cockpit.
-- 🔀 **Locked into one agent vendor.** Most tools wed you to a single CLI. cezar
-  drives **Claude Code, Codex and OpenCode (experimental)** through one runner seam — set a
-  default, pick a backend per task, or mix them inside one workflow (implement
-  with one agent, review with another) — and through **OpenCode** you can point
-  a run at **open-source or local models**, not just the big vendors. See
-  [Agent backends](#coding-agent-backends).
-- 🖥️ **Close the laptop and the work stops.** A local agent only runs while your
-  machine is on and awake. Put cezar on a **VPS, cloud box, or dedicated server**
-  and the cockpit becomes the GUI for an **always-on AI coding team** — kick off,
-  watch and steer tasks from your laptop or **phone**, on the train or between
-  meetings, while the agents keep grinding through the backlog back on the server.
-- ⚡ **Setup tax.** No wizard, no env vars, no schema. Skills are Markdown, workflows
-  are short YAML, and everything degrades: no `gh` → works without PRs, no network
-  → local skills still load, no `.ai/skills` → the bare prompt still runs.
+Three concepts, no jargon: **tasks** (the unit of work, each one a run), **skills**
+(Markdown playbooks that shape *how* the agent reasons), and **chains/workflows** (ordered
+agent steps plus shell checks, with bounded `onFail` retry loops).
 
 ---
 
-## Who it's for
+## What we improved over base cezar
 
-- **Solo devs and small teams** who want the leverage of coding agents without
-  handing their code and keys to a SaaS — the agent runs on your subscription,
-  on your machine.
-- **`claude` CLI power users** who love headless runs but want to *see* them,
-  compare a few attempts side by side, and review a diff before it lands.
-- **Anyone with a backlog** who'd rather queue three tasks into isolated worktrees
-  and pick the winners than babysit one terminal.
-- **Teams with shared conventions** who want their playbooks (skills) pulled from
-  a git repo, applied consistently, with zero per-project setup.
+A hard fork of [`open-mercato/cezar`](https://github.com/open-mercato/cezar), diverged
+2026-08-14 and now **578 commits ahead** with 226 specs of its own. Base cezar is a
+single-box, single-repo, single-provider cockpit; cezar-plus is built to run unattended on
+a server.
+
+- 🔁 **Runs survive the cockpit.** Each run gets a detached broker in its own
+  `systemd-run --scope` cgroup with a byte-addressed spool, so it outlives a `systemctl
+  stop`, a crash, or a deploy — and re-attaches at its exact offset. In base cezar a run
+  dies with the process that started it.
+- 🚀 **Zero-downtime self-deploy.** `server-deploy --strategy=blue-green`: an atomic
+  release symlink over a `deploy.json` ledger, systemd socket activation so the port is
+  never dropped, and a health-gated flip that auto-rolls-back. Measured across five real
+  production cutovers — **3790 probe requests, zero refusals** at the listener, ~1.1 s
+  worst-case cutover, and one genuinely broken build correctly refused promotion.
+- 🧠 **Multi-provider, multi-account routing.** Claude Code, Codex and OpenCode side by
+  side, with several logins per provider balanced and graded runnable / waitable /
+  disconnected. A quota-exhausted account falls through to another provider instead of
+  blocking the task. An unpinned task is auto-classified (`tiny` / `scoped` / `explore` /
+  `complex`) onto a model and reasoning effort, with an escalation ladder on failure.
+- 🗂️ **Many repos, one cockpit.** Register a workspace of nested repos as separate
+  projects, each with its own run store, plus a cross-project git overview. Workspace-scoped
+  work files a todo into each concerned project rather than editing several live checkouts
+  at once — which is exactly how it used to corrupt them.
+- 📚 **A knowledge base agents actually read.** A mounted (not imported) Markdown corpus
+  searched by BM25 **plus exact-identifier pinning** — BM25 alone measurably failed
+  identifier lookup. Pluggable external sources with an incremental, resumable Notion
+  mirror. Behind `CEZ_KB=1`.
+- 👥 **Orgs, teams and hosted auth.** OIDC/Google, organizations, teams, invites, an
+  onboarding wizard and a supervisor process for multi-org hosting — all opt-in and off by
+  default, so with no `CEZ_AUTH` set it stays the zero-config single-user tool. A hosted
+  deployment now refuses to boot with no auth configured, rather than exposing shell
+  execution to the internet.
+- ✅ **Run-engine invariants.** A run can no longer be marked `done` while its chain still
+  has pending steps; a step cezar-plus deliberately stopped is no longer recorded as an
+  agent failure; step timeouts are inactivity-based instead of a 30-minute wall clock that
+  killed long legitimate steps; an idle interactive session parks at `waiting`, not `done`.
+- 📊 **Honest observability.** Per step: the model that *actually* ran rather than the one
+  planned, the real context-window denominator, a per-attempt duration breakdown, and
+  output tokens split into narration, tool arguments and thinking. The deploy E2E probe is
+  tri-state (`PASS` / `FAIL` / `NOT_MEASURED`) after it was caught reporting `PASS` on zero
+  real observations.
+- 📥 **A backlog that scales.** Bulk-start filed tasks, server-sorted and paged Active and
+  Backlog tables, a linkable detail page per filed task, and cancelling a run un-hides the
+  todo it came from.
+- 🔐 **Encrypted backup.** Incremental, client-side AES-256-GCM (zero-knowledge) backup of
+  the whole corpus to any S3-compatible or local backend, with a restore path that does not
+  contend with live readers and writers.
+- 🧹 **De-vendored.** The Open Mercato coupling is gone: packages are `@loki-labs/cezar-plus*`,
+  and the vendor skills-repo default is removed — it had been supplying **37 of 47** catalog
+  skills — along with the promo banner and the skills auto-update feature.
+
+**Not claimed as done.** The multi-node cluster (`CEZ_CLUSTER=1`) is implemented but has
+never been stood up across two real nodes, and its 8-concurrent-task throughput target is
+designed-for, not measured. Encrypted backup and the spec-review feed are shipped but still
+QA-needed.
 
 ---
 
@@ -145,20 +151,19 @@ the [`codex` CLI](https://github.com/openai/codex), or
 
 ```bash
 cd your-repo
-npx cezar-cli              # start the cockpit for the current repo
-#   or: npx @loki-labs/better-cezar
+npx @loki-labs/cezar-plus              # start the cockpit for the current repo
 ```
 
 The cockpit opens at `http://localhost:4321` (auto-picks the next free port if
 busy). Type a task, pick a workflow, hit **Start**. That's it.
 
 ```bash
-npx cezar-cli run "add a --json flag to the export command"   # headless, CI-friendly
-npx cezar-cli init                                            # scaffold .ai/cezar/
+npx @loki-labs/cezar-plus run "add a --json flag to the export command"   # headless, CI-friendly
+npx @loki-labs/cezar-plus init                                            # scaffold .ai/cezar/
 ```
 
 Both the `cezar` and `cez` commands are installed, so once it's on your PATH you
-can run either. No API key is ever used — cezar shells out to whichever agent
+can run either. No API key is ever used — cezar-plus shells out to whichever agent
 CLIs you are already logged into, `claude` by default.
 
 > **Contributing?** [Local development](#local-development) shows how to get a
@@ -169,19 +174,19 @@ CLIs you are already logged into, `claude` by default.
 > instead of the real CLI — the whole cockpit works with no `claude` login, so
 > you can explore runs, diffs, variants and the review gate offline.
 
-### Nightly builds — help us shape cezar 🌙
+### Nightly builds — help us shape cezar-plus 🌙
 
 Every night we publish the trunk to npm, so the features landing in the next
 release are one command away:
 
 ```bash
-npx cezar-cli@nightly      # everything merged as of last night
+npx @loki-labs/cezar-plus@nightly      # everything merged as of last night
 ```
 
-**Come build this with us.** cezar is shaped by the people who run it on real
+**Come build this with us.** cezar-plus is shaped by the people who run it on real
 repos: if you try a nightly and something feels wrong — a workflow that stalls, a
 diff that reads badly, a runner that should exist — [open an
-issue](https://github.com/MarcinWalendowski/cezar/issues) and tell us. That feedback,
+issue](https://github.com/MarcinWalendowski/cezar-plus/issues) and tell us. That feedback,
 early, is worth more than a bug report six weeks after a release, and it is how
 most of the features here got their final shape.
 
@@ -189,11 +194,11 @@ most of the features here got their final shape.
 packaged-CLI e2e — the same gate a release runs) but it is *not* a release: it
 can be rough, a flag or a screen may change under you, and something occasionally
 breaks in a way no test caught. Nothing is at risk beyond your patience — every
-task runs in its own git worktree and cezar never auto-merges — but if you need a
+task runs in its own git worktree and cezar-plus never auto-merges — but if you need a
 boring day, stay on the stable release. Pin a nightly you liked with its exact
-version (`npx cezar-cli@0.9.2-nightly.20260813.126` — the cockpit prints the
+version (`npx @loki-labs/cezar-plus@0.9.2-nightly.20260813.126` — the cockpit prints the
 version it booted, and the date in it tells you how old the build is), and drop
-back to stable any time with a plain `npx cezar-cli`.
+back to stable any time with a plain `npx @loki-labs/cezar-plus`.
 
 ### Preview builds
 
@@ -202,20 +207,20 @@ Every green CI run also publishes an installable npm snapshot
 merged yet:
 
 ```bash
-npx cezar-cli@develop      # current develop head
+npx @loki-labs/cezar-plus@develop      # current develop head
 ```
 
 Every pull request gets its own preview too — the CI bot posts a sticky comment
 on the PR with the exact pinned version to copy-paste
-(`npx cezar-cli@<version>-pr<N>.<run>`). Nightlies and previews are all
-prerelease versions under their own dist-tags; a plain `npx cezar-cli` always
+(`npx @loki-labs/cezar-plus@<version>-pr<N>.<run>`). Nightlies and previews are all
+prerelease versions under their own dist-tags; a plain `npx @loki-labs/cezar-plus` always
 resolves to the latest stable release.
 
 ---
 
 ## How it works
 
-You describe a task. cezar runs it as a **workflow** — an ordered list of agent
+You describe a task. cezar-plus runs it as a **workflow** — an ordered list of agent
 steps and shell checks — shelling out to your locally installed agent CLI
 (Claude Code by default; Codex and OpenCode are drop-in alternatives, per task
 or per step). Each task gets its own git worktree; the cockpit streams every
@@ -275,7 +280,7 @@ Three words, no jargon — **task**, **skill**, **chain**:
 
 Five moves that make the cockpit worth the browser tab:
 
-- 🗃️ **Queue + orchestration.** Start as many tasks as you like: cezar runs up to
+- 🗃️ **Queue + orchestration.** Start as many tasks as you like: cezar-plus runs up to
   `maxParallel` at once across every project (default **2**; a non-git directory
   always runs one) and
   holds the rest in a FIFO queue with visible positions (`#1`, `#2`, …). Cancel a
@@ -292,7 +297,7 @@ Five moves that make the cockpit worth the browser tab:
   separate worktrees, then compare their diffs side by side and **pick** one —
   the losers are archived and their worktrees cleaned up.
 - 🧹 **Bounded worktree disk.** Each task runs in its own full checkout, so a busy
-  cockpit would otherwise grow without limit. cezar keeps only the last
+  cockpit would otherwise grow without limit. cezar-plus keeps only the last
   `worktreeRetention` **finished** worktrees on disk (default **10**; `0` =
   unlimited) and reclaims the rest — directory only, the `cez/<id8>` branch is
   always kept, so the work stays recoverable. Settings → Resources shows every
@@ -301,7 +306,7 @@ Five moves that make the cockpit worth the browser tab:
   type notes that go straight back into the agent's session, or push a
   `gh pr create --draft`. You stay the merge button.
 - 📱 **Runs on your coding server, drives from your pocket.** The cockpit is a
-  responsive web app streaming over SSE, so the box running cezar can be a
+  responsive web app streaming over SSE, so the box running cezar-plus can be a
   **VPS, cloud, or dedicated server** you never sit in front of. Point a browser
   — laptop or **phone** — at it and run an **always-on coding team** on the move:
   start tasks, watch them live, and hit the review gate from anywhere.
@@ -323,7 +328,7 @@ Eight views, one browser window, all live over Server-Sent Events (seven until y
 | **Workflows** | Build a chain by drag-ordering skills, save it as portable YAML, import/export, or delete. Built-ins always come back. |
 | **Settings** | Appearance (dark/light theme, accent, density), agent backends, notifications, and the skills catalog. |
 
-The cockpit is a React app served pre-built from the package — `npx cezar-cli`
+The cockpit is a React app served pre-built from the package — `npx @loki-labs/cezar-plus`
 still means no build step and no dev server on your machine — with a dark/light
 theme, a ⌘K command palette, and bookmarklets that launch a task straight from
 a GitHub page.
@@ -333,7 +338,7 @@ a GitHub page.
 ## Multiple projects, one cockpit
 
 One `cezar serve` hosts **every repo you work in**, not just the one you started
-it in. Each repo cezar boots in registers itself in a per-user registry at
+it in. Each repo cezar-plus boots in registers itself in a per-user registry at
 `~/.cezar/config.json` — the workspace file that also holds the global knobs
 (the parallel cap, the memory ceiling, the browse root, and the checkout root). Nothing is added to
 the repo: per-project state stays exactly where it was, in that repo's
@@ -346,7 +351,7 @@ Every view is project-scoped:
 ```
 
 `<projectId>` is a slug derived from the folder name (`my-app`, then `my-app-2`
-on a collision), and `/p/default/…` always means the project cezar was started
+on a collision), and `/p/default/…` always means the project cezar-plus was started
 in. The sidebar shows one collapsible group per project — each with its own nav
 and task list — and the new-task composer names the project it will run in.
 
@@ -368,7 +373,7 @@ for every todo it created.
 > `/api/v1/workspace/runs` and expecting file changes, point it at a project's
 > own `POST /api/v1/p/<projectId>/runs` instead. Nothing was removed: the route,
 > its fields and the run record all still parse, and a run started by an older
-> cezar still lands and cleans up its worktrees.
+> cezar-plus still lands and cleans up its worktrees.
 
 **Adding a project** — the **+** button beside *New task*:
 
@@ -382,7 +387,7 @@ for every todo it created.
 
 Removing a project (**Settings → Projects**) drops the registry entry only — the
 repo and its `.ai/cezar/` are never touched, so re-adding it later finds all its
-tasks intact. The project cezar is currently serving can't be removed: it
+tasks intact. The project cezar-plus is currently serving can't be removed: it
 re-registers itself at the next start.
 
 **From the terminal** — the same registry, no cockpit required (handy over ssh):
@@ -454,7 +459,7 @@ is that project's own Tasks page, which is a better version of the same answer
 (live updates, the full column set, the composer). So picking a project *leaves*
 for it rather than turning the global view into a worse local one.
 
-Nothing else in cezar reads tags, on purpose: a tag is a lens, not a permission,
+Nothing else in cezar-plus reads tags, on purpose: a tag is a lens, not a permission,
 a queue or a routing rule. Removing one changes what you see and nothing else.
 
 > The page reads a workspace-wide index capped at the newest 200 tasks per
@@ -463,7 +468,7 @@ a queue or a routing rule. Removing one changes what you see and nothing else.
 > Tasks page.
 
 **Old page URLs keep working.** Every unprefixed page path — `/`, `/tasks/<id>`,
-`/settings` — still answers, bound to the project cezar was started in; the
+`/settings` — still answers, bound to the project cezar-plus was started in; the
 cockpit redirects flat paths to their `/p/<boot>/…` twin, so existing bookmarks
 and bookmarklets need no change. The HTTP API is the exception: it moved to
 `/api/v1/…` (see the CHANGELOG), so a script that calls it needs the extra
@@ -513,7 +518,7 @@ attempt can see what broke.
 passes whenever its agent exits without erroring, which is not the same thing: a
 commit step can end "done" having committed nothing. A `verify` block says what
 has to be true about the world afterwards. `command:` is any shell command (exit
-0 is the only green); `builtin:` names a check cezar evaluates itself —
+0 is the only green); `builtin:` names a check cezar-plus evaluates itself —
 
 | builtin | green when |
 |---|---|
@@ -546,11 +551,11 @@ skills: [reproduce, root-cause, implement, self-review]
 
 ## How it runs agents
 
-cezar shells out to your locally installed, logged-in agent CLI —
+cezar-plus shells out to your locally installed, logged-in agent CLI —
 **your subscription, no API key**. With the default Claude Code backend that
 means headless `stream-json` mode, tool access via `--allowedTools`, and
 `--permission-mode bypassPermissions` — every run proceeds without stopping
-to ask, because cezar's agents work unattended and there's nobody in front of
+to ask, because cezar-plus's agents work unattended and there's nobody in front of
 a run to answer a prompt. Note the zero-config default list (`Read`, `Edit`,
 `Write`, `Grep`, `Glob`, `Bash`) grants unrestricted `Bash` unless a step sets
 `bashAllowlist`, so treat a run as having full shell access in its worktree,
@@ -564,13 +569,13 @@ Useful environment variables:
 | Var | Effect |
 |---|---|
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
-| `CEZ_AGENT_MODELS_LOCKED=1` | Globally lock each runner to the model configured in its native Claude/Codex/OpenCode settings while keeping runner selection available. Exact `1` also delegates authentication and provider enablement to those native agents, so Cezar skips its credential probes and provider-disable preferences. Existing Cezar presets are preserved but ignored, and an environment change requires a restart. The config-file equivalent is `"modelsLocked": true` in global `~/.cezar/config.json` or one repository's `.ai/cezar/config.json`; config-file locks do not disable provider checks. |
-| `CEZ_RIPGREP_THREADS=<n>` | Threads ripgrep may use inside an agent's environment. Defaults to **half** the detected parallelism (floor 1) — 4 on an 8-vCPU box, 8 on a 16-core Mac — rather than ripgrep's own default of one thread per core. Half because cezar admits more than one heavy step at a time, and two searches each claiming every core is how a machine that can seat 8 runs ends up seating 3. A value that is not a positive integer is ignored and the derived default is used; `0` is never honoured, since it reads as "no parallelism" to one tool and "unlimited" to another. Set it only on a machine that needs a different number. |
+| `CEZ_AGENT_MODELS_LOCKED=1` | Globally lock each runner to the model configured in its native Claude/Codex/OpenCode settings while keeping runner selection available. Exact `1` also delegates authentication and provider enablement to those native agents, so Cezar-plus skips its credential probes and provider-disable preferences. Existing Cezar-plus presets are preserved but ignored, and an environment change requires a restart. The config-file equivalent is `"modelsLocked": true` in global `~/.cezar/config.json` or one repository's `.ai/cezar/config.json`; config-file locks do not disable provider checks. |
+| `CEZ_RIPGREP_THREADS=<n>` | Threads ripgrep may use inside an agent's environment. Defaults to **half** the detected parallelism (floor 1) — 4 on an 8-vCPU box, 8 on a 16-core Mac — rather than ripgrep's own default of one thread per core. Half because cezar-plus admits more than one heavy step at a time, and two searches each claiming every core is how a machine that can seat 8 runs ends up seating 3. A value that is not a positive integer is ignored and the derived default is used; `0` is never honoured, since it reads as "no parallelism" to one tool and "unlimited" to another. Set it only on a machine that needs a different number. |
 | `CEZ_FOLLOWUPS=1` | Turn on the global follow-up **Inbox**: agents are asked to leave follow-ups in `todos.json` when they finish, and the Inbox view appears. Off by default — each task's own **Notes** handoff journal runs either way. |
-| `CEZ_AUTOMATIONS=1` | Turn on **GitHub automations**: the Automations view appears and cezar polls GitHub on each enabled automation's interval, launching tasks from what it finds. Off by default, and only the exact value `1` enables it — without it nothing polls GitHub, the automations endpoints answer `409`, and the nav item is absent. Read at boot, so restart after changing it; definitions, receipts and high-watermarks are retained, so unsetting it and restarting restores the feature without migration or data loss. |
+| `CEZ_AUTOMATIONS=1` | Turn on **GitHub automations**: the Automations view appears and cezar-plus polls GitHub on each enabled automation's interval, launching tasks from what it finds. Off by default, and only the exact value `1` enables it — without it nothing polls GitHub, the automations endpoints answer `409`, and the nav item is absent. Read at boot, so restart after changing it; definitions, receipts and high-watermarks are retained, so unsetting it and restarting restores the feature without migration or data loss. |
 | `CEZ_ANALYTICS=0` | Turn **off** the workspace analytics sink (`POST /api/v1/workspace/analytics/events`, appending to `.ai/cezar/analytics/events.ndjson`) — **on by default**, since the file is plain and local and an opt-in nobody sets measures nothing. Only the exact value `0` disables it; `false`, `off` and an empty value do not. With it off the route still exists and still answers `202`, so a client never has to care whether the operator kept the log — the sink just drops the line instead of appending it. |
-| `CEZ_BACKUP=1` | Turn on **encrypted platform backup**: the Settings → Backup section appears and cezar ships an incremental, client-side-encrypted copy of its durable corpus (identity/orgs/users, config, knowledge, notes, per-project tasks/sources/automations config — not run logs) to an S3-compatible store (R2/S3/B2/MinIO) or a local path, on a schedule and on demand. Off by default, and only the exact value `1` enables it — without it no timer arms, nothing is read or uploaded, the backup endpoints answer `409`, and `/api/v1/health` is byte-identical. Read at boot, so restart after changing it. Configure the destination in `~/.cezar/backup.json`; the encryption passphrase and S3 credentials live in env (`CEZ_BACKUP_KEY`, `CEZ_BACKUP_S3_KEY`, `CEZ_BACKUP_S3_SECRET`). **The encryption is zero-knowledge — the provider only ever sees ciphertext, and losing the key means the backup cannot be restored, so store `CEZ_BACKUP_KEY` somewhere off this machine.** The unattended schedule additionally requires `"enabled": true` in `backup.json`; manual `cez backup run` works whenever the flag is on. |
-| `CEZ_CLUSTER=1` | Turn on the **multi-node cluster**: this cezar becomes one node of a fleet, the Settings → Cluster section appears, and the `cezar cluster` CLI works. One hub, N spokes — and which one this is comes from `CEZ_CLUSTER_HUB` below, never a second flag, so it cannot be configured into a contradiction. The hub linearizes every backlog write, hands out scarce shared identities (spec numbers first), mirrors its knowledge corpus down to each node read-only, and can dispatch a task to a node that opted in. Off by default, and only the exact value `1` enables it — without it no node identity is minted, no link is dialled, no timer arms, nothing is written under `~/.cezar/cluster` or `.ai/cezar/cluster`, the Cluster section and its route are absent, every `/api/v1/cluster*` route answers `409` with a stated reason, and the agent system prompt is byte-identical. Read at boot, so restart after changing it. **Enrolling a node is a large grant:** the hub can start bypass-permissions agent processes on that machine with that machine's credentials — its keychain, ssh agent, git identity and browser profile — so enrollment is outbound-only, the code is single-use, short-TTL and stored as a SHA-256 digest, `acceptsDispatch` defaults **off** and is enforced by the spoke, and revocation is two-sided (`cezar cluster revoke <nodeId>` on the hub **and** `cezar cluster revoke --self` on the node). |
+| `CEZ_BACKUP=1` | Turn on **encrypted platform backup**: the Settings → Backup section appears and cezar-plus ships an incremental, client-side-encrypted copy of its durable corpus (identity/orgs/users, config, knowledge, notes, per-project tasks/sources/automations config — not run logs) to an S3-compatible store (R2/S3/B2/MinIO) or a local path, on a schedule and on demand. Off by default, and only the exact value `1` enables it — without it no timer arms, nothing is read or uploaded, the backup endpoints answer `409`, and `/api/v1/health` is byte-identical. Read at boot, so restart after changing it. Configure the destination in `~/.cezar/backup.json`; the encryption passphrase and S3 credentials live in env (`CEZ_BACKUP_KEY`, `CEZ_BACKUP_S3_KEY`, `CEZ_BACKUP_S3_SECRET`). **The encryption is zero-knowledge — the provider only ever sees ciphertext, and losing the key means the backup cannot be restored, so store `CEZ_BACKUP_KEY` somewhere off this machine.** The unattended schedule additionally requires `"enabled": true` in `backup.json`; manual `cez backup run` works whenever the flag is on. |
+| `CEZ_CLUSTER=1` | Turn on the **multi-node cluster**: this cezar-plus becomes one node of a fleet, the Settings → Cluster section appears, and the `cezar cluster` CLI works. One hub, N spokes — and which one this is comes from `CEZ_CLUSTER_HUB` below, never a second flag, so it cannot be configured into a contradiction. The hub linearizes every backlog write, hands out scarce shared identities (spec numbers first), mirrors its knowledge corpus down to each node read-only, and can dispatch a task to a node that opted in. Off by default, and only the exact value `1` enables it — without it no node identity is minted, no link is dialled, no timer arms, nothing is written under `~/.cezar/cluster` or `.ai/cezar/cluster`, the Cluster section and its route are absent, every `/api/v1/cluster*` route answers `409` with a stated reason, and the agent system prompt is byte-identical. Read at boot, so restart after changing it. **Enrolling a node is a large grant:** the hub can start bypass-permissions agent processes on that machine with that machine's credentials — its keychain, ssh agent, git identity and browser profile — so enrollment is outbound-only, the code is single-use, short-TTL and stored as a SHA-256 digest, `acceptsDispatch` defaults **off** and is enforced by the spoke, and revocation is two-sided (`cezar cluster revoke <nodeId>` on the hub **and** `cezar cluster revoke --self` on the node). |
 | `CEZ_CLUSTER_HUB=https://…` | The hub's URL. Setting it alongside `CEZ_CLUSTER=1` makes this node a **spoke** of that hub; `CEZ_CLUSTER=1` on its own makes it the hub. Not a credential — the per-node HMAC secret lives in `~/.cezar/cluster/node.json` at `0600`, written by `cezar cluster join`, deliberately not in the environment. |
 | `CEZ_ACCOUNT_USAGE=1` | Turn on the **Accounts** panel in the sidebar and the **account balancing** routes. The panel lists every agent login on this machine with what it is running right now, whether it is rate limited, and — for Codex only — a real remaining-allowance bar read from the CLI's own app-server. **Claude rows deliberately show no bar:** `claude auth status --json` reports identity and a plan name with no quantity anywhere, so there is nothing honest to draw, and a bar built from token spend would mean something entirely different from the Codex one beside it. With the flag on, the agent picker (composer and both Settings scopes) also offers `balance across <agent>` and `balance across everything`, which spread runs over your logins — skipping any that are rate limited, preferring the one with the fewest runs in flight, then the least recently used. The account is chosen once, at dispatch, and recorded on the run, so a task always says which login it actually used. Off by default, and only the exact value `1` enables it: without it the panel is absent, `/api/v1/workspace/agent-accounts/usage` answers `{enabled: false, accounts: []}`, no pools are offered, and the picker is byte-identical to before. Local cockpits only — like the rest of the agent-account family it is withheld in hosted mode, because the rows carry each login's email, org and plan. |
 | `CEZ_AUTOSAVE=1` | Re-enable the periodic (90 s) autosave commit in task worktrees. Off by default (#471) — turn-end and pre-PR flushes always run, so branches still end complete. Every autosave names its trigger in the commit subject (`cezar autosave (periodic)` vs `(turn end)` / `(run finalize)` / `(pre-PR)`), so the flushes you keep are distinguishable from the timer you disabled. |
@@ -580,12 +585,12 @@ Useful environment variables:
 | `CEZ_CODEX_BIN=/path/to/codex` | Override which `codex` binary is used. |
 | `CEZ_OPENCODE_BIN=/path/to/opencode` | Override which `opencode` binary is used. |
 | `CEZ_PI_BIN=/path/to/pi` | Override which `pi` binary is used. |
-| `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | The agents' **own** variables, honoured where the vendor documents one. Setting one moves that agent's **default account** — the config folder cezar discovers. A *second* login of the same CLI is deliberately not an environment setting, since one process-wide value cannot differ per project: add it under **Settings → Agent accounts** and pick it per project. |
+| `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | The agents' **own** variables, honoured where the vendor documents one. Setting one moves that agent's **default account** — the config folder cezar-plus discovers. A *second* login of the same CLI is deliberately not an environment setting, since one process-wide value cannot differ per project: add it under **Settings → Agent accounts** and pick it per project. |
 | `CEZ_BROWSE_ROOT=~/` | Default root for **Add project → Open local folder…**. The picker cannot navigate above it; a saved workspace value overrides the environment default and must name an existing folder. |
 | `CEZ_PROJECTS_DIR=~/cezar/projects` | Default destination for **Clone from GitHub**. Saved workspace settings override it, and missing directories are created recursively. |
 | `CEZ_AUTONOMOUS_DEFAULT=0` | Seed the New Task Autonomous default (`0` or `1`). Without a seed, skills default on and workflows off; a saved global Resources setting overrides it. |
 | `CEZ_WORKTREE_DEFAULT=1` | Seed the New Task Worktree default (`0` or `1`). Without a seed, eligible runs default on; a saved global Resources setting overrides it. |
-| `CEZ_DISABLE_REPO_LOCK=1` | **Dangerous escape hatch:** allow any run executing in the repository root — an explicit `worktree=false` run, non-Git degradation, or a continuation whose worktree cannot be restored — to proceed without Cezar’s repository-root lease. Agents can overwrite each other’s files or Git state; isolated worktree runs are unaffected. Off by default; only the exact value `1` enables it. |
+| `CEZ_DISABLE_REPO_LOCK=1` | **Dangerous escape hatch:** allow any run executing in the repository root — an explicit `worktree=false` run, non-Git degradation, or a continuation whose worktree cannot be restored — to proceed without Cezar-plus’s repository-root lease. Agents can overwrite each other’s files or Git state; isolated worktree runs are unaffected. Off by default; only the exact value `1` enables it. |
 | `CEZ_SINGLE_PROJECT=1` | Opt into a launch-project-only cockpit: only the exact value `1` enables it. Project add, edit, checkout, folder browsing, and removal are refused and only the launch project is shown. Off by default; stored registry rows are retained, so unsetting it and restarting restores the full multi-project workspace without migration or data loss. |
 | `CEZ_HIDE_TOKEN_USAGE=1` | Hide raw input/output token counts throughout the browser cockpit while leaving backend-reported cost visible. Only the exact value `1` enables it; telemetry and API payloads are unchanged, and a restart is required after changing it. |
 | `CEZ_HIDE_COST=1` | Hide backend-reported monetary cost throughout the browser cockpit while leaving raw input/output token counts visible. Only the exact value `1` enables it; telemetry and API payloads are unchanged, and a restart is required after changing it. |
@@ -601,15 +606,15 @@ Useful environment variables:
 | `CEZ_REVIEW_GATE=1` | Turn ON the optional diff-first review gate (#489): a successful, non-autonomous run with changes parks at `review` (Accept / Send back / Draft PR) instead of finishing. Off by default — changed runs settle to `done` with the diff left in the worktree. Only `1` enables. The Settings → Agents toggle overrides this; autonomous runs always skip it. |
 | `CEZ_MIN_APPROVERS=<n>` | How many distinct humans must approve a gated workflow step before the chain continues — today `spec-to-deploy`'s "Review the spec" step. **Default `0` = auto-approved**, so no run parks and the chain is unchanged; set `1` to require sign-off before anything is implemented, pushed or deployed. Counts approvers, not clicks, so a value above 1 needs a real multi-user identity (`CEZ_AUTH`). A malformed value fails open (0). The Settings value overrides this. |
 | `CEZ_AUTH=oidc` | Require a sign-in, against a generic OIDC provider (`oidc`) or Google (`google` — the same flow with a pinned issuer, not a second code path). Only those two exact spellings enable it; anything else, including a typo, is treated as unset. **Unset is the default and does zero I/O**: no identity storage is created, no session middleware is mounted, and no login route is registered. **CORRECTED 2026-08-07 by D13: "so the single-user local cockpit is unchanged" no longer follows.** On loopback (the npm default bind) the local cockpit now offers to create an organization and workspaces through `/onboarding`. *Authentication* is what stays unaffected — no session middleware, no login route, no cookie, no 401, ever — but *org scope* is not: "identity storage is created" is now conditional on the user actually completing that wizard rather than a blanket "never". See the `.ai/specs/2026-08-06-org-team-auth-onboarding.md` D13 decision for the full "this is not an authorization change" reasoning. Needs `CEZ_PUBLIC_URL`, `CEZ_OIDC_CLIENT_ID` and `CEZ_OIDC_CLIENT_SECRET` (plus `CEZ_OIDC_ISSUER` for `oidc`); a missing or invalid setting is reported once at boot and every `/auth/*` route answers 500 with the exact reason rather than failing at first login. |
-| `CEZ_ALLOW_UNAUTHENTICATED=1` | Say out loud that your network or reverse proxy is the perimeter. **A hosted deployment (`CEZ_REMOTE=1`, or a non-loopback `--bind-host`) with neither `CEZ_AUTH` nor this flag refuses to boot**, exits non-zero, and names the reason: cezar executes agents, and `POST /api/v1/workflows` accepts a free-form `command` that a check step runs through `spawn('bash', ['-lc', …])`. That is not auth enforcement — it is a forced choice, so nobody exposes a shell by forgetting a variable. With the flag set the server boots and logs a warning naming the exposure on every start. `cezar server-install --platform ubuntu-vps` writes it into the systemd unit it generates, because that platform installs an nginx `auth_basic` vhost in front of the service. |
+| `CEZ_ALLOW_UNAUTHENTICATED=1` | Say out loud that your network or reverse proxy is the perimeter. **A hosted deployment (`CEZ_REMOTE=1`, or a non-loopback `--bind-host`) with neither `CEZ_AUTH` nor this flag refuses to boot**, exits non-zero, and names the reason: cezar-plus executes agents, and `POST /api/v1/workflows` accepts a free-form `command` that a check step runs through `spawn('bash', ['-lc', …])`. That is not auth enforcement — it is a forced choice, so nobody exposes a shell by forgetting a variable. With the flag set the server boots and logs a warning naming the exposure on every start. `cezar server-install --platform ubuntu-vps` writes it into the systemd unit it generates, because that platform installs an nginx `auth_basic` vhost in front of the service. |
 | `CEZ_PUBLIC_URL=https://cezar.example.com` | The deployment's own public origin, exact and absolute. The OIDC `redirect_uri` is derived from it at boot and validated there — this is the one thing a hosted deployment must not infer from a request header, because trusting a forwarded `Host` for it is how open redirects happen. Required whenever `CEZ_AUTH` is set. |
 | `CEZ_OIDC_ISSUER=https://idp.example.com/realms/main` | Issuer for `CEZ_AUTH=oidc`; discovery runs against `<issuer>/.well-known/openid-configuration`. Must be `https` (a `localhost` issuer is allowed, for testing the flow locally). Ignored under `CEZ_AUTH=google`, whose issuer is pinned. |
 | `CEZ_OIDC_CLIENT_ID`, `CEZ_OIDC_CLIENT_SECRET` | The registered client. Authorization Code + PKCE; `state` and `nonce` are both verified, and `state` is additionally bound to the browser that started the flow by a short-lived `HttpOnly` cookie. |
 | `CEZ_OIDC_GROUP_CLAIM=groups`, `CEZ_OIDC_GROUP_ROLE_MAP=cezar-admins=admin` | Optional group → role mapping, defaulting to none. Only `admin` and `member` can be mapped; an unrecognised group grants nothing, and membership is never inferred from a claim you did not map. |
-| `CEZ_AUTH_BOOTSTRAP_TOKEN`, `CEZ_AUTH_BOOTSTRAP_OPEN=1` | **Who may claim a fresh deployment.** The first user to name an organization becomes its owner, and an owner can run shell commands on this host — so with `CEZ_AUTH=google` the issuer is pinned but the *audience* is every Google account on the internet, and arriving first must not be enough. While `CEZ_AUTH` is set and no organization exists yet, cezar mints a random **bootstrap code** at every start and prints it to its own log (`journalctl -u cezar`); the onboarding wizard asks for it and refuses with 403 without it. **Nothing to set for the default.** `CEZ_AUTH_BOOTSTRAP_TOKEN` pins your own value instead of the generated one; `CEZ_AUTH_BOOTSTRAP_OPEN=1` (that exact value) opts back into "whoever signs in first", the way `CEZ_ALLOW_UNAUTHENTICATED` opts out of the boot refusal. The code stops being printed, and stops granting anything, the moment the organization exists. **Scoped 2026-08-07 (phases 5b/5c/8, D11):** this whole row is about the deployment's FIRST organization and nothing else. Every organization after that is created by the operator (`POST /internal/orgs`, `CEZ_SUPERVISOR_ADMIN_TOKEN` below) and carries its **own** single-use claim code, returned once to whoever made that call and never re-derivable from the deployment-wide code above; its intended owner signs in at the deployment's login host and enters that org's slug + code. So "stops granting anything the moment the organization exists" stays literally true of *this* code, and is no longer the same thing as "nobody else can ever own an org here". |
+| `CEZ_AUTH_BOOTSTRAP_TOKEN`, `CEZ_AUTH_BOOTSTRAP_OPEN=1` | **Who may claim a fresh deployment.** The first user to name an organization becomes its owner, and an owner can run shell commands on this host — so with `CEZ_AUTH=google` the issuer is pinned but the *audience* is every Google account on the internet, and arriving first must not be enough. While `CEZ_AUTH` is set and no organization exists yet, cezar-plus mints a random **bootstrap code** at every start and prints it to its own log (`journalctl -u cezar`); the onboarding wizard asks for it and refuses with 403 without it. **Nothing to set for the default.** `CEZ_AUTH_BOOTSTRAP_TOKEN` pins your own value instead of the generated one; `CEZ_AUTH_BOOTSTRAP_OPEN=1` (that exact value) opts back into "whoever signs in first", the way `CEZ_ALLOW_UNAUTHENTICATED` opts out of the boot refusal. The code stops being printed, and stops granting anything, the moment the organization exists. **Scoped 2026-08-07 (phases 5b/5c/8, D11):** this whole row is about the deployment's FIRST organization and nothing else. Every organization after that is created by the operator (`POST /internal/orgs`, `CEZ_SUPERVISOR_ADMIN_TOKEN` below) and carries its **own** single-use claim code, returned once to whoever made that call and never re-derivable from the deployment-wide code above; its intended owner signs in at the deployment's login host and enters that org's slug + code. So "stops granting anything the moment the organization exists" stays literally true of *this* code, and is no longer the same thing as "nobody else can ever own an org here". |
 | `CEZ_AUTH=supervisor` | **Set on an ORG's process only** (phase 6/7, D4/D10) — never by hand outside a `server-install --platform hetzner`-provisioned host. Means "trust the supervisor's signed, forwarded principal" rather than terminate OIDC/Google itself; the supervisor's own process sets `CEZ_AUTH=oidc`/`google` instead. Requires `CEZ_SUPERVISOR_PORT` and `CEZ_SUPERVISOR_SECRET`. |
 | `CEZ_SUPERVISOR_PORT`, `CEZ_SUPERVISOR_SECRET` | Where an org's process reaches its supervisor (always loopback, same host — a bare port) and the per-org shared secret it authenticates those calls with, to ask "who owns this project root" (D4's root→org registry). This is the phase-6 REPLACEMENT for the phase 1-5 in-process `IdentityStore` lookup: an org process's own `CEZ_HOME` holds no `identity/` directory under D4's per-org uid boundary, so this is the only way it can answer that question. The secret is minted at provisioning and delivered via a root-owned `EnvironmentFile`, never a plain `Environment=` line. Both required when `CEZ_AUTH=supervisor`. |
-| `CEZ_PORT_STRICT=1` (or `--port-strict`) | Make the requested port a hard requirement instead of `serve`'s normal preference: when it is already in use, cezar refuses to boot rather than silently binding the next free one. Off by default — the npm-default `cezar serve` still drifts to a free port exactly as before. `server-install --platform hetzner` sets this on every ORG unit's systemd `Environment=` (never the supervisor's own), because that org's nginx `proxy_pass` is a specific loopback port baked in at provisioning time: a silently drifted bind there is not a startup failure, it is another org's traffic routed into the wrong process (D10). |
+| `CEZ_PORT_STRICT=1` (or `--port-strict`) | Make the requested port a hard requirement instead of `serve`'s normal preference: when it is already in use, cezar-plus refuses to boot rather than silently binding the next free one. Off by default — the npm-default `cezar serve` still drifts to a free port exactly as before. `server-install --platform hetzner` sets this on every ORG unit's systemd `Environment=` (never the supervisor's own), because that org's nginx `proxy_pass` is a specific loopback port baked in at provisioning time: a silently drifted bind there is not a startup failure, it is another org's traffic routed into the wrong process (D10). |
 | `CEZ_SESSION_COOKIE_DOMAIN=.cezar.example.com` | `Domain=` for the session cookie. **Unset is the default and is host-only**, exactly as every release before multi-org hosting behaved — leave it alone on a single-host install. Multi-org needs it because the supervisor sets the cookie on `login.<base>` while each org answers on `<org>.<base>`: a host-only cookie is never sent to an org hostname, nginx's `auth_request` subrequest sees no cookie, and every org host 401s in a redirect loop. Must be the shared base domain, and it is a real widening — every subdomain of `<base>` now receives the cookie, so that base domain has to be yours alone. `server-install --platform hetzner` writes it on the **supervisor's** unit only (`.<base>`), because the supervisor is the only process that issues or clears a session cookie — an org's process never touches one, it is handed an already-verified principal. |
 | `CEZ_SUPERVISOR_ADMIN_TOKEN` | **The supervisor's own credential**, minted at provisioning into its root-owned `EnvironmentFile` — you never type it. It authorizes the `/internal/*` provisioning calls no org's per-org secret may make (**creating a new organization's row** — `POST /internal/orgs`, added 2026-08-07 phases 5b/5c/8 — reading the org roster, registering and deprovisioning an org's process), which is how `server-install --platform hetzner --org-slug <slug>` finishes wiring an org up without an operator pasting secrets. It exists because that first registration is genuinely circular: the call that hands over an org's secret cannot authenticate with it. **Unset closes the admin surface** rather than opening it — with no token there is no admin caller and every admin-only route answers 403. |
 
@@ -618,7 +623,7 @@ Useful environment variables:
 > this same change — the fact changed, not merely the reason for it.** (This block first said
 > "the four paragraphs below", which undercounted: the last one, "And 'everyone who signs in'
 > is currently *one person*", sits after the D12 paragraph and was left reading as current.
-> It carries its own correction now.) A hosted cezar can now host more than one organization. `POST
+> It carries its own correction now.) A hosted cezar-plus can now host more than one organization. `POST
 > /internal/orgs` — admin-only, authenticated by `CEZ_SUPERVISOR_ADMIN_TOKEN` above —
 > creates the org row for every organization after the first; `server-install --platform
 > hetzner --org-slug <slug>` calls it as part of provisioning, so the wall the paragraphs
@@ -643,9 +648,9 @@ Useful environment variables:
 > one is real and disclosed — even though their "still holds exactly one organization" /
 > "exactly one member" claims no longer hold.**
 >
-> **Signing in is not tenancy — a hosted cezar still holds exactly one organization, and
+> **Signing in is not tenancy — a hosted cezar-plus still holds exactly one organization, and
 > that's true for a different reason now than it used to be.** `cezar supervisor` +
-> `server-install --platform hetzner` (above) give cezar a real cross-org boundary: one
+> `server-install --platform hetzner` (above) give cezar-plus a real cross-org boundary: one
 > unix user, one `CEZ_HOME`, one systemd unit per organization, with the supervisor and
 > nginx routing each request to its org's own process by hostname and a signed,
 > per-org-secret header (`CEZ_AUTH=supervisor`, `CEZ_SUPERVISOR_SECRET`, above) — not a
@@ -665,7 +670,7 @@ Useful environment variables:
 > files, so neither is printed or passed in `argv`). It resolves `<slug>` against the
 > supervisor first and aborts if that org does not exist — which is exactly the wall you
 > hit: **the infrastructure for org number two can be provisioned; the organization it
-> would serve cannot be created.** So today a hosted cezar still holds **exactly one**
+> would serve cannot be created.** So today a hosted cezar-plus still holds **exactly one**
 > organization — the isolation boundary is real, and there is nothing on the other side
 > of it. This is a known, tracked gap, not an oversight to work around (see the spec's D4
 > addendum, `.ai/specs/2026-08-06-org-team-auth-onboarding.md`).
@@ -706,7 +711,7 @@ Useful environment variables:
 >
 > **And "everyone who signs in" is currently *one person*.** The first user to name an
 > organization owns it (with the bootstrap code above); everyone after that is told they
-> need an invite — and the invite surface is not built yet. So today an authenticated cezar
+> need an invite — and the invite surface is not built yet. So today an authenticated cezar-plus
 > holds exactly one organization and exactly one member. Roles (`owner` / `admin` /
 > `member`) are stored and mapped from your IdP's groups, but only the team-rename route
 > reads them: assume every member of an organization can do everything, including author a
@@ -733,7 +738,7 @@ df -i "${TMPDIR:-/tmp}"                # a tmpfs can exhaust inodes long before 
 Under quota the file is *created* and the write then fails, so the backend reads
 back a zero-byte capture file and hands the agent an empty result.
 
-**Fix.** Since #785 cezar gives each task its own `TMPDIR` under
+**Fix.** Since #785 cezar-plus gives each task its own `TMPDIR` under
 `.ai/cezar/tmp/<task-id>` and write-probes it before spawning, so a broken temp
 directory fails the task with `agent temp directory is not writable: …` on the
 task thread instead of corrupting its work. If you see that error, free space on
@@ -746,13 +751,13 @@ platform.
 
 ## Coding agent backends
 
-cezar is not married to one vendor. Every agent step runs through a single
+cezar-plus is not married to one vendor. Every agent step runs through a single
 `AgentRunner` seam with four built-in backends:
 
-| Backend | CLI | How cezar drives it | Tool access |
+| Backend | CLI | How cezar-plus drives it | Tool access |
 |---|---|---|---|
 | **Claude Code** (default) | [`claude`](https://github.com/anthropics/claude-code) | Headless `stream-json` mode. | Per-tool `--allowedTools` (`bashAllowlist` scopes `Bash`); `--permission-mode bypassPermissions` — every run proceeds without an approval prompt. |
-| **Codex** | [`codex`](https://github.com/openai/codex) | `codex app-server` — JSON-RPC over stdio, the same transport the Codex IDE extensions use. | Ignores `allowedTools`; the default auto mode uses `danger-full-access` with `approvalPolicy: never` and cezar auto-answers app-server approval requests (`CEZ_CODEX_NETWORK=0` opts into the network-blocked `workspace-write` sandbox and withholds network grants). |
+| **Codex** | [`codex`](https://github.com/openai/codex) | `codex app-server` — JSON-RPC over stdio, the same transport the Codex IDE extensions use. | Ignores `allowedTools`; the default auto mode uses `danger-full-access` with `approvalPolicy: never` and cezar-plus auto-answers app-server approval requests (`CEZ_CODEX_NETWORK=0` opts into the network-blocked `workspace-write` sandbox and withholds network grants). |
 | **OpenCode** _(experimental)_ | [`opencode`](https://opencode.ai) | `opencode serve` — a local HTTP server with an SSE event stream. | Ignores `allowedTools` entirely; every permission is auto-approved. |
 | **pi** _(experimental)_ | [`pi`](https://github.com/badlogic/pi-mono) | Persistent `--mode rpc` over JSONL; models are picked with the `provider/model` convention. | Maps `allowedTools` onto pi's `--tools` allowlist; a configured `bashAllowlist` disables Bash because pi cannot express command-prefix rules. |
 
@@ -761,7 +766,7 @@ cezar is not married to one vendor. Every agent step runs through a single
 > every permission (it ignores `allowedTools`). Treat them as previews and expect
 > rough edges.
 
-On startup cezar probes which CLIs are installed and the cockpit only offers
+On startup cezar-plus probes which CLIs are installed and the cockpit only offers
 the backends it found — install any one of the four and you're operational.
 
 **Pick a backend at three levels** (most specific wins):
@@ -794,10 +799,10 @@ Parallel variants (×2/×3) of one task share that task's backend — mixing
 happens per task and per step, not inside a variant group.
 
 **Models come from your own machine.** For Codex and OpenCode, the model picker
-is not a list cezar ships — it asks the installed CLI what it can actually run
+is not a list cezar-plus ships — it asks the installed CLI what it can actually run
 (`codex app-server`'s `model/list`, and `opencode models`), caches the answer in
 memory for five minutes, and shows it. A model your provider rolled out
-yesterday is selectable without a cezar release, and one it retired stops being
+yesterday is selectable without a cezar-plus release, and one it retired stops being
 offered. Claude Code has no equivalent local catalog, so it keeps a short list
 of tier aliases and pinned versions. `auto` (let the agent decide) is always
 available, including when the CLI is missing, logged out, or slow — discovery
@@ -811,21 +816,21 @@ can slot in the same way.
 
 ---
 
-## Remote access (host cezar on a server)
+## Remote access (host cezar-plus on a server)
 
-cezar runs on `localhost` by default. To reach the cockpit from another machine —
+cezar-plus runs on `localhost` by default. To reach the cockpit from another machine —
 a shared team box, a VPS, your phone — put an **authenticated public front** in
 front of it. The built-in installer does this interactively, per **platform
 strategy**, and never escalates silently: every privileged command is printed
 and verified, and it ends with a real authenticated end-to-end check.
 
 ```bash
-npx cezar-cli server-install   --platform ubuntu-vps   # stand it up
-npx cezar-cli server-deploy    --platform ubuntu-vps   # roll out a new version (reload the service)
-npx cezar-cli server-uninstall --platform ubuntu-vps   # reverse it
+npx @loki-labs/cezar-plus server-install   --platform ubuntu-vps   # stand it up
+npx @loki-labs/cezar-plus server-deploy    --platform ubuntu-vps   # roll out a new version (reload the service)
+npx @loki-labs/cezar-plus server-uninstall --platform ubuntu-vps   # reverse it
 
 # host a SECOND cockpit for another domain on the same box (ubuntu-vps):
-npx cezar-cli server-install   --platform ubuntu-vps --domain shop.example.com
+npx @loki-labs/cezar-plus server-install   --platform ubuntu-vps --domain shop.example.com
 ```
 
 **A deploy that doesn't kill what it is deploying.** The default `server-deploy`
@@ -836,10 +841,10 @@ systemd socket activation, and rolls itself back if the new instance fails its
 health gate — while runs keep going in detached per-run brokers:
 
 ```bash
-npx cezar-cli server-migrate-releases            # one-shot: turn an existing install
+npx @loki-labs/cezar-plus server-migrate-releases            # one-shot: turn an existing install
                                                  # into the release layout (--yes to apply)
-npx cezar-cli server-deploy --strategy=blue-green --follow
-npx cezar-cli server-deploy --rollback           # flip back to the previous release
+npx @loki-labs/cezar-plus server-deploy --strategy=blue-green --follow
+npx @loki-labs/cezar-plus server-deploy --rollback           # flip back to the previous release
 ```
 
 `--strategy=restart` remains the default, so nothing you already run changes
@@ -851,23 +856,23 @@ On `ubuntu-vps` a single host can run several independent cockpits — add
 new domain never resumes or clobbers the first install.
 
 **Already running a reverse proxy?** If Dokploy, Coolify, Caddy or your own
-nginx already owns `:80/:443`, cezar's would fight it for the ports. Install the
+nginx already owns `:80/:443`, cezar-plus's would fight it for the ports. Install the
 service only and let your proxy front it:
 
 ```bash
-npx cezar-cli server-install --platform ubuntu-vps \
+npx @loki-labs/cezar-plus server-install --platform ubuntu-vps \
   --external-proxy --domain cezar.example.com --bind-host 172.17.0.1
 ```
 
 `--bind-host` is only needed when the proxy runs in a **container** (Traefik
 can't reach the host's loopback); a host-installed proxy uses the `127.0.0.1`
-default. In this mode **your proxy must enforce authentication** — cezar has
+default. In this mode **your proxy must enforce authentication** — cezar-plus has
 none of its own. [Details →](docs/server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy)
 
 | Provider | `--platform` | Public front | Guide |
 |----------|--------------|--------------|-------|
 | Ubuntu / Debian VPS | `ubuntu-vps` | nginx + Let's Encrypt HTTPS, htpasswd login, systemd | [Step-by-step →](docs/server-install/ubuntu-vps.md) |
-| Ubuntu + existing proxy | `ubuntu-vps --external-proxy` | your Dokploy/Traefik/Caddy front; cezar ships the service only | [Step-by-step →](docs/server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy) |
+| Ubuntu + existing proxy | `ubuntu-vps --external-proxy` | your Dokploy/Traefik/Caddy front; cezar-plus ships the service only | [Step-by-step →](docs/server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy) |
 | macOS + ngrok | `macosx-ngrok` | ngrok tunnel + `--basic-auth`, launchd | [Step-by-step →](docs/server-install/macosx-ngrok.md) |
 | Hetzner (or any Ubuntu box), **one process per org** | `hetzner` | nginx + Let's Encrypt, **OIDC/Google sign-in** in front (`auth_request`, not `auth_basic`), one systemd unit and one unix user per organization | [Step-by-step →](docs/server-install/hetzner.md) |
 
@@ -884,12 +889,12 @@ never blocks startup):
 
 ```jsonc
 {
-  "skillsRepos": [], // team skills; empty is the default — cezar ships no vendor repo
+  "skillsRepos": [], // team skills; empty is the default — cezar-plus ships no vendor repo
   // Team-skill repos are code-trusted: a skill body becomes an agent system prompt.
   // Only owner/name, https/ssh URLs, or local paths (`/abs`, `./rel`, `~/dir`,
   // `C:\dir`) are accepted — no ext::/fd:: transport helpers. Write a relative
   // path as `./name`, not a bare `name`. Pin `ref` to a full commit SHA to freeze
-  // the source against a moving branch head — cezar verifies it resolves to
+  // the source against a moving branch head — cezar-plus verifies it resolves to
   // exactly that commit, and reports it as `team.commit`.
   "worktreeRetention": 10,   // keep the last N finished worktrees on disk; 0 = unlimited (branch always kept)
   "defaultRunner": "claude", // agent backend: "claude" (default) · "codex" · "opencode" · "pi"
@@ -915,11 +920,11 @@ root — live once in `~/.cezar/config.json`, alongside the
 [project registry](#multiple-projects-one-cockpit), and are edited from
 **Settings → Resources** and **Settings → Projects**. A `maxParallel` left over
 in a repo's `.ai/cezar/config.json` is imported into the workspace file the
-first time cezar boots there, and ignored afterwards.
+first time cezar-plus boots there, and ignored afterwards.
 
 ### Editing the agents' own config (Settings → Agent config)
 
-cezar picks *which* agent runs; **Settings → Agent config** lets you edit *how* it
+cezar-plus picks *which* agent runs; **Settings → Agent config** lets you edit *how* it
 behaves — the raw config files Claude, Codex and OpenCode read for settings,
 MCP, and memory. In the multi-project cockpit the section is project-scoped:
 repo-relative files resolve from the selected project's root, while user-scope
@@ -943,8 +948,8 @@ as in [Quick start](#quick-start)).
 **2. Clone & install**
 
 ```bash
-git clone https://github.com/MarcinWalendowski/cezar.git
-cd cezar
+git clone https://github.com/MarcinWalendowski/cezar-plus.git
+cd cezar-plus
 npm install
 ```
 
@@ -993,9 +998,9 @@ npm run uninstall-as-command    # removes cezar / cez / cezar-cli (either flavor
 - **`EACCES` / permission denied** → your global prefix is root-owned. Point npm
   at a user-writable one and retry — **never** sudo:
   `npm config set prefix ~/.npm-global`.
-- **Already installed the published `@loki-labs/better-cezar` globally?** The
+- **Already installed the published `@loki-labs/cezar-plus` globally?** The
   link/snapshot install replaces it; `uninstall-as-command` removes ours, and
-  `npm i -g @loki-labs/better-cezar` brings the published one back.
+  `npm i -g @loki-labs/cezar-plus` brings the published one back.
 
 ### In-checkout scripts
 

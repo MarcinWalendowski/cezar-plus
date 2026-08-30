@@ -6,7 +6,7 @@ import {
   type RunStatus,
   type WorkspaceProjectHealth,
   type WorkspaceRunSummary,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 
 /**
  * `WorkspaceRunIndex` (W1.11) — the shared foundation both F3 features build on. See

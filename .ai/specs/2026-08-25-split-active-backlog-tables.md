@@ -609,7 +609,7 @@ Everything above is what shipped, with these six deviations and findings. Each i
 the spec, not a note beside it: what the code does is what this section says.
 
 1. **The worktree had no `node_modules`, and that silently defeated the gates.** `tsc` resolved
-   `@loki-labs/better-cezar-contract` by walking up to the MAIN checkout's `node_modules`, so the
+   `@loki-labs/cezar-plus-contract` by walking up to the MAIN checkout's `node_modules`, so the
    first typecheck reported the new contract exports as "not exported" while the contract file in
    front of it declared them. `npm ci` in the worktree fixed it. Worth naming because the failure
    reads as a code error, not as an environment one.

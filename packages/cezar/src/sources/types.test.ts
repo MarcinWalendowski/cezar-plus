@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createSourceConnectionInputSchema, updateSourceConnectionInputSchema } from '@loki-labs/better-cezar-contract';
+import { createSourceConnectionInputSchema, updateSourceConnectionInputSchema } from '@loki-labs/cezar-plus-contract';
 import { defaultIntervalSecondsForKind, minIntervalSecondsForKind, sourceConnectionSchema } from './types.ts';
 
 /**
@@ -70,7 +70,7 @@ describe('minIntervalSecondsForKind / defaultIntervalSecondsForKind', () => {
 });
 
 /**
- * `@loki-labs/better-cezar-contract`'s wire-side input schemas — the `POST /sources` and
+ * `@loki-labs/cezar-plus-contract`'s wire-side input schemas — the `POST /sources` and
  * `PUT /sources/:connectionId` request bodies — MIRROR `sourceConnectionSchema`'s floor rather
  * than sharing it (the contract package cannot import from this one; see both files' headers), so
  * this is a second, independent proof the same floor actually landed on the wire boundary a caller

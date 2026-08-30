@@ -1102,7 +1102,7 @@ a `readFile` could not be consulted there, and a lock that is not consulted ther
 should have resumed.
 
 **Naming note:** the semaphore's bag is called `limits` and a lock is not a limit. It is **not
-renamed**, cezar publishes `@loki-labs/better-cezar` and `BACKWARD_COMPATIBILITY.md` applies. The
+renamed**, cezar publishes `@loki-labs/cezar-plus` and `BACKWARD_COMPATIBILITY.md` applies. The
 bag's doc comment is amended to say it carries workspace *policy* the run loop reads synchronously,
 of which the limits are one kind.
 
@@ -1462,7 +1462,7 @@ column already records what actually ran (`run.ts:7046`), which is the only per-
 
 ## API contracts
 
-Both changes are **additive**, which matters: cezar publishes `@loki-labs/better-cezar` and
+Both changes are **additive**, which matters: cezar publishes `@loki-labs/cezar-plus` and
 `BACKWARD_COMPATIBILITY.md` applies. An older client ignores the key; an older server receiving it
 answers 400 from its own strict schema, which is the honest answer.
 
@@ -1882,7 +1882,7 @@ a real change in cost, in what the record contains, and in what the shell can te
 values shift; a missed one overlaps two regions with no error. V5a asserts the numbers, in the
 no-QueryClient shell suite, so the check survives the D9 container split.
 
-**R5: published-package surface.** `@loki-labs/better-cezar` is public and
+**R5: published-package surface.** `@loki-labs/cezar-plus` is public and
 `BACKWARD_COMPATIBILITY.md` applies. Both schema changes are additive and `null`/absent is exactly
 today; nothing is renamed, including the semaphore's `limits` bag (D7).
 

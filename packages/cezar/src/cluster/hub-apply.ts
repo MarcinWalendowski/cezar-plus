@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import { closeSync, mkdirSync, openSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import type { ClusterOp } from '@loki-labs/better-cezar-contract';
+import type { ClusterOp } from '@loki-labs/cezar-plus-contract';
 import { storedTodoSchema, todosPath, type TodoItem } from '../todos.ts';
 import { applyOpToRecord } from './replica.ts';
 import type { HubOpOutcome, HubOpsDeps } from './hub-ops.ts';

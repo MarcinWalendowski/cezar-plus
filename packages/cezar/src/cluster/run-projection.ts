@@ -7,7 +7,7 @@ import {
   type ClusterProjectKey,
   type ClusterRemoteRun,
   type StoredClusterRemoteRunReport,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { RunRecord, RunStore } from '../runs/store.ts';
 import { clusterHomeDir, type ClusterHomeOptions } from './node-identity.ts';
 import { atomicWriteJsonSync } from '../workspace/config.ts';
@@ -37,7 +37,7 @@ import { atomicWriteJsonSync } from '../workspace/config.ts';
  * **A run never migrates** (D10). Sessions, worktrees and broker scopes are node-local: a run starts
  * on a node and finishes there. If that node goes away mid-run the row is marked `unreachable` as a
  * **separate optional field beside `status`**, never as a new `RunStatus` — `RunStatus` ships in
- * `@loki-labs/better-cezar` and a published wire enum is never widened (PLAN P8), which is the same
+ * `@loki-labs/cezar-plus` and a published wire enum is never widened (PLAN P8), which is the same
  * reason a budget stop is `review` + `stopReason`.
  *
  * **The projection drops every local path by construction.** No `worktreePath`, no session handle,

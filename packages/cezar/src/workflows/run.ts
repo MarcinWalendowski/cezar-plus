@@ -110,7 +110,7 @@ import {
   runAccountKey,
   usageHoldAccountKey,
   type LockableRunner,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import {
   resolvePoolForDispatch,
   resolvePoolForProvider,
@@ -131,7 +131,7 @@ import {
   applyWorkspaceWorktrees,
   discardWorkspaceWorktrees,
 } from '../workspace/workspace-worktrees.ts';
-import type { FiledTodo, PendingApproval, PendingHandoff, TestAttestation, TestAttestationProject, WorkspaceWorktree } from '@loki-labs/better-cezar-contract';
+import type { FiledTodo, PendingApproval, PendingHandoff, TestAttestation, TestAttestationProject, WorkspaceWorktree } from '@loki-labs/cezar-plus-contract';
 import { WorkspaceSemaphore, type AccountHolds } from '../workspace/semaphore.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { WorkspaceTodoIndex, type WorkspaceTodoEntry } from '../workspace/todo-index.ts';
@@ -578,7 +578,7 @@ function accountHeldFor(
 
 // `runAccountKey` — which agent ACCOUNT a run's work runs on (spec
 // 2026-08-03-auto-resume-after-usage-limit) — MOVED 2026-08-23 to
-// `@loki-labs/better-cezar-contract` (`usage-hold.ts`), and SPLIT IN TWO there (spec
+// `@loki-labs/cezar-plus-contract` (`usage-hold.ts`), and SPLIT IN TWO there (spec
 // 2026-08-23-usage-limit-hold-account). The single function that used to sit here answered the
 // admission question ("where will this run's work go?") and was then also used for the hold
 // question ("which account did a provider refuse?"), which are not the same question whenever a
@@ -2647,7 +2647,7 @@ export class RunManager {
     this.sweepSpools(live.map((r) => r.id));
     for (const run of live) {
       if (run.status === 'queued') {
-        await this.reviveQueuedRun(run, 'cezar restarted');
+        await this.reviveQueuedRun(run, 'cezar-plus restarted');
         continue;
       }
       if (run.status === 'waiting') {
@@ -2657,7 +2657,7 @@ export class RunManager {
           // deploy probe run from here would interrogate a server that cannot answer yet.
           this.store.appendEvent(run.id, {
             type: 'lifecycle',
-            message: `cezar restarted, still waiting for ${run.pendingHandoff.kind === 'manual-deploy' ? 'manual deployment' : 'manual merge'}`,
+            message: `cezar-plus restarted, still waiting for ${run.pendingHandoff.kind === 'manual-deploy' ? 'manual deployment' : 'manual merge'}`,
           });
           continue;
         }
@@ -2673,7 +2673,7 @@ export class RunManager {
         if (run.pendingApproval) {
           this.store.appendEvent(run.id, {
             type: 'lifecycle',
-            message: `cezar restarted — still waiting for approval (${run.pendingApproval.approvals.length}/${run.pendingApproval.minApprovers})`,
+            message: `cezar-plus restarted — still waiting for approval (${run.pendingApproval.approvals.length}/${run.pendingApproval.minApprovers})`,
           });
           continue;
         }
@@ -2697,12 +2697,12 @@ export class RunManager {
           }
         }
         const settled = this.store.getRun(run.id) ?? run;
-        if (!pendingAsk && (await this.reenterChain(settled, 'cezar restarted'))) continue;
+        if (!pendingAsk && (await this.reenterChain(settled, 'cezar-plus restarted'))) continue;
         this.store.appendEvent(run.id, {
           type: 'lifecycle',
           message: pendingAttention
-            ? 'cezar restarted — the open session was settled; your answer is still needed'
-            : 'cezar restarted — the open session was settled',
+            ? 'cezar-plus restarted — the open session was settled; your answer is still needed'
+            : 'cezar-plus restarted — the open session was settled',
         });
         await this.settleSuccess(run.id, { pendingAsk: pendingAttention });
         continue;
@@ -2720,7 +2720,7 @@ export class RunManager {
       // `reviveQueuedRun` already uses for a `queued` record. Before this, a restart during any
       // non-final step silently converted the pipeline into an open-ended `continue-N` chat and
       // the remaining steps were never going to happen.
-      if (await this.reenterChain(run, 'cezar restarted', { onlyIfMoreStepsFollow: true })) {
+      if (await this.reenterChain(run, 'cezar-plus restarted', { onlyIfMoreStepsFollow: true })) {
         continue;
       }
       // Nothing revivable: fall back to the continuation path. Mark it interrupted (the state
@@ -2732,14 +2732,14 @@ export class RunManager {
           // string is what the cockpit rendered as a bare "failed" with no cause.
           this.store.updateStep(run.id, step.id, {
             status: 'failed',
-            error: 'interrupted — cezar process exited during the run',
+            error: 'interrupted — cezar-plus process exited during the run',
             finishedAt,
           });
         }
       }
       this.store.updateRun(run.id, {
         status: 'failed',
-        error: 'interrupted — cezar process exited during the run',
+        error: 'interrupted — cezar-plus process exited during the run',
         finishedAt,
         currentStepId: undefined,
       });
@@ -2753,8 +2753,8 @@ export class RunManager {
       this.store.appendEvent(run.id, {
         type: 'lifecycle',
         message: resumed.ok
-          ? 'cezar restarted — resuming the interrupted task from its last session'
-          : `cezar restarted — could not resume the interrupted task (${resumed.error ?? 'unknown'})`,
+          ? 'cezar-plus restarted — resuming the interrupted task from its last session'
+          : `cezar-plus restarted — could not resume the interrupted task (${resumed.error ?? 'unknown'})`,
       });
     }
     // Re-arm usage-limit resumes (spec 2026-08-03-auto-resume-after-usage-limit): the wait is
@@ -3046,7 +3046,7 @@ export class RunManager {
     });
     this.store.appendEvent(run.id, {
       type: 'lifecycle',
-      message: 'cezar restarted — this run kept going',
+      message: 'cezar-plus restarted — this run kept going',
     });
     this.starting.add(run.id);
     const input = this.queuedInputFromRecord(run, followupsEnabled() ? run.generateFollowups : false);
@@ -3747,7 +3747,7 @@ export class RunManager {
     const target = accountUsageKey(waitableRunner, waitableProfileId);
     const asks = lockedRunner ? `this workspace is locked to ${pinned}` : `this step asks for ${pinned}`;
     const message =
-      `${asks}, and every ${pinned} account is logged out; the best account cezar can move it to ` +
+      `${asks}, and every ${pinned} account is logged out; the best account cezar-plus can move it to ` +
       `(${target}) is out of quota, so this task waits for that window`;
     this.store.appendEvent(runId, { type: 'note', stepId: step.id, message });
     const deadline = this.holdReopensAt(target) ?? new Date(Date.now() + ASSUMED_LIMIT_COOLDOWN_MS);

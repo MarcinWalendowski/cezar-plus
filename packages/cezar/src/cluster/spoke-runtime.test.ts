@@ -18,7 +18,7 @@ import {
   type ClusterRepoFreshness,
   type ClusterUplinkFrame,
   clusterWatermarkSchema,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { ApplyHubReplicaInput, TodoItem } from '../todos.ts';
 import { applyHubReplica as applyHubReplicaFile, readTodos as readTodosFile } from '../todos.ts';
 import { RunStore } from '../runs/store.ts';

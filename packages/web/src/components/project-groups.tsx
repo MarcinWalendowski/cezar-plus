@@ -3,7 +3,7 @@ import * as React from 'react'
 import { useLocation } from 'react-router'
 
 import { useHealth, useProjectRuns } from '@/api/queries'
-import type { ProjectListEntry } from '@loki-labs/better-cezar-api-client'
+import type { ProjectListEntry } from '@loki-labs/cezar-plus-api-client'
 import { useSidebarNavigate } from '@/components/app-shell'
 import { useListView } from '@/components/list-view'
 import { activeNavPath, visibleNavItems } from '@/components/nav-items'

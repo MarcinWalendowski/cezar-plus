@@ -6,7 +6,7 @@ edits it plugs into), P2 (the tests: `argv.test.ts`, four new cases in
 correction: `AGENTS.md:13`, `BACKWARD_COMPATIBILITY.md` section 1, this corpus note, and
 `f97ddd39` marked done in the main checkout's `.ai/cezar/todos.json`) are all landed on commit
 `6863f173`, pushed to `origin/cez/e4faf470` and merged to `origin/main` at `c8afc4e5` (PR
-[#10](https://github.com/MarcinWalendowski/cezar/pull/10)). Verification §4's full gate suite has
+[#10](https://github.com/MarcinWalendowski/cezar-plus/pull/10)). Verification §4's full gate suite has
 since run to completion (see Status log): `npm run typecheck`, `npm run test:unit` (44/44), `npm
 run build`, and `npm run test:package` (18/18) all EXIT=0; `npm test` EXIT=1 with three failures,
 all independently confirmed pre-existing and unrelated to this diff. **Deployed to production
@@ -591,7 +591,7 @@ On landing, and in the same session as the code change, per the workspace rules:
 - 2026-08-23 (commit-push step): committed as `6863f173` on `cez/e4faf470`
   (`fix: make bare --rollback work — implement 2026-08-23-bare-rollback-argv-trap`), pushed to
   `origin/cez/e4faf470` (never `upstream`, per this repo's remote convention), opened PR
-  [#10](https://github.com/MarcinWalendowski/cezar/pull/10), and self-merged it into `origin/main`
+  [#10](https://github.com/MarcinWalendowski/cezar-plus/pull/10), and self-merged it into `origin/main`
   at `c8afc4e5`, following this repo's established convention of the same author self-merging every
   recent PR. `git merge-base --is-ancestor` confirms this worktree's `HEAD` is now an ancestor of
   `origin/main`.

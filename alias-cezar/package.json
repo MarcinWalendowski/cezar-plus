@@ -1,7 +1,7 @@
 {
-  "name": "@loki-labs/better-cezar-cli",
+  "name": "@loki-labs/cezar-plus-cli",
   "version": "0.10.0",
-  "description": "Alias for @loki-labs/better-cezar — so `npx cezar-cli` just works. Local cockpit for running and tracking AI agent tasks in your repo.",
+  "description": "Alias for @loki-labs/cezar-plus — so `npx cezar-cli` just works. Local cockpit for running and tracking AI agent tasks in your repo.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -10,14 +10,14 @@
     "cez": "bin.js"
   },
   "dependencies": {
-    "@loki-labs/better-cezar": "^0.10.0"
+    "@loki-labs/cezar-plus": "^0.10.0"
   },
   "publishConfig": {
     "access": "public"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/MarcinWalendowski/cezar",
+    "url": "https://github.com/MarcinWalendowski/cezar-plus",
     "directory": "packages/cezar"
   }
 }

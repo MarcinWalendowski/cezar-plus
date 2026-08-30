@@ -2,7 +2,7 @@ import { cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { SourceStatusBadge } from './source-status-badge'
-import type { SourceSyncState } from '@loki-labs/better-cezar-api-client'
+import type { SourceSyncState } from '@loki-labs/cezar-plus-api-client'
 
 // Explicit rather than relying on RTL's auto-cleanup, which only runs when vitest `globals` is on.
 afterEach(cleanup)

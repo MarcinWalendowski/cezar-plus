@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ApiRun, ProviderStatusResponse } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, ProviderStatusResponse } from '@loki-labs/cezar-plus-api-client'
 
 import {
   activeProviderAvailability,

@@ -1,4 +1,4 @@
-import type { StoredClusterNodeIdentity } from '@loki-labs/better-cezar-contract';
+import type { StoredClusterNodeIdentity } from '@loki-labs/cezar-plus-contract';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CezarHubSourceProviderOptions } from '../sources/cezar-hub/provider.ts';
 import type { SourceProvider } from '../sources/provider-types.ts';

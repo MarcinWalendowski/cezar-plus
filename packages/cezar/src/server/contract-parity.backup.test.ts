@@ -5,7 +5,7 @@ import type { z } from 'zod';
 import type {
   backupOverviewResponseSchema,
   backupSnapshotsResponseSchema,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { AppType } from './app-type.ts';
 
 /**

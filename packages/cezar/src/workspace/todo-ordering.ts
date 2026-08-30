@@ -1,4 +1,4 @@
-import type { FiledPartition, FiledSortColumn, FiledSortDir } from '@loki-labs/better-cezar-contract';
+import type { FiledPartition, FiledSortColumn, FiledSortDir } from '@loki-labs/cezar-plus-contract';
 import type { TodoItem } from '../todos.ts';
 
 /**

@@ -14,7 +14,7 @@ import {
   type NotificationTransportResponse,
   type TransportView,
   type UpdateNotificationTransportInput,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { ApiError, NO_REDIRECT, putWorkspaceUiState, throwIfIdentityGate } from '@/api/client'
 import { useWorkspaceNotifications, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
 import { subscribeTopic } from '@/api/ws'
@@ -197,7 +197,7 @@ async function requestNotificationsJson<T>(path: string, init: RequestInit = {})
     })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
-    throw new ApiError(0, `cannot reach the cezar server (${path})`, { cause })
+    throw new ApiError(0, `cannot reach the cezar-plus server (${path})`, { cause })
   }
   throwIfIdentityGate(res, path)
   const body = await res.text()
@@ -216,7 +216,7 @@ async function requestNotificationsJson<T>(path: string, init: RequestInit = {})
     throw new ApiError(res.status, message)
   }
   if (parsed === undefined) {
-    throw new ApiError(res.status, `the cezar server answered ${path} with a non-JSON body`)
+    throw new ApiError(res.status, `the cezar-plus server answered ${path} with a non-JSON body`)
   }
   return parsed as T
 }
@@ -306,7 +306,7 @@ function ServerTransportsSection() {
           <p className="text-[13px] text-muted-foreground">
             Server-side delivery — a webhook, a chat relay, ntfy — that reaches you even when no
             browser tab is open.
-            {data && !data.configured ? ' Set CEZ_NOTIFY=1 and restart cezar to turn it on.' : ''}
+            {data && !data.configured ? ' Set CEZ_NOTIFY=1 and restart cezar-plus to turn it on.' : ''}
           </p>
         </div>
         <Button type="button" size="sm" variant="outline" onClick={() => setAddOpen(true)}>
@@ -334,7 +334,7 @@ function ServerTransportsSection() {
         </p>
       ) : transports.length === 0 ? (
         <p data-slot="notifications-transports-empty" className="text-[13px] text-soft-foreground">
-          No transports configured. cezar sends nothing.
+          No transports configured. cezar-plus sends nothing.
         </p>
       ) : (
         <div className="flex flex-col gap-2">
@@ -785,7 +785,7 @@ function TransportDialog({
           <DialogDescription>
             {isEdit
               ? 'The endpoint URL and auth are write-only — leave them blank to keep what is already configured.'
-              : 'A webhook transport: cezar POSTs a JSON body to this URL on every notify-worthy event.'}
+              : 'A webhook transport: cezar-plus POSTs a JSON body to this URL on every notify-worthy event.'}
           </DialogDescription>
         </DialogHeader>
 

@@ -4,7 +4,7 @@ import { Link, useLocation, useParams } from 'react-router'
 
 import { useWorkspaceTodos } from '@/api/queries'
 import { useStartFiledTask, useUpdateFiledTodo } from '@/api/filed-task-mutations'
-import type { WorkspaceTodoEntry } from '@loki-labs/better-cezar-api-client'
+import type { WorkspaceTodoEntry } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { FiledTaskActions, FiledTaskDetailContent } from '@/components/filed-task-detail'
 import { useTaskNodeRoster } from '@/components/task-node-cell'

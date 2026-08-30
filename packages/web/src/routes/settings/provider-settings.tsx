@@ -12,7 +12,7 @@ import type {
   ProviderId,
   ProviderStatusResponse,
   WorkspaceConfigResponse,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { EngineLockBarContainer } from '@/components/engine-lock-bar'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
@@ -321,7 +321,7 @@ export function ProviderSettings() {
                 </div>
                 {incidentId !== undefined ? (
                   <p className="mt-2 text-xs text-soft-foreground">
-                    Use this after completing the provider sign-in flow. cezar cannot validate the
+                    Use this after completing the provider sign-in flow. cezar-plus cannot validate the
                     credential without a task/model request; it will verify it on the next task.
                   </p>
                 ) : null}

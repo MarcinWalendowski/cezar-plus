@@ -30,7 +30,7 @@ import {
   type ClusterProtocol,
   type StoredClusterEnrollCode,
   type StoredClusterNodeIdentity,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { clusterHomeDir, ensureNodeIdentity, loadNodeIdentity, nodeIdentityPath } from './node-identity.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';
 import { storeNodeSecret } from './node-secrets.ts';
@@ -337,7 +337,7 @@ export function renderJoinCommands(input: {
   hubUrl: string;
   hubVersion: string;
 }): ClusterEnrollCommands {
-  const pkg = `@loki-labs/better-cezar@${input.hubVersion}`;
+  const pkg = `@loki-labs/cezar-plus@${input.hubVersion}`;
   return clusterEnrollCommandsSchema.parse({
     join: `npx -y ${pkg} cluster join ${input.code}`,
     provision: `npx -y ${pkg} server-install --platform hetzner --role worker --join ${input.code}`,
@@ -532,7 +532,7 @@ export async function joinCluster(
     return {
       ok: false,
       reason: 'code-malformed',
-      message: 'The pasted code is not a cezar join code; no hub could be determined from it.',
+      message: 'The pasted code is not a cezar-plus join code; no hub could be determined from it.',
     };
   }
 

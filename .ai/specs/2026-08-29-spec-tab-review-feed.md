@@ -938,9 +938,9 @@ that actually exist, from the root `package.json`:
 ```bash
 npm run typecheck     # contract → api-client → server → web (pretypecheck builds the server first)
 npm test              # vitest run, whole workspace
-npm run test:unit     # -w @loki-labs/better-cezar — a SEPARATE Node test suite, not part of npm test
+npm run test:unit     # -w @loki-labs/cezar-plus — a SEPARATE Node test suite, not part of npm test
 npm run build         # build:server + build:web + check:pack + build:stamp
-npm run test:package  # -w @loki-labs/better-cezar
+npm run test:package  # -w @loki-labs/cezar-plus
 ```
 
 All **five** must be green. This is the repository's own five-command gate as recorded in the
@@ -948,7 +948,7 @@ domain record (`notion-export/domains/cezar.md`: *"Five-command gate: `npm run t
 `npm test`, `npm run test:unit`, `npm run build`, `npm run test:package` — cezar has no lint or
 format step"*), and all five exist in the root `package.json` (`test:unit` at `package.json:33`).
 An earlier draft of this section dropped `test:unit` and said "all four": `npm test` is
-`vitest run` and **does not** include it — it is a distinct suite run through the `@loki-labs/better-cezar`
+`vitest run` and **does not** include it — it is a distinct suite run through the `@loki-labs/cezar-plus`
 workspace — so a four-command gate leaves a suite unrun while reporting green.
 `npm test` includes `bc-route-inventory.test.ts`,
 `contract-parity.*.test.ts`, `versioned-surface.test.ts` and `routes.test.tsx`, which are the

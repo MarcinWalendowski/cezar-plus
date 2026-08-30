@@ -6,8 +6,8 @@ import type {
   BackupRunResponse,
   BackupSnapshotsResponse,
   BackupVerifyResponse,
-} from '@loki-labs/better-cezar-contract';
-import { backupRestoreInputSchema } from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
+import { backupRestoreInputSchema } from '@loki-labs/cezar-plus-contract';
 import { listProjects } from '../workspace/projects.ts';
 import {
   getBackupStatus,

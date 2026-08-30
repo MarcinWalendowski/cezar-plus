@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import type { StoredClusterNodeIdentity } from '@loki-labs/better-cezar-contract';
+import type { StoredClusterNodeIdentity } from '@loki-labs/cezar-plus-contract';
 import { createCezarHubSourceProvider, type CezarHubSourceProviderOptions } from '../sources/cezar-hub/provider.ts';
 import { FileSourceSink } from '../sources/sink.ts';
 import { SourceStore } from '../sources/store.ts';

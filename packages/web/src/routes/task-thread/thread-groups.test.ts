@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import type { RunEvent } from '@loki-labs/better-cezar-api-client'
-import type { ToolStatus, UiToolItem } from '@loki-labs/better-cezar-api-client'
+import type { RunEvent } from '@loki-labs/cezar-plus-api-client'
+import type { ToolStatus, UiToolItem } from '@loki-labs/cezar-plus-api-client'
 
 import subagentTask from '../../../../cezar/src/core/__fixtures__/claude/subagent-task.expected.json'
 import thinkingEditWriteTodo from '../../../../cezar/src/core/__fixtures__/claude/thinking-edit-write-todo.expected.json'

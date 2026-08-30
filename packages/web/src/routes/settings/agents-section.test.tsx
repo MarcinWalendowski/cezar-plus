@@ -11,7 +11,7 @@ import type {
   ProjectListEntry,
   RepoResponse,
   Runner,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { AppRoutes } from '@/routes'
 

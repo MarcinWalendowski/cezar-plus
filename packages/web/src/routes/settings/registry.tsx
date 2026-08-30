@@ -20,7 +20,7 @@ import {
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 
-import type { Capabilities } from '@loki-labs/better-cezar-api-client'
+import type { Capabilities } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { AccountSection } from './account-section'
 import { AccountsSection } from './accounts-section'
@@ -302,7 +302,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     // deliberately has no `auth` key.
     id: 'account',
     title: 'Account',
-    description: 'Sign out of this cezar deployment.',
+    description: 'Sign out of this cezar-plus deployment.',
     icon: LogOutIcon,
     component: AccountSection,
     appliesTo: 'workspace',

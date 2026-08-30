@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { ClusterOp, ClusterTodoFields } from '@loki-labs/better-cezar-contract';
+import type { ClusterOp, ClusterTodoFields } from '@loki-labs/cezar-plus-contract';
 import {
   CLUSTER_META_TODO_FIELDS,
   DEFAULT_OP_SEND_BUDGET,

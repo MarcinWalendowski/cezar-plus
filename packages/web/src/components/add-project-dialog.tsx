@@ -8,7 +8,7 @@ import {
   useProjects,
   useRegisterProject,
 } from '@/api/queries'
-import type { FsBrowseDir, NestedRepo } from '@loki-labs/better-cezar-api-client'
+import type { FsBrowseDir, NestedRepo } from '@loki-labs/cezar-plus-api-client'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -180,7 +180,7 @@ export function AddProjectDialog({
         <DialogHeader>
           <DialogTitle>Open local folder</DialogTitle>
           <DialogDescription>
-            Pick the folder cezar should run in. Git repos are marked; any folder works.
+            Pick the folder cezar-plus should run in. Git repos are marked; any folder works.
           </DialogDescription>
         </DialogHeader>
 
@@ -419,7 +419,7 @@ function SetupPanel({ path, onClose }: { path: string; onClose: () => void }) {
       : data.oversized.length > 0
         ? `${data.oversized[0]} is too large to commit — move or ignore it, then try again.`
         : data.truncated
-          ? 'Too many files here for cezar to check them all for secrets.'
+          ? 'Too many files here for cezar-plus to check them all for secrets.'
           : data.trackedElsewhere
             ? 'The git repository above this folder already tracks these files.'
             : data.alreadyRepo && data.hasCommits

@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { HealthResponse } from '@loki-labs/better-cezar-api-client'
+import type { HealthResponse } from '@loki-labs/cezar-plus-api-client'
 import { AppShell } from './app-shell'
 import { ThemeProvider } from './theme-provider'
 import { ToolsMenu, forgeNote, toolsBlocker, toolsTooltip } from './tools-menu'
@@ -108,8 +108,8 @@ const rowsIn = (menu: HTMLElement) =>
   Array.from(menu.querySelectorAll<HTMLElement>('[data-slot="tool-row"]'))
 
 describe('toolsTooltip', () => {
-  it('is just the cezar version while everything is available', () => {
-    expect(toolsTooltip(ALL_GOOD)).toBe('cezar v0.1.3')
+  it('is just the cezar-plus version while everything is available', () => {
+    expect(toolsTooltip(ALL_GOOD)).toBe('cezar-plus v0.1.3')
   })
 
   it('names the missing alternatives as optional while the default runner works', () => {
@@ -117,15 +117,15 @@ describe('toolsTooltip', () => {
       ...HEALTH,
       checks: [...HEALTH.checks, { name: 'opencode', available: false, hint: 'optional: install OpenCode' }],
     }
-    expect(toolsTooltip(twoDown)).toBe('cezar v0.1.3 · optional: codex, opencode not installed')
+    expect(toolsTooltip(twoDown)).toBe('cezar-plus v0.1.3 · optional: codex, opencode not installed')
   })
 
   it('names the default runner when it is the missing one', () => {
-    expect(toolsTooltip(DEFAULT_DOWN)).toBe('cezar v0.1.3 · default runner (codex) not found')
+    expect(toolsTooltip(DEFAULT_DOWN)).toBe('cezar-plus v0.1.3 · default runner (codex) not found')
   })
 
   it('says so when no agent CLI is present at all', () => {
-    expect(toolsTooltip(NO_RUNNER)).toBe('cezar v0.1.3 · no agent CLI found — install one to run tasks')
+    expect(toolsTooltip(NO_RUNNER)).toBe('cezar-plus v0.1.3 · no agent CLI found — install one to run tasks')
   })
 })
 
@@ -141,7 +141,7 @@ describe('toolsBlocker', () => {
 
   it('counts every runner the contract knows — a `pi`-only host can start tasks', () => {
     expect(toolsBlocker(PI_ONLY)).toBeNull()
-    expect(toolsTooltip(PI_ONLY)).toBe('cezar v0.1.3 · optional: claude, codex not installed')
+    expect(toolsTooltip(PI_ONLY)).toBe('cezar-plus v0.1.3 · optional: claude, codex not installed')
   })
 
   it('names `pi` when it is the configured default and the missing one', () => {
@@ -158,19 +158,19 @@ describe('ToolsMenu', () => {
   it('shows a green aggregate dot when every check is available', () => {
     renderMenu(ALL_GOOD)
     expect(triggerDot().getAttribute('data-tone')).toBe('success')
-    expect(trigger().getAttribute('title')).toBe('cezar v0.1.3')
+    expect(trigger().getAttribute('title')).toBe('cezar-plus v0.1.3')
   })
 
   it('stays green while the default runner works and only an optional tool is missing', () => {
     renderMenu(HEALTH)
     expect(triggerDot().getAttribute('data-tone')).toBe('success')
-    expect(trigger().getAttribute('title')).toBe('cezar v0.1.3 · optional: codex not installed')
+    expect(trigger().getAttribute('title')).toBe('cezar-plus v0.1.3 · optional: codex not installed')
   })
 
   it('goes amber when the default runner is the missing one', () => {
     renderMenu(DEFAULT_DOWN)
     expect(triggerDot().getAttribute('data-tone')).toBe('pending')
-    expect(trigger().getAttribute('title')).toBe('cezar v0.1.3 · default runner (codex) not found')
+    expect(trigger().getAttribute('title')).toBe('cezar-plus v0.1.3 · default runner (codex) not found')
   })
 
   it('goes amber when no agent CLI is installed at all', () => {

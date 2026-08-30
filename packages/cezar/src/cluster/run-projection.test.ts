@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { clusterRemoteRunSchema, type ClusterRemoteRun } from '@loki-labs/better-cezar-contract';
+import { clusterRemoteRunSchema, type ClusterRemoteRun } from '@loki-labs/cezar-plus-contract';
 import { RunStore } from '../runs/store.ts';
 import { localCliAuthor } from '../runs/task-author.ts';
 import {

@@ -11,7 +11,7 @@ import {
   type StoredClusterNode,
   type StoredClusterNodeIdentity,
   type StoredClusterPeers,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { WorkspaceSemaphore, type SemaphoreParticipant } from '../workspace/semaphore.ts';
 import { buildPlacementCandidates, stampAgeMs, type HoldsProjectResolver } from './hub-candidates.ts';
 import { peersPath } from './peers.ts';

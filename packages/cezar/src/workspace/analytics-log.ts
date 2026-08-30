@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { AnalyticsEvent, StoredAnalyticsEvent } from '@loki-labs/better-cezar-contract';
+import type { AnalyticsEvent, StoredAnalyticsEvent } from '@loki-labs/cezar-plus-contract';
 import { analyticsLogPath, assertCezarHomeWriteIsSandboxed } from '../paths.ts';
 
 /**

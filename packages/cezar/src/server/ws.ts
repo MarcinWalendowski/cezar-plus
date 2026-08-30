@@ -307,7 +307,7 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
         try {
           // A close FRAME, then let the peer answer — `terminate()` here would be the abrupt
           // teardown this method exists to replace.
-          ws.close(WS_CLOSE_SERVICE_RESTART, 'cezar is restarting');
+          ws.close(WS_CLOSE_SERVICE_RESTART, 'cezar-plus is restarting');
         } catch {
           // Already gone; the drain must not care.
         }

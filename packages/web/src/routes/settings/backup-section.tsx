@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { HardDriveIcon } from 'lucide-react'
 
-import type { BackupOverviewResponse, BackupSnapshot } from '@loki-labs/better-cezar-api-client'
+import type { BackupOverviewResponse, BackupSnapshot } from '@loki-labs/cezar-plus-api-client'
 import { ApiError } from '@/api/client'
 import {
   useGcWorkspaceBackup,
@@ -59,7 +59,7 @@ export function BackupSection() {
         icon={<HardDriveIcon />}
         tone="neutral"
         title="Backups are off"
-        subtitle="Set CEZ_BACKUP=1 and restart cezar to configure an encrypted, incremental backup of the platform corpus to S3 (R2/S3/B2/MinIO) or a local disk."
+        subtitle="Set CEZ_BACKUP=1 and restart cezar-plus to configure an encrypted, incremental backup of the platform corpus to S3 (R2/S3/B2/MinIO) or a local disk."
         heading="h2"
       />
     )
@@ -96,7 +96,7 @@ function BackupCockpit({ overview }: { overview: BackupOverviewResponse }) {
           <p className="text-[13px] text-muted-foreground">
             Set in <code>~/.cezar/backup.json</code> plus env (<code>CEZ_BACKUP_KEY</code>, and
             the provider&apos;s own credential vars) — there is no in-app form for it; edit the
-            file and restart cezar to change the provider or key.
+            file and restart cezar-plus to change the provider or key.
           </p>
         </div>
         {overview.provider ? (

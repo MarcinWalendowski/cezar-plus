@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import type { LockableRunner } from '@loki-labs/better-cezar-contract';
+import type { LockableRunner } from '@loki-labs/cezar-plus-contract';
 import { createRunner } from './core/runner-factory.ts';
 import type { ProviderId } from './core/provider-auth.ts';
 import { loadConfig } from './config.ts';

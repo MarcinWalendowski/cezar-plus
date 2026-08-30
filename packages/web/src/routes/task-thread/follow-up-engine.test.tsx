@@ -10,7 +10,7 @@ import type {
   LockableRunner,
   ProviderStatusResponse,
   StepState,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { ADVISORY_NOTE, lockDisclosure } from '@/components/picker-pill'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
 import { Link } from '@/lib/project-router'

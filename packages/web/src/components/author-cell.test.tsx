@@ -1,4 +1,4 @@
-import type { TaskAuthor } from '@loki-labs/better-cezar-api-client'
+import type { TaskAuthor } from '@loki-labs/cezar-plus-api-client'
 import { cleanup, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it } from 'vitest'

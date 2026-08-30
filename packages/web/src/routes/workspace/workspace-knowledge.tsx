@@ -12,7 +12,7 @@ import type {
   WorkspaceKnowledgeDomain,
   WorkspaceKnowledgeProjectHealth,
   WorkspaceKnowledgeResult,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { workspaceViewsOffSubtitle } from '@/lib/capability-copy'
 import { Badge } from '@/components/ui/badge'
@@ -140,7 +140,7 @@ function DisabledState({ reason }: { reason: 'knowledge' | 'workspaceViews' }) {
     reason === 'knowledge'
       ? {
           title: 'The knowledge base is off',
-          subtitle: 'Set CEZ_KB=1 and restart cezar to turn it on.',
+          subtitle: 'Set CEZ_KB=1 and restart cezar-plus to turn it on.',
         }
       : {
           title: 'The cross-project workspace view is off',

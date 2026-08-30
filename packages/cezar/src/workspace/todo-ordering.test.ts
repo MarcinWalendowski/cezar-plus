@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { FiledSortColumn, FiledSortDir } from '@loki-labs/better-cezar-contract';
+import type { FiledSortColumn, FiledSortDir } from '@loki-labs/cezar-plus-contract';
 import type { TodoItem } from '../todos.ts';
 import {
   compareFiledEntries,

@@ -8,7 +8,7 @@ import {
   type ClusterAllocateResponse,
   type ClusterNodeId,
   type StoredClusterAllocation,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { cezarHomeDir } from '../paths.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';
 
@@ -30,7 +30,7 @@ import type { ClusterHomeOptions } from './node-identity.ts';
  * an allocator that repeats every third number.
  *
  * `kind` is a bounded string, never a literal union: the reasoning is `sources.ts`'s, and this type
- * is published in `@loki-labs/better-cezar-contract` where PLAN P8 forbids widening an enum.
+ * is published in `@loki-labs/cezar-plus-contract` where PLAN P8 forbids widening an enum.
  *
  * **Storage: one file per `kind`**, `<CEZ_HOME>/cluster/allocations/<kind>.json` — an append-only
  * ledger of `StoredClusterAllocation` events, `.passthrough()`, atomic tmp+rename at `0600`, corrupt

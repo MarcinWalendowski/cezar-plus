@@ -15,8 +15,8 @@ import type {
   ClusterOverviewResponse,
   ClusterQueuedReason,
   ClusterRepoFreshness,
-} from '@loki-labs/better-cezar-api-client'
-import { apiPath, clusterQueuedReasonSchema } from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
+import { apiPath, clusterQueuedReasonSchema } from '@loki-labs/cezar-plus-api-client'
 import { ApiError } from '@/api/client'
 import { useHealth } from '@/api/queries'
 import { CenteredState } from '@/components/centered-state'
@@ -114,7 +114,7 @@ async function clusterFetch<T>(path: string, init: RequestInit = {}): Promise<T>
       headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
     })
   } catch (cause) {
-    throw new ApiError(0, `cannot reach the cezar server (${url})`, { cause })
+    throw new ApiError(0, `cannot reach the cezar-plus server (${url})`, { cause })
   }
   const bodyText = await res.text()
   if (!res.ok) {
@@ -128,7 +128,7 @@ async function clusterFetch<T>(path: string, init: RequestInit = {}): Promise<T>
   if (!bodyText) return undefined as T
   const parsed = parseJsonSafe(bodyText)
   if (parsed === undefined) {
-    throw new ApiError(res.status, `the cezar server answered ${path} with a non-JSON body`)
+    throw new ApiError(res.status, `the cezar-plus server answered ${path} with a non-JSON body`)
   }
   return parsed as T
 }
@@ -248,7 +248,7 @@ export function ClusterSection() {
           icon={<NetworkIcon />}
           tone="neutral"
           title="Clustering is off"
-          subtitle="Set CEZ_CLUSTER=1 (and CEZ_CLUSTER_HUB on a spoke) and restart cezar to see and enroll other nodes."
+          subtitle="Set CEZ_CLUSTER=1 (and CEZ_CLUSTER_HUB on a spoke) and restart cezar-plus to see and enroll other nodes."
           heading="h2"
         />
       )}

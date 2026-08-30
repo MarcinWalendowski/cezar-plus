@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from './client'
 import { createQueryClient } from './query-client'
-import { setApiScope } from '@loki-labs/better-cezar-api-client'
+import { setApiScope } from '@loki-labs/cezar-plus-api-client'
 import { ProjectScopeContext } from './project-scope-context'
-import type { GithubRefStatusData } from '@loki-labs/better-cezar-api-client'
+import type { GithubRefStatusData } from '@loki-labs/cezar-plus-api-client'
 import {
   refStatusRecheckAfter,
   useReferenceProjectId,

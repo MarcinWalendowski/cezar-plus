@@ -1,4 +1,4 @@
-import { getApiBaseUrl } from '@loki-labs/better-cezar-api-client'
+import { getApiBaseUrl } from '@loki-labs/cezar-plus-api-client'
 
 import { ApiError, NO_REDIRECT, throwIfIdentityGate } from '@/api/client'
 import { isJsonResponse } from '@/routes/onboarding/onboarding-api'
@@ -96,7 +96,7 @@ export async function logout(signal?: AbortSignal): Promise<void> {
     })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
-    throw new ApiError(0, 'cannot reach the cezar server (/auth/logout)', { cause })
+    throw new ApiError(0, 'cannot reach the cezar-plus server (/auth/logout)', { cause })
   }
   throwIfIdentityGate(res, '/auth/logout')
   if (!res.ok) {

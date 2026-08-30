@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Hono } from 'hono';
-import { CLUSTER_PROTOCOL } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_PROTOCOL } from '@loki-labs/cezar-plus-contract';
 import { persistNodeCredential } from './cluster/enrollment.ts';
 import { ensureNodeIdentity } from './cluster/node-identity.ts';
 import { storeNodeSecret } from './cluster/node-secrets.ts';

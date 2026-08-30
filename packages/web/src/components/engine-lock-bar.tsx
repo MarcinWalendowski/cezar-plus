@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 
 import { putWorkspaceConfig } from '@/api/client'
 import { useProviderStatus, useWorkspaceConfig, workspaceQueryKeys } from '@/api/queries'
-import { LOCKABLE_RUNNERS, type LockableRunner } from '@loki-labs/better-cezar-api-client'
+import { LOCKABLE_RUNNERS, type LockableRunner } from '@loki-labs/cezar-plus-api-client'
 import { toast } from '@/components/ui/toaster'
 import { providerStatusFor } from '@/lib/provider-status'
 import { cn } from '@/lib/utils'

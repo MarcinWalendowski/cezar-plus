@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
-import type { ClusterOp, ClusterReplicaCorrection, ClusterReplicaFrame } from '@loki-labs/better-cezar-contract';
+import type { ClusterOp, ClusterReplicaCorrection, ClusterReplicaFrame } from '@loki-labs/cezar-plus-contract';
 import type { TodoItem } from '../todos.ts';
 import { CLUSTER_META_TODO_FIELDS } from './ops.ts';
 

@@ -7,12 +7,12 @@ import type {
   WorkspaceProjectHealth,
   WorkspaceTodosCounts,
   WorkspaceTodosPage,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import {
   DEFAULT_FILED_SORT_COLUMN,
   DEFAULT_FILED_SORT_DIR,
   FILED_ACTIVE_INITIAL_ROWS,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { isTombstoned, readTodos, type TodoItem } from '../todos.ts';
 import { filedPartitionOf, filedStatusOf, orderFiledEntries } from './todo-ordering.ts';
 

@@ -541,7 +541,7 @@ describe('verifyWsUpgrade', () => {
  * package) to prove the fix holds regardless of which listener registers first.
  */
 describe('upgrade composition: ws hub + a second path owner + attachUpgradeFallback', () => {
-  // Mirrors the real path from @loki-labs/better-cezar-contract without importing the cluster
+  // Mirrors the real path from @loki-labs/cezar-plus-contract without importing the cluster
   // package — this file owns no cluster code.
   const CLUSTER_LINK_PATH = '/api/v1/cluster/link';
 

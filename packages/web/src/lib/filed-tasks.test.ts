@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { WorkspaceTodoEntry } from '@loki-labs/better-cezar-api-client'
+import type { WorkspaceTodoEntry } from '@loki-labs/cezar-plus-api-client'
 
 import {
   DEFAULT_FILED_SORT,

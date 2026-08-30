@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ApproveNoteInput, ApproveNoteResponse } from '@loki-labs/better-cezar-contract';
+import type { ApproveNoteInput, ApproveNoteResponse } from '@loki-labs/cezar-plus-contract';
 import { AGENT_MODELS_LOCKED_ERROR, agentModelsLocked } from '../core/agent-model-policy.ts';
 import type { RunRecord } from '../runs/store.ts';
 import type { TaskAuthor } from '../runs/task-author.ts';

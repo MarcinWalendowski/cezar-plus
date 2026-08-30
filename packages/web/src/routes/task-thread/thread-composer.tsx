@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link as WorkspaceLink } from 'react-router'
 
 import { useSendMessage } from '@/api/queries'
-import type { ApiRun } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun } from '@loki-labs/cezar-plus-api-client'
 import { Composer } from '@/components/composer/composer'
 
 import { useContinueAction } from './follow-up-engine'

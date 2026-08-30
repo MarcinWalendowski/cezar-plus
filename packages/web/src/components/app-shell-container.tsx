@@ -8,7 +8,7 @@ import {
   useRuns,
   useTodos,
 } from '@/api/queries'
-import type { HealthResponse } from '@loki-labs/better-cezar-api-client'
+import type { HealthResponse } from '@loki-labs/cezar-plus-api-client'
 import { AppShell, type RepoChip } from '@/components/app-shell'
 import { CommandPalette } from '@/components/command-palette'
 import { EngineLockBarContainer } from '@/components/engine-lock-bar'

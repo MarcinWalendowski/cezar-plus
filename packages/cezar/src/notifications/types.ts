@@ -6,7 +6,7 @@
  * Everything here is a plain interface, never a zod schema: these are in-memory domain shapes
  * consumed by `registry.ts`, `decider.ts` and (later) `transports/webhook.ts`, `observer.ts`,
  * `outbox.ts` — not wire shapes. The WIRE contract for the HTTP API lives in
- * `@loki-labs/better-cezar-contract` (`notifications.ts`, scaffold-owned); a future package adapts
+ * `@loki-labs/cezar-plus-contract` (`notifications.ts`, scaffold-owned); a future package adapts
  * between the two at the boundary, the same split `runs/store.ts` keeps from `contract/runs.ts`.
  *
  * This file, `registry.ts` and `decider.ts` are the three files under `src/notifications/`
@@ -17,7 +17,7 @@
 
 // ---- the closed event set ------------------------------------------------------------------
 
-/** Mirrors `notificationEventSchema` in `@loki-labs/better-cezar-contract` exactly — kept as a plain
+/** Mirrors `notificationEventSchema` in `@loki-labs/cezar-plus-contract` exactly — kept as a plain
  *  union here (rather than importing the zod-inferred type) because this file must not depend on
  *  the scaffold's wire package for its own internal vocabulary; `decider.test.ts` pins the two
  *  in agreement. */

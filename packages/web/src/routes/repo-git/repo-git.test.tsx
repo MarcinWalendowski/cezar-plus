@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
 import { queryKeys } from '@/api/queries'
-import type { ChangesPayload, GithubData, HealthResponse, RepoCommitPayload, RepoResponse } from '@loki-labs/better-cezar-api-client'
+import type { ChangesPayload, GithubData, HealthResponse, RepoCommitPayload, RepoResponse } from '@loki-labs/cezar-plus-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
 import { RepoGitRoute } from './repo-git'

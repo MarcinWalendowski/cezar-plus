@@ -23,7 +23,7 @@ import type {
   SetConfigInput,
   SetWorkspaceConfigInput,
   WorkspaceConfigResponse,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'

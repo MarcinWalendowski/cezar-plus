@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { ClusterOp } from '@loki-labs/better-cezar-contract';
+import type { ClusterOp } from '@loki-labs/cezar-plus-contract';
 import { compactOps, salvageOps, type CompactOpsInput, type SalvagedOps } from './ops.ts';
 
 /**

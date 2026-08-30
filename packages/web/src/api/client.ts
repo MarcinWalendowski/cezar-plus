@@ -173,7 +173,7 @@ import type {
   BackupRestoreResponse,
   BackupVerifyResponse,
   BackupGcResponse,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { parseProviderStatusResponse } from '@/lib/provider-status'
 import {
   API_PREFIX,
@@ -184,11 +184,11 @@ import {
   queryScope,
   runHistoryContextSchema,
   runHistoryPageSchema,
-} from '@loki-labs/better-cezar-api-client'
-import type { Ok, OkJson } from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
+import type { Ok, OkJson } from '@loki-labs/cezar-plus-api-client'
 import type { ClientResponse } from 'hono/client'
 import type { ResponseFormat } from 'hono/types'
-import type { AppType } from '@loki-labs/better-cezar/app-type'
+import type { AppType } from '@loki-labs/cezar-plus/app-type'
 
 /**
  * The cockpit's client for its own HTTP API.
@@ -301,7 +301,7 @@ function errorFor(status: number, statusText: string, body: string): ApiError {
 }
 
 /**
- * The typed client over the same service (`@loki-labs/better-cezar-api-client`).
+ * The typed client over the same service (`@loki-labs/cezar-plus-api-client`).
  *
  * Routes are being moved onto this one at a time. What it buys is compile-time checking of the
  * path, the request body and the response shape against the server's OWN handlers — the thing
@@ -385,7 +385,7 @@ async function unwrap<R extends ClientResponse<unknown, number, ResponseFormat>>
   if (!res.ok) throw errorFor(res.status, res.statusText, body)
   const parsed = parseJson(body)
   if (parsed === undefined) {
-    throw new ApiError(res.status, `the cezar server answered ${label} with a non-JSON body`)
+    throw new ApiError(res.status, `the cezar-plus server answered ${label} with a non-JSON body`)
   }
   return parsed as OkJson<R>
 }
@@ -424,7 +424,7 @@ async function unwrapValidated<R extends ClientResponse<unknown, number, Respons
   const parsed = await unwrap(res, label)
   const result = schema.safeParse(parsed)
   if (!result.success) {
-    throw new ApiError(status, `the cezar server answered ${label} with an unexpected body`)
+    throw new ApiError(status, `the cezar-plus server answered ${label} with an unexpected body`)
   }
   return result.data
 }
@@ -449,7 +449,7 @@ async function fetchOrThrow(url: string, init?: RequestInit): Promise<Response> 
     res = await fetch(url, { ...init, credentials: 'include', ...NO_REDIRECT })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
-    throw new ApiError(0, `cannot reach the cezar server (${url})`, { cause })
+    throw new ApiError(0, `cannot reach the cezar-plus server (${url})`, { cause })
   }
   throwIfIdentityGate(res, url)
   return res
@@ -466,7 +466,7 @@ async function fetchOrThrow(url: string, init?: RequestInit): Promise<Response> 
  *
  * Following it is what hid the bug. `fetch` follows by default, so a Cloudflare Access bounce to
  * `https://<team>.cloudflareaccess.com/…` was chased off-origin, rejected by CORS, and surfaced
- * as a `TypeError` — which this module then reported as "cannot reach the cezar server", blaming
+ * as a `TypeError` — which this module then reported as "cannot reach the cezar-plus server", blaming
  * a server that was answering fine. Not following turns that bounce into a fact.
  */
 export const NO_REDIRECT: Pick<RequestInit, 'redirect'> = { redirect: 'manual' }
@@ -491,7 +491,7 @@ export function throwIfIdentityGate(res: Response, url: string): void {
   if (res.type === 'opaqueredirect' || REDIRECT_STATUSES.has(res.status)) {
     throw new ApiError(
       0,
-      `signed out — ${url} was answered by an identity provider, not by cezar`,
+      `signed out — ${url} was answered by an identity provider, not by cezar-plus`,
       { identityGate: true },
     )
   }
@@ -1237,7 +1237,7 @@ export async function registerProject(root: string, teamId?: string): Promise<Re
     return parsed as RegisterProjectResponse
   }
   if (!res.ok) throw errorFor(res.status, res.statusText, body)
-  throw new ApiError(res.status, `the cezar server answered ${path} without a project`)
+  throw new ApiError(res.status, `the cezar-plus server answered ${path} without a project`)
 }
 
 /**
@@ -2920,7 +2920,7 @@ export async function startWorkspaceRun(
   if (!res.ok) throw errorFor(res.status, res.statusText, body)
   const parsed = parseJson(body)
   if (parsed === undefined) {
-    throw new ApiError(res.status, `the cezar server answered ${path} with a non-JSON body`)
+    throw new ApiError(res.status, `the cezar-plus server answered ${path} with a non-JSON body`)
   }
   return parsed as WorkspaceRunStartResponse
 }

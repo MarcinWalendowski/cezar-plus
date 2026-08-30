@@ -1,7 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import type { Context, MiddlewareHandler } from 'hono';
-import type { ClusterNodeId } from '@loki-labs/better-cezar-contract';
+import type { ClusterNodeId } from '@loki-labs/cezar-plus-contract';
 import { LINK_PRINCIPAL_MAX_AGE_MS } from './enrollment.ts';
 
 /**

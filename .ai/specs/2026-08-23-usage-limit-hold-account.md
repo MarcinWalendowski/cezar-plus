@@ -212,7 +212,7 @@ account and the reopening instant.
 
 ## API Contracts
 
-`@loki-labs/better-cezar-contract` gains three exports (`accountUsageKey`, `runAccountKey`,
+`@loki-labs/cezar-plus-contract` gains three exports (`accountUsageKey`, `runAccountKey`,
 `usageHoldAccountKey`) and they reach the cockpit through the api-client barrel, which re-exports
 the contract wholesale. `packages/cezar/src/workspace/agent-account-usage.ts` re-exports
 `accountUsageKey` so no importer in the service changed.

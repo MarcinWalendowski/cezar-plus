@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { workflowStepDefSchema as contractWorkflowStepDefSchema } from '@loki-labs/better-cezar-contract';
+import { workflowStepDefSchema as contractWorkflowStepDefSchema } from '@loki-labs/cezar-plus-contract';
 import { KNOWN_PRESETS_BY_RUNNER, modelConflictsWithRunner } from '../core/model-presets.ts';
 import type { RunnerId } from '../core/agent-runner.ts';
 import {

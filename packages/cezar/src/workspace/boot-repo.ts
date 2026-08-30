@@ -178,10 +178,10 @@ async function writeBootFiles(bootRoot: string): Promise<void> {
   const readme = [
     `# ${BOOT_REPO_MARKER}`,
     '',
-    "This directory is cezar's boot/scratch manager root. It holds no project work — the work",
+    "This directory is cezar-plus's boot/scratch manager root. It holds no project work — the work",
     'lives in the registered projects, which a workspace task reaches by absolute path.',
     '',
-    "`.ai/` is cezar's runtime state (run transcripts, `runs.json`, spools, handoff files, and the",
+    "`.ai/` is cezar-plus's runtime state (run transcripts, `runs.json`, spools, handoff files, and the",
     'per-task worktrees) and `.claude/` is agent configuration. Both are gitignored: they are',
     'state, not content.',
     '',
@@ -190,7 +190,7 @@ async function writeBootFiles(bootRoot: string): Promise<void> {
     'is not optional — `git worktree add` on a commitless repository succeeds and produces an',
     'EMPTY tree.',
     '',
-    'Created by cezar (`workspace/boot-repo.ts`); see',
+    'Created by cezar-plus (`workspace/boot-repo.ts`); see',
     '`.ai/specs/2026-08-21-workspace-boot-repo-and-always-worktrees.md`.',
     '',
   ].join('\n');

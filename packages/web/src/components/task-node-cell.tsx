@@ -1,4 +1,4 @@
-import type { TodoItem } from '@loki-labs/better-cezar-api-client'
+import type { TodoItem } from '@loki-labs/cezar-plus-api-client'
 import { useHealth } from '@/api/queries'
 import { useActiveClusterRuns, useClusterOverview } from '@/routes/settings/cluster-section'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'

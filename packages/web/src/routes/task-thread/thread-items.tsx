@@ -21,7 +21,7 @@ import { ZoomableImage } from '@/components/zoomable-image'
 import { formatToolDuration } from '@/lib/format'
 import { Link as WorkspaceLink } from 'react-router'
 import { Link } from '@/lib/project-router'
-import type { FileDiff, ToolKind, UiToolItem } from '@loki-labs/better-cezar-api-client'
+import type { FileDiff, ToolKind, UiToolItem } from '@loki-labs/cezar-plus-api-client'
 import { cn } from '@/lib/utils'
 
 import { Markdown } from './markdown'

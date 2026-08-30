@@ -3,7 +3,7 @@ import {
   type ClusterOp,
   type ClusterOpScope,
   type ClusterProjectKey,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { todoSchema, type TodoItem } from '../todos.ts';
 import { CLUSTER_META_TODO_FIELDS, newOpId } from './ops.ts';
 import {

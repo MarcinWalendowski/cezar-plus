@@ -1,4 +1,4 @@
-import type { ApiRun } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun } from '@loki-labs/cezar-plus-api-client'
 import { StatusDot } from '@/components/status-dot'
 import { toast } from '@/components/ui/toaster'
 import { useRetargetAction } from './retarget-engine'

@@ -1,7 +1,7 @@
 import { GitBranchIcon, GitCommitHorizontalIcon, TriangleAlertIcon } from 'lucide-react'
 
 import { useHealth, useWorkspaceGit } from '@/api/queries'
-import type { WorkspaceGitProject } from '@loki-labs/better-cezar-api-client'
+import type { WorkspaceGitProject } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Badge } from '@/components/ui/badge'
 import { workspaceViewsOffSubtitle } from '@/lib/capability-copy'

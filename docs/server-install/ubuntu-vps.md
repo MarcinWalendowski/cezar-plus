@@ -1,12 +1,12 @@
 # Remote access — Ubuntu / Debian VPS
 
-Host the cezar cockpit on a bare Ubuntu/Debian server, reachable over the
+Host the cezar-plus cockpit on a bare Ubuntu/Debian server, reachable over the
 internet, behind a login and (optionally) HTTPS.
 
-**How it's wired:** cezar itself stays **loopback-bound** (`127.0.0.1:4321`,
+**How it's wired:** cezar-plus itself stays **loopback-bound** (`127.0.0.1:4321`,
 `CEZ_REMOTE=1`). **nginx** is the only public surface — it terminates TLS,
-challenges every request with HTTP Basic-Auth, and proxies to cezar. A systemd
-service keeps cezar running and restarts it on boot.
+challenges every request with HTTP Basic-Auth, and proxies to cezar-plus. A systemd
+service keeps cezar-plus running and restarts it on boot.
 
 ```
   internet ──HTTPS──► nginx (:443)  ──proxy──►  cezar (127.0.0.1:4321)
@@ -47,7 +47,7 @@ npx cezar-cli server-install --platform ubuntu-vps
 Or from a git checkout on the box:
 
 ```bash
-git clone https://github.com/open-mercato/cezar && cd cezar
+git clone https://github.com/MarcinWalendowski/cezar-plus && cd cezar-plus
 npm install && npm run build
 node packages/cezar/dist/index.js server-install --platform ubuntu-vps
 ```
@@ -59,15 +59,15 @@ node packages/cezar/dist/index.js server-install --platform ubuntu-vps
 | **Dependencies** | Detects `claude` / `codex` / `opencode` / `gh` / `git`; offers to install the missing ones. At least one agent CLI is required. |
 | **Reverse proxy** | Installs **nginx**, writes an `auth_basic` + SSE-safe proxy vhost, creates the **htpasswd** identity file, and — if `ufw` is active — allows `Nginx Full` (ports 80/443). |
 | **Domain + SSL** *(optional)* | Points the vhost's `server_name` at your domain, then runs `certbot --nginx` for a Let's Encrypt certificate with auto-redirect. Skippable — you can add it later. |
-| **Service** | Installs a **systemd** unit (rootless `--user` + linger where possible, else a system unit), **starts cezar now**, enables it on boot, and waits for it to answer on the loopback port. |
-| **Verify** | Confirms an anonymous request is challenged (401) **and** that an authenticated request actually reaches cezar (2xx/3xx) — a real end-to-end check, not just "nginx is up". |
+| **Service** | Installs a **systemd** unit (rootless `--user` + linger where possible, else a system unit), **starts cezar-plus now**, enables it on boot, and waits for it to answer on the loopback port. |
+| **Verify** | Confirms an anonymous request is challenged (401) **and** that an authenticated request actually reaches cezar-plus (2xx/3xx) — a real end-to-end check, not just "nginx is up". |
 
 ### Setting the cockpit login
 
 During the reverse-proxy step you pick the **username** (defaults to your OS
 user) and a **password** — either type your own or let the installer **generate
 a strong one** (shown once, so save it). This is the HTTP Basic-Auth credential
-you enter in the browser over HTTPS. cezar stores only a hash.
+you enter in the browser over HTTPS. cezar-plus stores only a hash.
 
 ### The privileged-command prompt
 
@@ -84,9 +84,9 @@ Your choice is remembered for the rest of the run.
 
 ## The box already has a reverse proxy (Dokploy, Coolify, Caddy…)
 
-The default install above assumes cezar owns the HTTP front. If something else
+The default install above assumes cezar-plus owns the HTTP front. If something else
 already serves **:80/:443** — Dokploy/Coolify (which run **Traefik** in Docker),
-a hand-rolled nginx, Caddy — installing cezar's nginx would fight it for those
+a hand-rolled nginx, Caddy — installing cezar-plus's nginx would fight it for those
 ports. Use `--external-proxy`:
 
 ```bash
@@ -102,7 +102,7 @@ internet ──HTTPS──► your proxy (Traefik/Caddy/nginx) ──► cezar (
                     TLS + auth are YOURS to configure          systemd service
 ```
 
-> ⚠️ **cezar has no built-in authentication.** In the default install nginx's
+> ⚠️ **cezar-plus has no built-in authentication.** In the default install nginx's
 > basic-auth is that gate; with `--external-proxy` there is none, and anyone who
 > can reach the bound host:port can run agents on your box. Put auth on the proxy
 > and keep the port off the public internet (ufw / cloud firewall).
@@ -147,7 +147,7 @@ only removes the service — it never touches the proxy it doesn't own).
 
 ## Updating / redeploying a new version
 
-Once a new cezar is available (a fresh local build, or a newly published
+Once a new cezar-plus is available (a fresh local build, or a newly published
 `cezar-cli`), reload the running service with one standardized command:
 
 ```bash
@@ -182,7 +182,7 @@ The installer is also **idempotent** if you need to change the setup itself:
 
 ## Hosting several cockpits on one box (multiple domains)
 
-One VPS can run **several independent cezar cockpits**, one per domain. Each
+One VPS can run **several independent cezar-plus cockpits**, one per domain. Each
 instance gets its **own** loopback port, nginx site, htpasswd, systemd service,
 and state file — they share only nginx and certbot, which route by `Host`
 header. Pass `--domain` to select or create an instance:
@@ -237,7 +237,7 @@ What differs per instance:
 node packages/cezar/dist/index.js server-uninstall --platform ubuntu-vps
 ```
 
-Removes what cezar **owns**: the nginx vhost, htpasswd, systemd unit, and boot
+Removes what cezar-plus **owns**: the nginx vhost, htpasswd, systemd unit, and boot
 linger (when this install enabled it); the distro's default nginx site is
 re-enabled if the install disabled it. Shared tools it merely *lists* for you
 to remove by hand (agent CLIs, `gh`, and — when this install added them —
@@ -250,7 +250,7 @@ break other vhosts).
 
 | Symptom | Cause & fix |
 |---------|-------------|
-| `502 Bad Gateway` | cezar isn't running. `systemctl status cezar` / `journalctl -u cezar -n 50`. |
+| `502 Bad Gateway` | cezar-plus isn't running. `systemctl status cezar` / `journalctl -u cezar -n 50`. |
 | `status=203/EXEC — Unable to locate executable` | An old unit with a bare `ExecStart`. Re-run `--reconfigure autostart`; the unit now uses an absolute `<node> <entry>`. |
 | "no gh / claude installed" but you have them | Launched from a non-login shell without `~/.local/bin`/nvm on PATH. The current installer merges your login-shell PATH; update and re-run. |
 | certbot "verification failed" but it succeeded | Fixed — verification now reads the world-readable nginx vhost, not root-only `/etc/letsencrypt/live`. |

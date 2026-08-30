@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { ApiError } from '@/api/client'
 import { useAgentConfig, useAgentConfigFile, useHealth, usePutAgentConfigFile } from '@/api/queries'
-import type { AgentConfigFile, AgentConfigListing, Runner } from '@loki-labs/better-cezar-api-client'
+import type { AgentConfigFile, AgentConfigListing, Runner } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { CodeEditor } from '@/components/code-editor'
 import { Badge } from '@/components/ui/badge'
@@ -203,7 +203,7 @@ function UserMcpBlock({ userMcp }: { userMcp: NonNullable<AgentConfigListing['us
     <div data-slot="agent-config-user-mcp" className="mt-3">
       <h4 className="mb-1 text-[12px] font-semibold">User &amp; local scopes</h4>
       <p className="mb-2 text-[12px] text-soft-foreground">
-        Managed by <code className="font-mono">claude mcp add</code> in {userMcp.path} — cezar does not edit
+        Managed by <code className="font-mono">claude mcp add</code> in {userMcp.path} — cezar-plus does not edit
         Claude’s state file.
       </p>
       {userMcp.readable ? (

@@ -7,7 +7,7 @@ import {
   agentPoolId,
   type LockableRunner,
   type Runner,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import {
   DropdownMenu,
   DropdownMenuContent,

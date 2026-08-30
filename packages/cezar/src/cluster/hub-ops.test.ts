@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CLUSTER_PROTOCOL, type ClusterAckResult, type ClusterOp, type ClusterOpsFrame } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_PROTOCOL, type ClusterAckResult, type ClusterOp, type ClusterOpsFrame } from '@loki-labs/cezar-plus-contract';
 import { applyOpsFrame, type HubOpAllocation, type HubOpOutcome, type HubOpsDeps } from './hub-ops.ts';
 
 /**

@@ -10,7 +10,7 @@ import type {
   RunIndexEntry,
   RunRecord,
   Skill,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import {
   CommandPalette,
   mergeTasks,

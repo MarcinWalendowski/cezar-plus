@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { LockableRunner } from '@loki-labs/better-cezar-contract';
+import type { LockableRunner } from '@loki-labs/cezar-plus-contract';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agentAccountUsagePath } from '../paths.ts';
 import { RunStore } from '../runs/store.ts';

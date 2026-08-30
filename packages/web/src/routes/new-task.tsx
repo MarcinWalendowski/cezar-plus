@@ -18,7 +18,7 @@ import {
   Link as WorkspaceLink,
 } from 'react-router'
 
-import { agentPoolId, isAgentPoolId } from '@loki-labs/better-cezar-api-client'
+import { agentPoolId, isAgentPoolId } from '@loki-labs/cezar-plus-api-client'
 import { Link, scopeTo, useNavigate } from '@/lib/project-router'
 
 import { createRun, createTodo, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
@@ -47,7 +47,7 @@ import type {
   Runner,
   Skill,
   WorkflowDef,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { TwinkleBackdrop } from '@/components/centered-state'
 import { Composer, type ComposerHandle } from '@/components/composer/composer'
 import { GhostCodeBackdrop } from '@/components/ghost-code-backdrop'

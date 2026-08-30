@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { collectSecretValues, redactDeep, redactSecrets } from '../core/secret-redaction.ts';
 // Type-only module (zod + nothing else), so this cannot cycle back into the store.
 import { workflowDefSchema } from '../workflows/types.ts';
-import { pendingApprovalSchema, pendingHandoffSchema, testAttestationSchema } from '@loki-labs/better-cezar-contract';
+import { pendingApprovalSchema, pendingHandoffSchema, testAttestationSchema } from '@loki-labs/cezar-plus-contract';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 import { resolveContextWindow } from '../core/context-window.ts';
@@ -21,7 +21,7 @@ import {
 import type { RunnerId } from '../core/agent-runner.ts';
 // Type-only, so no runtime edge is added from the store to the contract package — one definition
 // of a workspace run's grant entry, shared rather than re-declared.
-import type { WorkspaceGrantProject } from '@loki-labs/better-cezar-contract';
+import type { WorkspaceGrantProject } from '@loki-labs/cezar-plus-contract';
 
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'review' | 'done' | 'failed' | 'cancelled';
 /**
@@ -561,7 +561,7 @@ export const runRecordSchema = z.object({
    * verification **C3**.
    *
    * A new optional FIELD, never a new `RunStatus` member, and for the same reason `stopReason`
-   * above is one: cezar is published as `@loki-labs/better-cezar` and `RunStatus` is a wire enum
+   * above is one: cezar is published as `@loki-labs/cezar-plus` and `RunStatus` is a wire enum
    * every consumer switches over exhaustively, so widening it breaks installs this repo does not
    * control. `status` stays whatever it was; this field carries the one fact `status` cannot.
    *
@@ -791,7 +791,7 @@ export function reconcileLoadedRun(run: RunRecord, opts?: { keepLive?: boolean }
     (run.status === 'running' || run.status === 'queued' || run.status === 'waiting')
   ) {
     run.status = 'failed';
-    run.error = 'interrupted — cezar process exited during the run';
+    run.error = 'interrupted — cezar-plus process exited during the run';
     run.finishedAt = run.finishedAt ?? new Date().toISOString();
     for (const step of run.steps) {
       if (step.status === 'running' || step.status === 'waiting') step.status = 'failed';

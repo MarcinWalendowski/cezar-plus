@@ -17,7 +17,7 @@ import {
   type ClusterUplinkFrame,
   type ClusterWatermark,
   type WorkflowDef,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { workspaceConfigPath } from '../paths.ts';
 import { applyHubReplica as applyHubReplicaFile, readTodos as readTodosFile, type ApplyHubReplicaInput, type TodoItem } from '../todos.ts';
 import { startTodoRun, type StartTodoRunProject } from '../todo-autostart.ts';

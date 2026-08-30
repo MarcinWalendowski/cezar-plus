@@ -17,5 +17,5 @@
 export function workspaceViewsOffSubtitle(singleProject: boolean | undefined): string {
   return singleProject === true
     ? 'This cockpit runs one project (CEZ_SINGLE_PROJECT=1), so there is nothing to show across projects.'
-    : 'Cross-project views are on by default — this server has them switched off with CEZ_WORKSPACE_VIEWS=0. Unset it and restart cezar.'
+    : 'Cross-project views are on by default — this server has them switched off with CEZ_WORKSPACE_VIEWS=0. Unset it and restart cezar-plus.'
 }

@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { clusterTodoFieldsSchema, todoItemSchema, type ClusterAckResult, type ClusterOp } from '@loki-labs/better-cezar-contract';
+import { clusterTodoFieldsSchema, todoItemSchema, type ClusterAckResult, type ClusterOp } from '@loki-labs/cezar-plus-contract';
 import {
   applyHubReplica,
   appendTodosPreservingIds,

@@ -3,7 +3,7 @@
 We moved from TypeScript 5.6 to 7.0, the Go-native compiler rewrite. TypeScript 7 ships no
 JavaScript compiler API — `require("typescript")` returns only `{ version, versionMajorMinor }`,
 and `tsserver` is gone — which currently blocks typescript-eslint, ts-jest, and Volar-based
-tooling. Cezar uses `tsc` purely as a compiler and typechecker: it has no linter that consumes
+tooling. Cezar-plus uses `tsc` purely as a compiler and typechecker: it has no linter that consumes
 the compiler API (oxlint, our chosen linter, does not — see Consequences), no other programmatic
 API consumer, and vite/vitest/tsx strip types with esbuild and never load the `typescript`
 package. None of the blockers apply to us, so we took 7.0 directly rather than parking on the

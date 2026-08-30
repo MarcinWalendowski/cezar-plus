@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { createRunInputSchema } from '@loki-labs/better-cezar-contract'
+import { createRunInputSchema } from '@loki-labs/cezar-plus-contract'
 
 /**
  * `createRunInputSchema` — the CONTRACT half of "at most one of workflow/steps" (spec

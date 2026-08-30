@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ClusterLinkHealth, StoredClusterNodeIdentity } from '@loki-labs/better-cezar-contract';
+import type { ClusterLinkHealth, StoredClusterNodeIdentity } from '@loki-labs/cezar-plus-contract';
 import { ClusterLinkClient } from './link-client.ts';
 
 /** Fails with a message naming what was awaited, rather than vitest's generic hook timeout — a bare

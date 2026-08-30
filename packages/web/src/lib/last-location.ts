@@ -1,7 +1,7 @@
 import type {
   ProjectsResponse,
   WorkspaceLastLocation,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 
 import { pathnameProjectId } from './project-router'
 

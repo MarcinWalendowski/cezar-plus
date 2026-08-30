@@ -14,7 +14,7 @@ import type {
   Skill,
   WorkspaceConfigResponse,
   WorkflowsResponse,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
 
 import { readDraft, resetDraft, writeDraft } from './new-task-draft'

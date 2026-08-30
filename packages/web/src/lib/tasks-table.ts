@@ -1,4 +1,4 @@
-import type { ProcessUsage, RunRecord, RunStatus } from '@loki-labs/better-cezar-api-client'
+import type { ProcessUsage, RunRecord, RunStatus } from '@loki-labs/cezar-plus-api-client'
 import { groupTitle, runTitle, type ListView } from '@/lib/task-groups'
 
 /**

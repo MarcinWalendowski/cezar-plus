@@ -57,7 +57,7 @@ criteria, available actions) plus a new analytics event for "opened filed-task d
   `FiledDetailDialog` (952–963). Title-click triggers: `FiledRow` (1103–1229, button at
   1146–1156) and `FiledCard` (1237–1334, button at 1276–1284), both wired via
   `onOpenDetail={() => setDetail(entry)}` (870, 925). Row/card type is `WorkspaceTodoEntry`
-  (`@loki-labs/better-cezar-api-client`), keyed `${entry.project}:${entry.todo.id}` — the
+  (`@loki-labs/cezar-plus-api-client`), keyed `${entry.project}:${entry.todo.id}` — the
   project is already known at click time.
 - **`FiledDetailDialog`, same file, 1347–1502.** Renders status/priority pills, project link,
   filed date (1406–1419); `context` (1421–1428), `whatToDo` (1430–1439),

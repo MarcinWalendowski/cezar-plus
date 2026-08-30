@@ -260,7 +260,7 @@ export async function initGitRepo(path: string): Promise<GitInitResult> {
     return {
       ok: false,
       status: 400,
-      error: `this folder holds more than ${MAX_SCANNED_FILES.toLocaleString('en-US')} files — too many to check for secrets, so cezar will not commit it blind`,
+      error: `this folder holds more than ${MAX_SCANNED_FILES.toLocaleString('en-US')} files — too many to check for secrets, so cezar-plus will not commit it blind`,
     };
   }
   if (pre.oversized.length > 0) {
@@ -332,7 +332,7 @@ async function writeGitignore(path: string, sensitive: string[]): Promise<string
   const present = new Set(existing.split('\n').map((line) => line.trim()));
   const additions = sensitive.map((rel) => `/${rel}`).filter((line) => !present.has(line));
   if (additions.length === 0) return sensitive;
-  const header = '# added by cezar — detected secrets, excluded from the first commit';
+  const header = '# added by cezar-plus — detected secrets, excluded from the first commit';
   const prefix = existing === '' ? '' : existing.endsWith('\n') ? '\n' : '\n\n';
   await writeFile(file, `${existing}${prefix}${header}\n${additions.join('\n')}\n`, 'utf8');
   return sensitive;

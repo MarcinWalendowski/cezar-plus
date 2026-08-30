@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { WorkspaceTodoEntry } from '@loki-labs/better-cezar-api-client'
+import type { WorkspaceTodoEntry } from '@loki-labs/cezar-plus-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
 import { FiledTaskDetailRoute } from './filed-task-detail'

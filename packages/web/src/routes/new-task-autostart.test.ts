@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { CreateRunInput } from '@loki-labs/better-cezar-api-client'
+import type { CreateRunInput } from '@loki-labs/cezar-plus-api-client'
 
 import { bookmarkletRunBody, deepLinkToast, unknownSkillPrefillText } from './new-task-autostart'
 import type { NewTaskParams } from './new-task-params'

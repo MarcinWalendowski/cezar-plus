@@ -1,4 +1,4 @@
-import type { ClusterActiveRun, ClusterNode, TodoItem } from '@loki-labs/better-cezar-api-client'
+import type { ClusterActiveRun, ClusterNode, TodoItem } from '@loki-labs/cezar-plus-api-client'
 import { shortAge } from '@/lib/format'
 
 /**

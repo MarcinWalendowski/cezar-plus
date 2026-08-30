@@ -1,7 +1,7 @@
 import { FolderSearchIcon } from 'lucide-react'
 import { Link } from 'react-router'
 
-import type { ProjectsResponse } from '@loki-labs/better-cezar-api-client'
+import type { ProjectsResponse } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 
 /**
@@ -32,7 +32,7 @@ export function UnknownProjectRoute({
         icon={<FolderSearchIcon />}
         tone="neutral"
         title={`“${projectId}” isn’t registered here`}
-        subtitle="This cezar doesn’t serve a project by that id. The link may come from another machine’s workspace — these are the projects registered on this one:"
+        subtitle="This cezar-plus doesn’t serve a project by that id. The link may come from another machine’s workspace — these are the projects registered on this one:"
       >
         <ul data-slot="registered-projects" className="mx-auto flex w-full max-w-xs flex-col gap-1.5 text-left">
           {projects.map((project) => (

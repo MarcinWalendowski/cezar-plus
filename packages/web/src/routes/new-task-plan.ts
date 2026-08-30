@@ -4,7 +4,7 @@ import type {
   PlanResponse,
   Runner,
   WorkflowStepDef,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 
 import { runnerOverride } from './new-task-form'
 

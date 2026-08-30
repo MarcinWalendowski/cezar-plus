@@ -6,7 +6,7 @@ import type {
   UpdateTodoInput,
   WorkspaceTodoEntry,
   WorkspaceTodosResponse,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { toast } from '@/components/ui/toaster'
 import { applyFiledPatch } from '@/lib/filed-tasks'
 import { scopeTo, useNavigate } from '@/lib/project-router'

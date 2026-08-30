@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeftIcon, BookOpenIcon, SearchXIcon, TriangleAlertIcon } from 'lucide-react'
 import { Virtualizer } from 'virtua'
 
-import { queryScope, type KnowledgeDocumentList, type KnowledgeFacetBucket } from '@loki-labs/better-cezar-api-client'
+import { queryScope, type KnowledgeDocumentList, type KnowledgeFacetBucket } from '@loki-labs/cezar-plus-api-client'
 import { searchKnowledge } from '@/api/client'
 import { queryKeys, useHealth, useKnowledge, useKnowledgeDocument, useKnowledgeDocuments } from '@/api/queries'
 import { subscribeTopic } from '@/api/ws'
@@ -119,7 +119,7 @@ export function KnowledgeRoute() {
             icon={<BookOpenIcon />}
             tone="neutral"
             title="The knowledge base is off"
-            subtitle="Set CEZ_KB=1 and restart cezar to turn it on."
+            subtitle="Set CEZ_KB=1 and restart cezar-plus to turn it on."
             heading="h2"
           />
         </div>

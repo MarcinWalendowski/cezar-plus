@@ -10,7 +10,7 @@ import type {
   sourceLogResponseSchema,
   sourceProvidersResponseSchema,
   sourcesListResponseSchema,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { AppType } from './app-type.ts';
 
 /**

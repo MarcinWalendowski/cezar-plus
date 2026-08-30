@@ -3,7 +3,7 @@ import {
   parseAgentRoute,
   type AgentRoute,
   type LockableRunner,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type {
   ProviderId,
   ProviderStatusResponse,
@@ -113,7 +113,7 @@ export const NO_PROVIDER_AUTHORIZED_MESSAGE =
 /** Something IS connected, but only a provider that cannot carry an account (OpenCode, pi) — so no
  *  account fallback could ever rescue this dispatch, and the message must not pretend one might. */
 export function noEligibleFallbackMessage(provider: ProviderId): string {
-  return `${LABEL[provider]} credentials are unavailable, and no account cezar can move this to is authorized. Authorize it in Settings → Agents → Providers.`;
+  return `${LABEL[provider]} credentials are unavailable, and no account cezar-plus can move this to is authorized. Authorize it in Settings → Agents → Providers.`;
 }
 
 /** An eligible connected account exists SOMEWHERE, but not inside this dispatch's own candidate

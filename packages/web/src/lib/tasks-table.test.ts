@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ProcessUsage, RunRecord } from '@loki-labs/better-cezar-api-client'
+import type { ProcessUsage, RunRecord } from '@loki-labs/cezar-plus-api-client'
 import {
   compareGroups,
   contextCell,
@@ -454,7 +454,7 @@ describe('taskIssueUrl', () => {
 // `runs.json` genuinely holds a run whose `issueNumber: 475` names `open-mercato/cezar`'s #475,
 // not this repo's own (nonexistent) #475 — the fixture below mirrors that live case.
 describe('the foreign-number guard (namesNumberElsewhere, via taskIssueUrl/taskReferences)', () => {
-  const OWN_REPO = 'https://github.com/MarcinWalendowski/cezar'
+  const OWN_REPO = 'https://github.com/MarcinWalendowski/cezar-plus'
   const FOREIGN_ISSUE = 'https://github.com/open-mercato/cezar/issues/475'
   const FOREIGN_PR = 'https://github.com/open-mercato/cezar/pull/475'
 

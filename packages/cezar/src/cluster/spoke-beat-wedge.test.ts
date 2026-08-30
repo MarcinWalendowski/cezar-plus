@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CLUSTER_PROTOCOL, type ClusterDownlinkFrame, type ClusterPresenceFrame, type ClusterUplinkFrame } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_PROTOCOL, type ClusterDownlinkFrame, type ClusterPresenceFrame, type ClusterUplinkFrame } from '@loki-labs/cezar-plus-contract';
 import { collectRepoFreshness } from './peers.ts';
 import { startSpokeRuntime, type OutboxDiscovery, type SpokeLink } from './spoke-runtime.ts';
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { RunRecord, RunStatus } from '@loki-labs/better-cezar-api-client'
+import type { RunRecord, RunStatus } from '@loki-labs/cezar-plus-api-client'
 import { wantsAttention } from '@/lib/attention'
 import {
   DEFAULT_NOTIFICATIONS,

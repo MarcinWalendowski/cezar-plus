@@ -7,7 +7,7 @@ import {
   type ClusterActiveRun,
   type ClusterRemoteRun,
   type StoredClusterNode,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { readAllocations } from '../cluster/allocate.ts';
 import { readLeases } from '../cluster/leases.ts';
 import {

@@ -6,7 +6,7 @@ import { RunStore } from '../runs/store.ts';
 import { localCliAuthor } from '../runs/task-author.ts';
 import type { RunManager, StartRunInput } from '../workflows/run.ts';
 import type { WorkflowDef } from '../workflows/types.ts';
-import { CLUSTER_PROTOCOL } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_PROTOCOL } from '@loki-labs/cezar-plus-contract';
 import { ensureNodeIdentity } from '../cluster/node-identity.ts';
 import {
   CODE_AUTHENTICATED_CLUSTER_PATHS,

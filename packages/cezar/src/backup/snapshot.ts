@@ -8,7 +8,7 @@ import type {
   BackupRunSummary,
   BackupSnapshot,
   BackupVerifyResponse,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { cezarHomeDir } from '../paths.ts';
 import {
   SCRYPT_PARAMS,

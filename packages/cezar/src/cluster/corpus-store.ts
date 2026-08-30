@@ -8,7 +8,7 @@ import {
   CLUSTER_CORPUS_DEFAULT_SCOPE,
   type ClusterCorpusDoc,
   type ClusterCorpusManifestResponse,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { cezarHomeDir, expandTilde } from '../paths.ts';
 import { atomicWriteJsonSync } from '../workspace/config.ts';
 

@@ -1,4 +1,4 @@
-import type { TaskAuthor } from '@loki-labs/better-cezar-api-client'
+import type { TaskAuthor } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * The pure half of the Author column (`.ai/specs/2026-08-21-task-author-provenance.md`, Phase 4):
@@ -69,7 +69,7 @@ export function authorLabel(author: TaskAuthor | undefined): string {
     case 'automation':
       return author.label ?? 'automation'
     case 'system':
-      return 'cezar'
+      return 'cezar-plus'
     default:
       // A `kind` a newer server added. Show it rather than inventing a category for it.
       return author.kind
@@ -97,7 +97,7 @@ export function authorTitle(author: TaskAuthor | undefined): string {
     case 'automation':
       return `Started by ${author.label ?? `automation ${author.id}`} via ${via}`
     case 'system':
-      return `Started by cezar itself via ${via}`
+      return `Started by cezar-plus itself via ${via}`
     default:
       return `Started by ${author.id} via ${via}`
   }
@@ -121,7 +121,7 @@ export function authorFacetLabel(facet: string): string {
   if (facet === 'unattributed') return UNATTRIBUTED_LABEL
   if (facet === 'api') return 'API'
   if (facet === 'agent') return 'Agent'
-  if (facet === 'system') return 'cezar'
+  if (facet === 'system') return 'cezar-plus'
   const [kind, ...rest] = facet.split(':')
   const id = rest.join(':')
   if (kind === 'user') return id

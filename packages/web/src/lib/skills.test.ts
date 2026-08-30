@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { Skill, WorkflowDef } from '@loki-labs/better-cezar-api-client'
+import type { Skill, WorkflowDef } from '@loki-labs/cezar-plus-api-client'
 
 import {
   bumpSkillUsage,

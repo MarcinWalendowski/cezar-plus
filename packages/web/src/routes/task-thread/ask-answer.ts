@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 
 import { ApiError } from '@/api/client'
 import { useContinueRun, useSendMessage } from '@/api/queries'
-import type { ApiRun, RunRecord } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, RunRecord } from '@loki-labs/cezar-plus-api-client'
 
 import { isRunActive, lastSessionId, runActionFlags } from './run-actions'
 

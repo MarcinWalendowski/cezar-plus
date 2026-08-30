@@ -1,6 +1,6 @@
 import { LoaderCircleIcon } from 'lucide-react'
 
-import type { RunActivity, RunEvent } from '@loki-labs/better-cezar-api-client'
+import type { RunActivity, RunEvent } from '@loki-labs/cezar-plus-api-client'
 import { formatDuration } from '@/lib/format'
 import { useNow } from '@/lib/use-now'
 import { cn } from '@/lib/utils'

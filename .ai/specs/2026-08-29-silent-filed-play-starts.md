@@ -58,8 +58,8 @@ requiring the board to opt out prevents this focused UI behavior from changing t
 
 1. Focused regression: click a Filed-row play control, observe the correct project-scoped POST, and
    assert the pathname remains `/tasks`.
-2. `npm run test -w @loki-labs/better-cezar-web -- src/routes/global-tasks.test.tsx` was not run,
+2. `npm run test -w @loki-labs/cezar-plus-web -- src/routes/global-tasks.test.tsx` was not run,
    at the user's instruction.
-3. `npm run typecheck -w @loki-labs/better-cezar-web` was not run, at the user's instruction.
+3. `npm run typecheck -w @loki-labs/cezar-plus-web` was not run, at the user's instruction.
 4. Runtime browser E2E is required before calling this user-facing change fully verified. It is QA
    Needed if that browser pass is not run.

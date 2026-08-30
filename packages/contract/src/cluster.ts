@@ -584,7 +584,7 @@ export type ClusterTodoFields = z.infer<typeof clusterTodoFieldsSchema>;
  * host. Nothing may be added here that would let a foreign run request one.
  *
  * `unreachable` is a separate optional field beside `status`, **never a new `RunStatus`** (D10):
- * `RunStatus` ships in `@loki-labs/better-cezar` and a published wire enum is never widened
+ * `RunStatus` ships in `@loki-labs/cezar-plus` and a published wire enum is never widened
  * (PLAN P8) — the same reason a budget stop is `review` + `stopReason`.
  */
 export const clusterRemoteRunSchema = runIndexEntrySchema
@@ -905,7 +905,7 @@ export type ClusterSelf = z.infer<typeof clusterSelfSchema>;
  * build parses an unrecognized reason as an INVALID frame and drops it whole (`link-client.ts`'s
  * `parseDownlink`), so it sees a bare close with no stated cause: the exact silent failure D40
  * exists to remove, delivered by the mechanism meant to explain it. `handshake-timeout` was added
- * on 2026-08-23 after checking that no such spoke can exist — `@loki-labs/better-cezar` has never
+ * on 2026-08-23 after checking that no such spoke can exist — `@loki-labs/cezar-plus` has never
  * been published (`npm view` → 404), `packages/contract` is private, and `CEZ_CLUSTER` is unset on
  * every box. **Re-check both before adding the next one**, and prefer teaching the spoke to parse
  * this leniently (a known-value union with an `unknown` fallback) over relying on that check
@@ -1490,7 +1490,7 @@ export type ClusterLeaseReleaseResponse = z.infer<typeof clusterLeaseReleaseResp
 /**
  * The kind of scarce shared identity being handed out. A bounded string, not a union — `sources.ts`
  * makes the argument: a literal union is the `ForgeKind` mistake, and this one is published in
- * `@loki-labs/better-cezar-contract`, where widening an enum is exactly what PLAN P8 forbids.
+ * `@loki-labs/cezar-plus-contract`, where widening an enum is exactly what PLAN P8 forbids.
  *
  * `spec-number` is the first, and it is the one that matters: `next-spec` reads one disk and
  * reserves NOTHING, so two spokes collide more readily than two local sessions do. **Skipping this

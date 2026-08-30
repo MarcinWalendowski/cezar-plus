@@ -1,6 +1,6 @@
 import { PlayIcon } from 'lucide-react'
 
-import type { ApiRun, Runner } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, Runner } from '@loki-labs/cezar-plus-api-client'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,

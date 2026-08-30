@@ -1,4 +1,4 @@
-import type { CreateRunInput, GithubItem, WorkflowStepDef } from '@loki-labs/better-cezar-api-client'
+import type { CreateRunInput, GithubItem, WorkflowStepDef } from '@loki-labs/cezar-plus-api-client'
 
 /**
  * The GitHub tab's hand-to-agent contract, ported verbatim from the legacy tab

@@ -128,7 +128,7 @@ async function confirmCezarRunning(ctx: InstallContext, statusCmd: string, logsC
     ctx.ui.warn(
       `cezar is not answering on 127.0.0.1:${ctx.state.primaryPort} yet — nginx will return 502 until it is.\n` +
         `Check the service:\n  • ${statusCmd}\n  • ${logsCmd}\n` +
-        'Common causes: the WorkingDirectory has no built cezar, or the port is wrong.',
+        'Common causes: the WorkingDirectory has no built cezar-plus, or the port is wrong.',
     );
   }
 }
@@ -152,7 +152,7 @@ server {
     # adds a 443 ssl listener (certbot preserves this directive).
     http2 on;
 
-    auth_basic "cezar";
+    auth_basic "cezar-plus";
     auth_basic_user_file ${htpasswd};
 
     location / {
@@ -269,7 +269,7 @@ const nginxProxyStep: InstallStep = {
       if (how === 'generate') {
         password = generatePassword();
         ctx.ui.note(
-          `Username: ${user}\nPassword: ${password}\n\nSave these now — this is your cockpit login. cezar stores only a hash; the plaintext is not written anywhere and cannot be recovered.`,
+          `Username: ${user}\nPassword: ${password}\n\nSave these now — this is your cockpit login. cezar-plus stores only a hash; the plaintext is not written anywhere and cannot be recovered.`,
           'Generated cockpit credentials',
         );
       } else {
@@ -665,7 +665,7 @@ async function resolveExecStart(ctx: InstallContext): Promise<string> {
     globalBin = out.split('\n').map((s) => s.trim()).filter(Boolean).pop();
     if (!globalBin) {
       ctx.ui.warn(
-        `Could not locate a built cezar to run (${entry} missing, no global ${OFFICIAL_CLI_PKG}).\n` +
+        `Could not locate a built cezar-plus to run (${entry} missing, no global ${OFFICIAL_CLI_PKG}).\n` +
           `Install it (npm i -g ${OFFICIAL_CLI_PKG}) or build the checkout, then re-run with --reconfigure autostart.`,
       );
     }
@@ -778,7 +778,7 @@ export function parseSystemdEnvironmentProperty(showOutput: string): NodeJS.Proc
 /**
  * **Upgrade safety for a host installed BEFORE D1's boot gate existed.** ADDED 2026-08-07.
  *
- * The released `@loki-labs/better-cezar` 0.9.2 installer wrote a unit carrying `Environment=CEZ_REMOTE=1`
+ * The released `@loki-labs/cezar-plus` 0.9.2 installer wrote a unit carrying `Environment=CEZ_REMOTE=1`
  * and `Environment=PATH=…` and nothing else. D1's gate then shipped, refusing to boot a hosted
  * deployment that names neither `CEZ_AUTH` nor `CEZ_ALLOW_UNAUTHENTICATED` — and D1's amendment 2
  * added the flag to `systemdUnit` so a FRESH install is fine. It never reaches an existing host on
@@ -797,7 +797,7 @@ export function parseSystemdEnvironmentProperty(showOutput: string): NodeJS.Proc
 export function describeBootGateUpgradeRisk(unitEnv: NodeJS.ProcessEnv, unitName: string): string | undefined {
   if (resolveAuthBootGate(unitEnv).proceed) return undefined;
   return (
-    `The installed ${unitName} unit predates cezar's hosted-mode boot gate: it sets CEZ_REMOTE=1 but names\n` +
+    `The installed ${unitName} unit predates cezar-plus's hosted-mode boot gate: it sets CEZ_REMOTE=1 but names\n` +
     `neither CEZ_AUTH nor CEZ_ALLOW_UNAUTHENTICATED, so the new version will REFUSE to start and\n` +
     `Restart=on-failure will loop. This platform fronts the service with an nginx auth_basic vhost, so the\n` +
     `flag is the right answer for it — re-run the installer to have it rewritten for you:\n` +
@@ -941,7 +941,7 @@ async function verifyBehindExternalProxy(ctx: InstallContext): Promise<{ artifac
 
   ctx.ui.success(`Cockpit is up and listening on ${target}.`);
   ctx.ui.warn(
-    'cezar has NO built-in authentication in this mode — your reverse proxy MUST enforce it. ' +
+    'cezar-plus has NO built-in authentication in this mode — your reverse proxy MUST enforce it. ' +
       'Anyone who can reach ' + target + ' can run agents on this box.',
   );
   ctx.ui.message(
@@ -1089,7 +1089,7 @@ export const ubuntuVps: PlatformStrategy = {
       if (holder && !/nginx/i.test(holder)) {
         ctx.ui.warn(
           `Port 80 is already served by "${holder}" on this host.\n` +
-            `cezar's ubuntu-vps install wants :80/:443 for its own nginx, so these will collide.\n\n` +
+            `cezar-plus's ubuntu-vps install wants :80/:443 for its own nginx, so these will collide.\n\n` +
             `If that is a reverse proxy you rely on (Dokploy/Traefik, Coolify, Caddy), re-run with:\n` +
             `  cezar server-install --platform ubuntu-vps --external-proxy${ctx.state.domain ? ` --domain ${ctx.state.domain}` : ''} [--bind-host 172.17.0.1]\n` +
             `That installs the cezar service only and lets your proxy front it.`,

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ProjectScopeProvider } from '@/api/project-scope-context'
 import { createQueryClient } from '@/api/query-client'
-import type { HealthResponse, ProjectsResponse, Skill } from '@loki-labs/better-cezar-api-client'
+import type { HealthResponse, ProjectsResponse, Skill } from '@loki-labs/cezar-plus-api-client'
 import { BookmarkletPanel } from './bookmarklets-section'
 
 /**
@@ -90,7 +90,7 @@ describe('BookmarkletPanel repo-name labels (#422)', () => {
     serve({ '/api/v1/health': HEALTH, '/api/v1/launch-key': { key: 'sekret' } })
     renderPanel()
 
-    await waitFor(() => expect(label('cezar (cezar): this PR/issue')).toBeTruthy())
+    await waitFor(() => expect(label('cezar-plus (cezar): this PR/issue')).toBeTruthy())
     expect(label('/om-fix (cezar)')).toBeTruthy()
   })
 
@@ -99,7 +99,7 @@ describe('BookmarkletPanel repo-name labels (#422)', () => {
     fetchMock.mockImplementation(() => new Promise<Response>(() => {}))
     renderPanel()
 
-    expect(label('cezar: this PR/issue')).toBeTruthy()
+    expect(label('cezar-plus: this PR/issue')).toBeTruthy()
     expect(label('/om-fix')).toBeTruthy()
     expect(label('/om-fix (cezar)')).toBeFalsy()
   })
@@ -108,7 +108,7 @@ describe('BookmarkletPanel repo-name labels (#422)', () => {
     serve({ '/api/v1/health': { ...HEALTH, repo: null }, '/api/v1/launch-key': { key: 'sekret' } })
     renderPanel()
 
-    await waitFor(() => expect(label('cezar: this PR/issue')).toBeTruthy())
+    await waitFor(() => expect(label('cezar-plus: this PR/issue')).toBeTruthy())
     expect(label('/om-fix')).toBeTruthy()
   })
 })
@@ -158,7 +158,7 @@ describe('BookmarkletPanel project scoping (multi-project spec, step 3.6)', () =
     expect(hrefOf('bm-generic')).not.toContain('boot-key')
     // The name stamp comes from the registry entry for THIS project, not from `/api/v1/health`
     // (workspace-level: it always describes the boot repo).
-    expect(label('cezar (acme-repo): this PR/issue')).toBeTruthy()
+    expect(label('cezar-plus (acme-repo): this PR/issue')).toBeTruthy()
     expect(label('/om-fix (acme-repo)')).toBeTruthy()
   })
 

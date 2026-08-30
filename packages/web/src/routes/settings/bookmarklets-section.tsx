@@ -2,7 +2,7 @@ import { TriangleAlertIcon, ZapIcon } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
 import { useHealth, useLaunchKey, useProjects, useSkills } from '@/api/queries'
-import type { Skill } from '@loki-labs/better-cezar-api-client'
+import type { Skill } from '@loki-labs/cezar-plus-api-client'
 import { repoChipOf } from '@/components/app-shell-container'
 import { CenteredState } from '@/components/centered-state'
 import { Input } from '@/components/ui/input'
@@ -113,7 +113,7 @@ export function BookmarkletPanel({ skills }: { skills: readonly Skill[] }) {
       <div data-slot="bm-generic" className="mt-4">
         {/* Generic launcher: no skill, auto forced off — it only prefills the form. */}
         <BookmarkletRow
-          label={repoName ? `cezar (${repoName}): this PR/issue` : 'cezar: this PR/issue'}
+          label={repoName ? `cezar-plus (${repoName}): this PR/issue` : 'cezar-plus: this PR/issue'}
           url={bookmarkletUrl('', false, key, origin, projectId)}
           hint="prefills the form — nothing starts by itself"
         />

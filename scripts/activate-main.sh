@@ -43,7 +43,7 @@ REFERENCE_CHECKOUT="${REFERENCE_CHECKOUT:-/var/lib/cezar/loki-labs/cezar}"
 if [ -z "${REPO_URL:-}" ]; then
   REPO_URL=$(git -C "$REFERENCE_CHECKOUT" remote get-url origin 2>/dev/null) || REPO_URL=''
 fi
-REPO_URL="${REPO_URL:-https://github.com/MarcinWalendowski/cezar.git}"
+REPO_URL="${REPO_URL:-https://github.com/MarcinWalendowski/cezar-plus.git}"
 DRY_RUN=0
 [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 

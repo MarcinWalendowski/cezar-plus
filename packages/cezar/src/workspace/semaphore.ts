@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { LockableRunner } from '@loki-labs/better-cezar-contract';
+import type { LockableRunner } from '@loki-labs/cezar-plus-contract';
 import { DEFAULT_MONITORING_WAKE_MINUTES, loadWorkspaceConfig } from './config.ts';
 
 /**
@@ -34,7 +34,7 @@ import { DEFAULT_MONITORING_WAKE_MINUTES, loadWorkspaceConfig } from './config.t
  */
 
 /** The cached workspace POLICY run enforcement consults, of which the `resources` slice is one
- *  kind — the bag is not renamed for carrying `runnerLock` too, since `@loki-labs/better-cezar`
+ *  kind — the bag is not renamed for carrying `runnerLock` too, since `@loki-labs/cezar-plus`
  *  is published and `BACKWARD_COMPATIBILITY.md` applies. */
 export interface WorkspaceResourceLimits {
   /** Workspace-wide cap on concurrently *running* agent runs. */
@@ -261,7 +261,7 @@ export class WorkspaceSemaphore {
    * the ONE place that turns "absent" into "no gate" — every other reader of `limits.maxHeavySteps`
    * must go through this getter rather than re-deriving the fallback, per `WorkspaceResourceLimits`'
    * docblock: absent means UNBOUNDED, never 0, 1 or 2. A schema default would silently cap every
-   * installed user's concurrent heavy steps the moment they upgraded `@loki-labs/better-cezar`.
+   * installed user's concurrent heavy steps the moment they upgraded `@loki-labs/cezar-plus`.
    */
   maxHeavySteps(): number {
     return this.limits.maxHeavySteps ?? Infinity;

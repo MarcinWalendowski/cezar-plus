@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { RunRecord, RunStatus } from '@loki-labs/better-cezar-contract';
+import type { RunRecord, RunStatus } from '@loki-labs/cezar-plus-contract';
 import {
   RUN_WEDGE_TICKS,
   runExitGuard,
@@ -66,7 +66,7 @@ describe('runExitGuard', () => {
     runExitGuard(store, 'run-1', state);
 
     expect(current()).toMatchObject({ status: 'failed' });
-    expect(current().error).toContain('cezar exited before the run finished');
+    expect(current().error).toContain('cezar-plus exited before the run finished');
     expect(updateRun).toHaveBeenCalledTimes(1);
     expect(flush).toHaveBeenCalledTimes(1);
     expect(process.exitCode).toBe(1);
@@ -149,7 +149,7 @@ describe('runWedgeTick', () => {
     expect(clearKeepAlive).toHaveBeenCalledOnce();
     expect(process.exitCode).toBe(1);
     expect(error).toHaveBeenCalledWith(
-      'cezar exited before the run finished: its run record is missing from the store (missing-run)',
+      'cezar-plus exited before the run finished: its run record is missing from the store (missing-run)',
     );
   });
 

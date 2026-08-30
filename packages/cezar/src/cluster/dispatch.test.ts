@@ -6,7 +6,7 @@ import {
   type ClusterCorpusStatus,
   type ClusterDispatchFrame,
   type ClusterRepoFreshness,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import {
   buildDispatch,
   DEFAULT_CORPUS_STALENESS_MS,

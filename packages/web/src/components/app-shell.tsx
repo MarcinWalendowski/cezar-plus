@@ -313,7 +313,7 @@ export function AppShell({
         {chromeless ? null : <MobileNavDrawer {...nav} onNavigate={() => setMenuOpen(false)} />}
 
         <div className="grid min-w-0 flex-1 grid-rows-[auto_auto_auto_1fr_auto] overflow-hidden">
-          {chromeless ? null : <MobileTopBar title={current?.label ?? 'cezar'} />}
+          {chromeless ? null : <MobileTopBar title={current?.label ?? 'cezar-plus'} />}
 
           {/* Row 2: the global engine-lock bar. Deliberately NOT gated on `chromeless` — that is
               the one place this shell deviates from "chromeless hides chrome" (D9). The container
@@ -577,7 +577,7 @@ function SidebarContent({
     >
       <div className="flex items-center gap-[9px] px-3.5 pt-3.5 pb-2.5">
         <BrandTile />
-        <span className="text-[15px] font-semibold">cezar</span>
+        <span className="text-[15px] font-semibold">cezar-plus</span>
         {/* With project groups mounted the boot repo/branch is one group header among many —
             a chip repeating it up here would just be the first group's header said twice. */}
         {repo && !projectGroups ? (

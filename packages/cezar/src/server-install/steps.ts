@@ -394,7 +394,7 @@ export function depCheckStep(opts: DepStepOpts = {}): InstallStep {
       if (pkgs.length === 0) return;
       ctx.ui.note(
         pkgs.map((a) => a.removeHint ?? a.name ?? '').filter(Boolean).join('\n'),
-        'These tools were installed for cezar but may be used elsewhere — remove manually if you want them gone',
+        'These tools were installed for cezar-plus but may be used elsewhere — remove manually if you want them gone',
       );
     },
   };

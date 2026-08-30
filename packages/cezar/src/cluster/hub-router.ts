@@ -11,7 +11,7 @@ import {
   type ClusterUplinkFrame,
   type ClusterWatermark,
   type StoredClusterNodeIdentity,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { TodoItem } from '../todos.ts';
 import type { ClusterHomeOptions } from './node-identity.ts';
 import { toNodeWire, toPairingWire } from './wire.ts';

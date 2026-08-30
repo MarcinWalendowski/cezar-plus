@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { NotebookPenIcon, SparklesIcon, TrashIcon } from 'lucide-react'
-import type { NoteProposal, NoteSummary } from '@loki-labs/better-cezar-api-client'
+import type { NoteProposal, NoteSummary } from '@loki-labs/cezar-plus-api-client'
 
 import {
   useApproveWorkspaceNote,
@@ -67,7 +67,7 @@ export function NotesRoute() {
           icon={<NotebookPenIcon />}
           tone="neutral"
           title="The notes inbox is off"
-          subtitle="Set CEZ_NOTES=1 and restart cezar to turn it on."
+          subtitle="Set CEZ_NOTES=1 and restart cezar-plus to turn it on."
           heading="h2"
         />
       </NotesShell>
@@ -347,7 +347,7 @@ function ResultingRunStatus({ projectId, runId }: { projectId: string; runId: st
 /** The brief the composer opens with. It points at the spec run rather than pasting a spec body
  *  nobody has read back — the agent reads the spec in the repo, which is where it actually is. */
 function implementationPrefill(row: NoteSummary['resultingTasks'][number]): string {
-  const where = row.specPath ? `the spec at ${row.specPath}` : `the spec written by cezar task ${row.runId}`
+  const where = row.specPath ? `the spec at ${row.specPath}` : `the spec written by cezar-plus task ${row.runId}`
   return `Implement ${where}. Read it first and follow its phases. If it disagrees with the code as it stands now, say so before changing anything.`
 }
 

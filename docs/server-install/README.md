@@ -1,8 +1,8 @@
-# Remote access — host cezar on a server
+# Remote access — host cezar-plus on a server
 
-By default the cezar cockpit runs on `localhost`. To reach it from another
+By default the cezar-plus cockpit runs on `localhost`. To reach it from another
 machine — a shared team box, a VPS, your phone — put an **authenticated public
-front** in front of it. cezar ships an interactive, dependency-free installer
+front** in front of it. cezar-plus ships an interactive, dependency-free installer
 that does exactly that, modularized by **platform strategy**.
 
 The wizard never escalates silently: **every privileged command is printed and
@@ -60,15 +60,15 @@ platforms slot in without touching the engine.
 2. **Public front** — stand up the reverse proxy / tunnel that terminates
    TLS and challenges every request for a login.
 3. **Identity** — a username + password (type your own or auto-generate a
-   strong one). cezar stores only a hash; the app stays bound to loopback.
-4. **Autostart** — a service (systemd / launchd) that starts cezar now and
+   strong one). cezar-plus stores only a hash; the app stays bound to loopback.
+4. **Autostart** — a service (systemd / launchd) that starts cezar-plus now and
    keeps it up across reboots.
 5. **Verify** — confirm an anonymous request is challenged **and** an
-   authenticated one reaches cezar.
+   authenticated one reaches cezar-plus.
 
 ## One unit, every project
 
-The autostart service runs cezar as one unix user, and a cockpit serves that
+The autostart service runs cezar-plus as one unix user, and a cockpit serves that
 user's **whole workspace** (`~/.cezar/config.json`), not only the repo you
 installed from. Hosting several repos therefore no longer needs one unit per
 repo: install once, then add the rest — **Settings → Projects** in the cockpit,
@@ -92,7 +92,7 @@ already gives them separate ports, nginx sites and logins.
 ## Redeploying a new version
 
 `npx cezar-cli server-deploy --platform <id>` is the standardized, per-strategy way to
-roll out a new cezar: it restarts the service and re-verifies. See each guide's
+roll out a new cezar-plus: it restarts the service and re-verifies. See each guide's
 **Updating / redeploying** section for the checkout-vs-npx details.
 
 To test an unreleased build on a server, pin a preview version

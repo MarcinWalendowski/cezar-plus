@@ -1,14 +1,14 @@
-# @loki-labs/better-cezar-api-client
+# @loki-labs/cezar-plus-api-client
 
-The typed client for a [cezar](https://github.com/open-mercato/cezar) service, and the shared
+The typed client for a [cezar-plus](https://github.com/MarcinWalendowski/cezar-plus) service, and the shared
 contract types behind it.
 
-cezar is a local cockpit for running AI agent tasks in your repo. It runs as an HTTP service,
+cezar-plus is a local cockpit for running AI agent tasks in your repo. It runs as an HTTP service,
 and this package is how anything else talks to it — the cockpit UI is just its first consumer.
 
 ## Status
 
-**Not published yet.** The package is `private`: it is consumed inside the cezar
+**Not published yet.** The package is `private`: it is consumed inside the cezar-plus
 workspace (the cockpit bundles it, the service's tests import it) and will be
 released once its surface settles — it still carries hand-written DTOs for the
 routes that have not been converted to the versioned, type-inferred surface, and
@@ -17,8 +17,8 @@ those shrink with every family that is.
 ## Use
 
 ```ts
-import { createCezarClient } from '@loki-labs/better-cezar-api-client'
-import type { AppType } from '@loki-labs/better-cezar/app-type'
+import { createCezarClient } from '@loki-labs/cezar-plus-api-client'
+import type { AppType } from '@loki-labs/cezar-plus/app-type'
 
 const cez = createCezarClient<AppType>({ baseUrl: 'http://127.0.0.1:4321' })
 

@@ -1,4 +1,4 @@
-import { clusterCorpusChangedFrameSchema, type ClusterDownlinkFrame, type ClusterNodeId } from '@loki-labs/better-cezar-contract';
+import { clusterCorpusChangedFrameSchema, type ClusterDownlinkFrame, type ClusterNodeId } from '@loki-labs/cezar-plus-contract';
 import { describe, expect, it, vi } from 'vitest';
 import { broadcastCorpusChangedFrame, createCorpusBroadcaster, type CorpusBroadcastLink } from './corpus-broadcast.ts';
 

@@ -32,7 +32,7 @@ end, `run.test.ts` +1 for the lease-continuation fix), and found and fixed a rea
 doing it: the Q3 staleness pathspec `packages/*/src` never matched anything recursively (git glob
 does not cross `/`), so the mtime gate could never fire for any source edit — fixed to
 `packages/*/src/**`. That round shipped as `32379c34`, merged to `origin/main` as `1688a407` via PR
-[#4](https://github.com/MarcinWalendowski/cezar/pull/4) at 2026-08-23T00:31Z. `origin/main`'s tip is
+[#4](https://github.com/MarcinWalendowski/cezar-plus/pull/4) at 2026-08-23T00:31Z. `origin/main`'s tip is
 now `1688a407`. **Production has not redeployed since**: the live release is still
 `20260823T001331Z-b885e11b` (unrelated work, activated 00:13:39Z, ~15 minutes *before* `1688a407`
 merged), so the fixes described in this spec are merged but not running. That live sha **is a clean
@@ -869,7 +869,7 @@ lease check", unlike the omit-`opts`-entirely convention documented at `git-work
   strict-ancestor case needs no flag because it is a success. `--sha` keeps its spelling and changes
   meaning (Q4). Existing invocations are unchanged whenever the source was actually built from its
   HEAD, which is the intended steady state.
-- No HTTP route is added, removed or renamed. No `@loki-labs/better-cezar-contract` change.
+- No HTTP route is added, removed or renamed. No `@loki-labs/cezar-plus-contract` change.
 
 ## Phases
 

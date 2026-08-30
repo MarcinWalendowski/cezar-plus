@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { KnowledgeDocument } from '@loki-labs/better-cezar-contract';
+import type { KnowledgeDocument } from '@loki-labs/cezar-plus-contract';
 import { createWorkspaceKnowledgeRoutes, type WorkspaceKnowledgeRouteDeps } from './workspace-knowledge-routes.ts';
 import { WorkspaceKnowledgeIndex, type WorkspaceKnowledgeProjectSource } from '../workspace/knowledge-index.ts';
 import { apiRequest } from './loopback-request.testkit.ts';

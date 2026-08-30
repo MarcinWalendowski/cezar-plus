@@ -1,4 +1,4 @@
-import type { SourceLossyKind, SourcePropertyValue } from '@loki-labs/better-cezar-contract';
+import type { SourceLossyKind, SourcePropertyValue } from '@loki-labs/cezar-plus-contract';
 import {
   sourceAvailabilitySchema,
   sourceCapabilitiesSchema,

@@ -9,7 +9,7 @@ import {
   type RunHistoryContext,
   type RunHistoryEvent,
   type RunHistoryPage,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 
 const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_CURSOR_BYTES = 2_048;

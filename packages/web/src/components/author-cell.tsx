@@ -1,4 +1,4 @@
-import type { TaskAuthor } from '@loki-labs/better-cezar-api-client'
+import type { TaskAuthor } from '@loki-labs/cezar-plus-api-client'
 import { createContext, useContext, type ReactNode } from 'react'
 import { Link, type To } from 'react-router'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'

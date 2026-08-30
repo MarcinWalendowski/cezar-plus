@@ -14,7 +14,7 @@ import {
   taskAuthorSchema,
   type TaskAuthor,
 } from './task-author.ts';
-import { createTodoInputSchema } from '@loki-labs/better-cezar-contract';
+import { createTodoInputSchema } from '@loki-labs/cezar-plus-contract';
 
 /**
  * `author` — spec `.ai/specs/2026-08-21-task-author-provenance.md`.

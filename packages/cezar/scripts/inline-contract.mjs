@@ -1,5 +1,5 @@
 /**
- * Bundle `@loki-labs/better-cezar-contract` into `dist` after `tsc`.
+ * Bundle `@loki-labs/cezar-plus-contract` into `dist` after `tsc`.
  *
  * The contract and the api-client are PRIVATE and ship no build of their own — they are linked as
  * workspace packages and consumed as TypeScript source, which is what every other consumer wants:
@@ -36,7 +36,7 @@ const dist = join(here, '..', 'dist');
 const contractRoot = join(here, '..', '..', 'contract');
 const entry = join(contractRoot, 'src', 'index.ts');
 const outdir = join(dist, 'contract');
-const SPEC = /(['"])@loki-labs\/better-cezar-contract\1/g;
+const SPEC = /(['"])@loki-labs\/cezar-plus-contract\1/g;
 
 /** Emitted files that name the package — the copy happens only if it is really used. */
 const referrers = [];

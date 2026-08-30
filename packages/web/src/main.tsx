@@ -1,6 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { setApiBaseUrl } from '@loki-labs/better-cezar-api-client'
+import { setApiBaseUrl } from '@loki-labs/cezar-plus-api-client'
 import { App } from './app'
 import './styles/index.css'
 
@@ -24,7 +24,7 @@ function resolveApiBase(): string {
 setApiBaseUrl(resolveApiBase())
 
 const container = document.getElementById('root')
-if (!container) throw new Error('cezar: #root container is missing from index.html')
+if (!container) throw new Error('cezar-plus: #root container is missing from index.html')
 
 createRoot(container).render(
   <StrictMode>

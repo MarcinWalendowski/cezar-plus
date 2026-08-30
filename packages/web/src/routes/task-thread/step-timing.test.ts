@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { StepState, StepStatus } from '@loki-labs/better-cezar-api-client'
+import type { StepState, StepStatus } from '@loki-labs/cezar-plus-api-client'
 
 import { railVisual } from './step-rail'
 import { ACTIVE_STEP_STATUSES, TERMINAL_STEP_STATUSES, stepAttempts, stepElapsed } from './step-timing'

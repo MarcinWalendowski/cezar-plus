@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react'
 
 import { retargetRun } from '@/api/client'
 import { queryKeys, useConfig, useEngineAdvisory, useRunnerModels } from '@/api/queries'
-import type { ApiRun, LockableRunner, Runner } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, LockableRunner, Runner } from '@loki-labs/cezar-plus-api-client'
 import { PickerPill, RunnerPill } from '@/components/picker-pill'
 import { modelsForRunner, modelCatalogStatus, resolveModel } from '@/routes/new-task-form'
 import { useContinuationProvider } from './continuation-provider'

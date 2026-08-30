@@ -4,7 +4,7 @@ import type {
   ClusterProjectKey,
   StoredClusterNode,
   StoredClusterNodeIdentity,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { detectCapacityEnforcement, type ClusterHomeOptions } from './node-identity.ts';
 import { readPeers } from './peers.ts';

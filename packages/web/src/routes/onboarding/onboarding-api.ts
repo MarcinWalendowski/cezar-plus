@@ -1,4 +1,4 @@
-import { getApiBaseUrl } from '@loki-labs/better-cezar-api-client'
+import { getApiBaseUrl } from '@loki-labs/cezar-plus-api-client'
 import type {
   CreateOnboardingOrgInput,
   CreateOnboardingOrgResponse,
@@ -8,7 +8,7 @@ import type {
   RenameOnboardingTeamResponse,
   Role,
   Team,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 
 import { ApiError, NO_REDIRECT, throwIfIdentityGate } from '@/api/client'
 
@@ -66,7 +66,7 @@ async function fetchAuth(path: string, init: RequestInit = {}): Promise<Response
     res = await fetch(authUrl(path), { ...init, credentials: 'include', ...NO_REDIRECT })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
-    throw new ApiError(0, `cannot reach the cezar server (${path})`, { cause })
+    throw new ApiError(0, `cannot reach the cezar-plus server (${path})`, { cause })
   }
   // An identity gate in front of cezar answers these routes too — and `/auth/onboarding` is the
   // one whose 401 the cockpit reads as "signed out", so a gate swallowing it is exactly how the
@@ -160,7 +160,7 @@ export async function probeOnboarding(signal?: AbortSignal): Promise<OnboardingP
   // response that names `ready` without them is the server disagreeing with its own contract,
   // which is worth a loud error rather than a silently undefined org three renders later.
   if (status.org === undefined || status.team === undefined || status.role === undefined) {
-    throw new ApiError(res.status, 'the cezar server answered a ready onboarding status with no org/team/role')
+    throw new ApiError(res.status, 'the cezar-plus server answered a ready onboarding status with no org/team/role')
   }
   // `hasProjects` was computed by the route and dropped here, so a resumed user with five
   // projects was greeted with "Add your first project" — fixed 2026-08-07 (repair stage), and it
@@ -188,7 +188,7 @@ async function sendJson<T>(path: string, method: string, json: unknown): Promise
   const body = parseJsonBody(await res.text())
   if (!res.ok) throw new ApiError(res.status, errorMessageFrom(res.status, res.statusText, body))
   if (body === undefined) {
-    throw new ApiError(res.status, `the cezar server answered ${path} with a non-JSON body`)
+    throw new ApiError(res.status, `the cezar-plus server answered ${path} with a non-JSON body`)
   }
   return body as T
 }

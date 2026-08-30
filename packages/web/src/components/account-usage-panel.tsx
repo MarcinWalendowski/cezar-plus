@@ -1,4 +1,4 @@
-import type { AccountQuota, AccountQuotaWindow, AccountUsageRow } from '@loki-labs/better-cezar-api-client'
+import type { AccountQuota, AccountQuotaWindow, AccountUsageRow } from '@loki-labs/cezar-plus-api-client'
 import { useAccountUsage } from '@/api/queries'
 import { cn } from '@/lib/utils'
 

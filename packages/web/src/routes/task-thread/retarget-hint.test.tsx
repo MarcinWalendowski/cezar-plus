@@ -9,7 +9,7 @@ import type {
   HealthResponse,
   ProviderStatusResponse,
   StepState,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
 import { Link } from '@/lib/project-router'
 

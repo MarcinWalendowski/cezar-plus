@@ -160,7 +160,7 @@
 
 ## 🔄 Synced from upstream
 
-- 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/better-cezar*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
+- 🔄 **Merged upstream `open-mercato/cezar` v0.9.3 → v0.10.0** (spec `.ai/specs/2026-08-16-upstream-sync-v0.10.0.md`). Our `@loki-labs/cezar-plus*` identity is kept (manifests resolved keep-ours; upstream's release-bump and README branding commits resolved away as they fight the fork). What the sync brought: SIGKILL escalation in the OpenCode watchdogs (closes a leaked-agent-process defect the prior sync left open); per-hand-off **agent-account selection on the GitHub tab**; a green Tools dot when the default runner works; client-boundary validation of run-history responses; the sidebar footer staying in-column on a nightly version string; and two test-hardening passes.
 
 ## ✨ Added
 
@@ -1365,9 +1365,9 @@
   branch, ahead/behind and dirty counts, including the `no commits yet` repo as a **visible failed
   row** rather than a dropped one.
 
-- 🔧 **The packages are `@loki-labs/better-cezar*`.** `@open-mercato/cezar`, `-web`, `-contract`
+- 🔧 **The packages are `@loki-labs/cezar-plus*`.** `@open-mercato/cezar`, `-web`, `-contract`
   and `-api-client` were renamed across ~525 references, and the unscoped `cezar-cli` alias — which
-  is *upstream's own npm package name* — became `@loki-labs/better-cezar-cli`. The **binaries are
+  is *upstream's own npm package name* — became `@loki-labs/cezar-plus-cli`. The **binaries are
   unchanged**: `cezar`, `cez` and `cezar-cli` all still work, so no documented command changes.
 
   **This makes future upstream merges conflict on essentially every file that imports anything**,

@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import type { ClusterNodeId, ClusterProjectKey } from '@loki-labs/better-cezar-contract';
+import type { ClusterNodeId, ClusterProjectKey } from '@loki-labs/cezar-plus-contract';
 import { workspaceConfigPath } from '../paths.ts';
 import { loadWorkspaceConfig } from '../workspace/config.ts';
 import { loadNodeIdentity, type ClusterHomeOptions } from './node-identity.ts';

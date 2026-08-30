@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
 import { queryKeys, workspaceQueryKeys } from '@/api/queries'
-import type { RunRecord, RunStatus, WorkspaceUiState } from '@loki-labs/better-cezar-api-client'
+import type { RunRecord, RunStatus, WorkspaceUiState } from '@loki-labs/cezar-plus-api-client'
 import { RunNotifications } from './run-notifications'
 
 /**

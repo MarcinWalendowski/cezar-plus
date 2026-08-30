@@ -375,7 +375,7 @@ cross-project worktree machinery and its tests.
 
 ## Backward compatibility
 
-cezar is a published CLI (`@loki-labs/better-cezar`, 0.x) whose state is plain files inside
+cezar is a published CLI (`@loki-labs/cezar-plus`, 0.x) whose state is plain files inside
 strangers' repos, so `BACKWARD_COMPATIBILITY.md` applies. Everything above is additive except one
 thing, handled as follows:
 
@@ -621,7 +621,7 @@ spec verifies the frozen two-step or three-step plan and the filed-todo receipt.
   whole tree)` in `notifications/transports/webhook.test.ts` scans every file under
   `packages/{cezar,web}/src` and flagged `workflows/run.ts`, because the Phase 1 comment cited the
   absolute production path it was measured on, and that path spells the workspace name. The rule
-  exempts exactly one spelling — the fork's own `@loki-labs/better-cezar*` specifier, **stripped**
+  exempts exactly one spelling — the fork's own `@loki-labs/cezar-plus*` specifier, **stripped**
   before the scan rather than pattern-matched, so a bare mention in prose still fails. cezar is
   published; the hazard is a coding cockpit quoting a neighbouring product's paths into a tool that
   knows nothing about them. Fixed comment-only in `7e82ce10` (the evidence — five concurrent runs,

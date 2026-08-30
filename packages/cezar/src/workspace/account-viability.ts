@@ -1,4 +1,4 @@
-import { type AgentRoute, DEFAULT_AGENT_ACCOUNT_ID } from '@loki-labs/better-cezar-contract';
+import { type AgentRoute, DEFAULT_AGENT_ACCOUNT_ID } from '@loki-labs/cezar-plus-contract';
 import { PROFILE_CAPABLE_PROVIDERS } from '../core/agent-profiles.ts';
 import { PROVIDER_IDS, type ProviderAuthService, type ProviderId, type ProviderStatus } from '../core/provider-auth.ts';
 import {

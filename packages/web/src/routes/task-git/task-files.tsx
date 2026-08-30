@@ -4,7 +4,7 @@ import { useParams } from 'react-router'
 
 import { ApiError } from '@/api/client'
 import { useRun, useRunFile } from '@/api/queries'
-import type { ApiRun } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 
 import { RunHeader } from '../task-thread/run-header'

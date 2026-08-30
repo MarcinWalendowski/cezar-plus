@@ -128,7 +128,7 @@ destroy. 13 MB and ~115 KB of churn a day — the cost is nothing, the correctne
 numbers admission actually uses (`active/maxParallel`, `heavyActive/maxHeavySteps`), which
 enforcement it really has (`cgroup` on Linux, `process-tree` on the Mac, or `none` — stated, never
 implied), its labels, its repo drift, and the age of its last presence. Adding a node is one
-minted, copyable line — `npx -y @loki-labs/better-cezar@<hub version> cluster join cezj_…` — whose
+minted, copyable line — `npx -y @loki-labs/cezar-plus@<hub version> cluster join cezj_…` — whose
 token is **single-use and short-lived by design**, because a command rendered in a UI ends up in
 screenshots and shell histories, and because every path on the hub 302s to Cloudflare Access, which
 rules `curl … | sh` out entirely (D17).
@@ -1694,7 +1694,7 @@ SHA-256 digest per the security section) and renders exactly one copyable line. 
 node minted today should start life matched to the hub that minted it:
 
 ```
-npx -y @loki-labs/better-cezar@<hub version> cluster join cezj_<opaque>
+npx -y @loki-labs/cezar-plus@<hub version> cluster join cezj_<opaque>
 ```
 
 (`0.10.0` today — the hub substitutes its own, so this spec is not the thing that goes stale.)
@@ -1797,7 +1797,7 @@ rather than starting and hoping; and `cez cluster active`, a **read** an agent c
 **The cockpit's *Add node* action (Phase 1b) grows a second variant here**, and it is the same
 button with a different target: *enroll an existing cezar* mints
 `npx … cluster join cezj_…`, while *provision a new worker* mints
-`npx -y @loki-labs/better-cezar@<hub version> server-install --platform hetzner --role worker
+`npx -y @loki-labs/cezar-plus@<hub version> server-install --platform hetzner --role worker
 --join cezj_…` — run as root on a bare VPS, carrying the same short-TTL single-use code and, still,
 **no long-lived credential in the pasteable string**. Same reason `curl … | sh` is not used: every
 path on the hub 302s to Access, so the script cannot be fetched anonymously; the npm registry can.
@@ -5423,7 +5423,7 @@ invented; these are the names to use when one lands.
 >   is locked, so signing fails and git reports *"Please make sure you have the correct access
 >   rights, and the repository exists"*, which reads as a permissions problem and is not. Measured:
 >   ssh fetch **exit 128**. Working form, no config change:
->   `git -c credential.helper='!gh auth git-credential' fetch https://github.com/MarcinWalendowski/cezar.git 'refs/heads/main:refs/remotes/origin/main'` → exit 0.
+>   `git -c credential.helper='!gh auth git-credential' fetch https://github.com/MarcinWalendowski/cezar-plus.git 'refs/heads/main:refs/remotes/origin/main'` → exit 0.
 > - **Capture that exit code with a redirect, not a pipe.** `git fetch … | tail -3; echo "EXIT=$?"`
 >   printed `EXIT=0` over the failure text — that is `tail`'s status, and it nearly went into this
 >   spec as "fetch succeeded".
@@ -5724,7 +5724,7 @@ invented; these are the names to use when one lands.
 > **RESOLVED 2026-08-23 — `handshake-timeout` is being added to `clusterLinkRefuseReasonSchema`, and
 > the compatibility worry that made it look like an owner call is provably empty.** Verified, not
 > reasoned about:
->  - **`npm view @loki-labs/better-cezar` → 404. Never published.** That is this repo's ONLY
+>  - **`npm view @loki-labs/cezar-plus` → 404. Never published.** That is this repo's ONLY
 >    non-private package (`packages/cezar`); `packages/contract`, `api-client` and `web` are all
 >    `"private": true`. Our fork has shipped nothing, so there is no released consumer of that enum.
 >  - `@open-mercato/cezar` 0.10.0 IS on npm, but that is UPSTREAM's lineage — nothing in this repo
@@ -5734,7 +5734,7 @@ invented; these are the names to use when one lands.
 >  - `CEZ_CLUSTER` is unset everywhere on prod-host (verified during D43), so no spoke is
 >    running to receive an unknown reason.
 >
-> **Revisit this the moment either becomes false:** we publish `@loki-labs/better-cezar`, or
+> **Revisit this the moment either becomes false:** we publish `@loki-labs/cezar-plus`, or
 > `CEZ_CLUSTER` is set on a box before a matching spoke rollout.
 >
 > **A latent D40 in the enum itself, flagged for follow-up.** `clusterLinkRefuseReasonSchema` is a
@@ -5934,7 +5934,7 @@ invented; these are the names to use when one lands.
 >   conflicts, though it did touch `server/server.ts`, which this branch also changes.
 > - Pushed to **`origin/feat/multi-node-cluster`**. Never pushed to `upstream`, and never should be.
 > - **CORRECTED 2026-08-23: a PR now exists.** ~~Not merged to `main`, and no PR opened~~ — PR **#9**
->   is open (https://github.com/MarcinWalendowski/cezar/pull/9) and still NOT merged. Merging remains
+>   is open (https://github.com/MarcinWalendowski/cezar-plus/pull/9) and still NOT merged. Merging remains
 >   the owner's call, and is the hard prerequisite for any E2E (see the deploy path below). `HEAD` has
 >   also moved on past `3f00d234`: it is `961ebcd3` as of 13:11.
 >
@@ -6775,7 +6775,7 @@ invented; these are the names to use when one lands.
 > 28 files dirty, 13 untracked. Commit message drafted at `<scratchpad>/commitmsg.txt`.~~ That was
 > true when written and is not now. The working tree is **clean**, `HEAD` is `961ebcd3`, and it is
 > level with `origin/feat/multi-node-cluster` (`git rev-list --left-right --count` -> `0 0`).
-> **PR #9 is open** — https://github.com/MarcinWalendowski/cezar/pull/9 — and is NOT merged. Do not
+> **PR #9 is open** — https://github.com/MarcinWalendowski/cezar-plus/pull/9 — and is NOT merged. Do not
 > merge it: it auto-deploys to `prod-host`, where the owner's agents run, and that is the
 > owner's call.
 >
@@ -6861,9 +6861,9 @@ invented; these are the names to use when one lands.
 >   sessions have uncommitted work here. Compare against HEAD with `git show HEAD:<path>`.
 > - Write the box's corpus as `cezar`, never root. End any box session with
 >   `find /var/lib/cezar -not -user cezar | wc -l` (must be 0).
-> - ~~cezar is **published with real users** (`@loki-labs/better-cezar` v0.10.0) — normal backward
+> - ~~cezar is **published with real users** (`@loki-labs/cezar-plus` v0.10.0) — normal backward
 >   compatibility applies.~~ **CORRECTED 2026-08-23 — FALSE, and this file already knew it.**
->   `npm view @loki-labs/better-cezar` returns **E404: never published** (re-verified today). The
+>   `npm view @loki-labs/cezar-plus` returns **E404: never published** (re-verified today). The
 >   v0.10.0 on npm is `@open-mercato/cezar` — UPSTREAM's lineage, which we never push to, so it is
 >   not downstream of us. The verified finding earlier in this file ("the compatibility worry that
 >   made it look like an owner call is provably empty") contradicted this bullet while both stood,

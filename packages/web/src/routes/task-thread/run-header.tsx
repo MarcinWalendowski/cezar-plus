@@ -32,7 +32,7 @@ import {
   useRunHandoff,
   useRuns,
 } from '@/api/queries'
-import { DEFAULT_AGENT_ACCOUNT_ID, type ApiRun, type OpenTarget } from '@loki-labs/better-cezar-api-client'
+import { DEFAULT_AGENT_ACCOUNT_ID, type ApiRun, type OpenTarget } from '@loki-labs/cezar-plus-api-client'
 import { AuthorCell } from '@/components/author-cell'
 import { RunNodeCell, useRunNodeRoster } from '@/components/task-node-cell'
 import { DiffStatLabel } from '@/components/diff-stat'

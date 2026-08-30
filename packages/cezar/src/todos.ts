@@ -4,7 +4,7 @@ import { promises as fs } from 'node:fs';
 import { closeSync, mkdirSync, openSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { clusterTodoFieldsSchema, type ClusterAckResult, type ClusterOp } from '@loki-labs/better-cezar-contract';
+import { clusterTodoFieldsSchema, type ClusterAckResult, type ClusterOp } from '@loki-labs/cezar-plus-contract';
 import { clusterModeFromEnv } from './cluster/node-identity.ts';
 import { CLUSTER_META_TODO_FIELDS } from './cluster/ops.ts';
 import { applyReplica, type ReplicaApplyResult } from './cluster/replica.ts';

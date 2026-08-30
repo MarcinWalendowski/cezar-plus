@@ -68,7 +68,7 @@ describe('isSignedOutError', () => {
     ['404 not found', new ApiError(404, 'no such run')],
     ['409 conflict', new ApiError(409, 'run is active')],
     ['500 server error', new ApiError(500, 'boom')],
-    ['offline: status 0 with no identityGate', new ApiError(0, 'cannot reach the cezar server')],
+    ['offline: status 0 with no identityGate', new ApiError(0, 'cannot reach the cezar-plus server')],
     ['a plain Error', new Error('unauthenticated')],
     ['a string that says 401', '401'],
     ['undefined', undefined],

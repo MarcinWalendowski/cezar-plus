@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { ClusterOp } from '@loki-labs/better-cezar-contract';
+import type { ClusterOp } from '@loki-labs/cezar-plus-contract';
 import { readTodos, removeTodo, type TodoItem } from '../todos.ts';
 import { applyOpAtHub, createHubApplyOp, type HubApplyOptions } from './hub-apply.ts';
 

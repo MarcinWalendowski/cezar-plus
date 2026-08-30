@@ -381,6 +381,6 @@ export function detectResourceKill(
       : `MemoryMax=${sliceMax}M on ${RUNS_SLICE}`;
   return {
     limit: 'memory',
-    detail: `process exited via SIGKILL with ${bound} configured (cgroup OOM, not a cezar-initiated stop)`,
+    detail: `process exited via SIGKILL with ${bound} configured (cgroup OOM, not a cezar-plus-initiated stop)`,
   };
 }

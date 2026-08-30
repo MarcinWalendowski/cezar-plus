@@ -1,4 +1,4 @@
-import type { CreateRunInput, Runner } from '@loki-labs/better-cezar-api-client'
+import type { CreateRunInput, Runner } from '@loki-labs/cezar-plus-api-client'
 
 import { buildCreateRunBody, type TaskSource } from './new-task-form'
 import type { NewTaskParams } from './new-task-params'

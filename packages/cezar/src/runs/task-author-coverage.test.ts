@@ -150,6 +150,6 @@ describe('the env contract documents the two new variables', () => {
   it('documents them as cezar-set, not user-settable', () => {
     const line = envExample.indexOf('CEZ_STEP_ID');
     const section = envExample.slice(Math.max(0, line - 400), line);
-    expect(section).toContain('set by cezar for child agent processes; you should not set them');
+    expect(section).toContain('set by cezar-plus for child agent processes; you should not set them');
   });
 });

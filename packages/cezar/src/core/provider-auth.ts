@@ -318,7 +318,7 @@ function quoteExecutable(executable: string, platform: NodeJS.Platform): string 
  *  a peek reads would silently make every peek a miss, and every page load pay for a CLI spawn. */
 /**
  * The discovered default's own key in {@link ProviderAuthService.runtimeRejections} —
- * `@loki-labs/better-cezar-contract`'s `DEFAULT_AGENT_ACCOUNT_ID` mirrored here as a plain literal
+ * `@loki-labs/cezar-plus-contract`'s `DEFAULT_AGENT_ACCOUNT_ID` mirrored here as a plain literal
  * rather than imported, because nothing under `src/core/` depends on the contract package and this
  * one sentinel is not worth starting that edge.
  */

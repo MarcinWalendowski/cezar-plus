@@ -9,7 +9,7 @@ import { PROJECT_ID_RE } from '../workspace/config.ts';
  * section 3: a `safeParse` over a whole array must never let one bad row, or one field a newer
  * cezar wrote, evict an older file's siblings.
  *
- * The CLOSED wire half lives in `@loki-labs/better-cezar-contract`'s `sources.ts` (scaffold-owned,
+ * The CLOSED wire half lives in `@loki-labs/cezar-plus-contract`'s `sources.ts` (scaffold-owned,
  * W1.1) and is a *different*, flatter shape by design — see that file's own header.
  *
  * **`SourceKind` is a plain string (Q2 of the spec), never a literal union** — that is precisely

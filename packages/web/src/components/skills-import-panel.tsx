@@ -4,7 +4,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 
 import { putWorkspaceUiState } from '@/api/client'
 import { queryKeys, useImportableSkills, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
-import type { WorkspaceUiState } from '@loki-labs/better-cezar-api-client'
+import type { WorkspaceUiState } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/toaster'

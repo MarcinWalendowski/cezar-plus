@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ClusterOp } from '@loki-labs/better-cezar-contract';
+import type { ClusterOp } from '@loki-labs/cezar-plus-contract';
 import type { TodoItem } from '../todos.ts';
 import { applyOpToRecord, applyReplica, applyReplicaFrame, diffCorrections } from './replica.ts';
 import { deriveTodoOps } from './ops.ts';

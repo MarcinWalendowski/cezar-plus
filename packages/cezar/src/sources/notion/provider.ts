@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { SourcePropertyValue } from '@loki-labs/better-cezar-contract';
+import type { SourcePropertyValue } from '@loki-labs/cezar-plus-contract';
 import type { SourceCollectionRef, SourceConnection } from '../types.ts';
 import type {
   SourceAvailability,

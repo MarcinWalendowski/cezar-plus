@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { AgentProfile } from '@loki-labs/better-cezar-api-client'
+import type { AgentProfile } from '@loki-labs/cezar-plus-api-client'
 import { agentPickerRows } from './default-agent-picker'
 import { ADVISORY_NOTE, RunnerPill, lockDisclosure, parseChoiceValue } from './picker-pill'
 

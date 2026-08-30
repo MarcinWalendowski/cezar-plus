@@ -6,7 +6,7 @@ import type {
   AgentAccountDetailsResponse,
   AgentProfilesResponse,
   DiscoveredAgentAccountsResponse,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { claudeStateFilePath } from '../paths.ts';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';

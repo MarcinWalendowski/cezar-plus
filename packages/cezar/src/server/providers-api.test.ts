@@ -640,7 +640,7 @@ describe('workspace provider API', () => {
 
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({
-      error: 'Run this command on the machine hosting cezar.',
+      error: 'Run this command on the machine hosting cezar-plus.',
       command: "'codex' login",
     });
     expect(openTerminal).not.toHaveBeenCalled();

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { LockableRunner } from '@loki-labs/better-cezar-contract';
+import type { LockableRunner } from '@loki-labs/cezar-plus-contract';
 import { loadConfig } from '../config.ts';
 import type { AgentRunner, RunnerId } from '../core/agent-runner.ts';
 import { createRunner } from '../core/runner-factory.ts';

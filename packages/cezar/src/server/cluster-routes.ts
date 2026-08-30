@@ -51,7 +51,7 @@ import {
   clusterTodosAppendRequestSchema,
   type StoredClusterNodeIdentity,
   CLUSTER_CORPUS_DEFAULT_SCOPE,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { clusterEnabled } from './capabilities.ts';
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';

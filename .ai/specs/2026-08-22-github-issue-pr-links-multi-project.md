@@ -134,14 +134,14 @@ marker exists — and a task working on another repository's issue/PR scrapes th
 The result, reported live: this repo's own persisted `runs.json` holds a run with `issueNumber:
 475` whose `referencedIssueCandidates` is `https://github.com/open-mercato/cezar/issues/475` — a
 number that belongs to an entirely different repository than this project's own
-`https://github.com/MarcinWalendowski/cezar`.
+`https://github.com/MarcinWalendowski/cezar-plus`.
 
 The fix design for this — `namesNumberElsewhere`, `chipIssueNumber`/`chipPrNumber`,
 `referencedIssueCandidates`/`referencedPrCandidates` — is **borrowed, read-only**, from PRs
 already open against a *different* repository: `open-mercato/cezar` #840
 (`fix/issue-819-foreign-issue-chip`) and #864 (`fix/issue-854-pr-chip-foreign-number-guard`,
 `baseRefName: main` — not stacked on #840's branch, contrary to an earlier draft of this spec).
-This checkout's `origin` is `https://github.com/MarcinWalendowski/cezar.git` (confirmed via `gh
+This checkout's `origin` is `https://github.com/MarcinWalendowski/cezar-plus.git` (confirmed via `gh
 repo view`: `isFork:false`, private, created 2026-08-08, **zero issues and zero PRs** as of this
 step — `gh issue list --state all` and `gh pr list --state all` both return `[]`), and this
 account's permissions on `open-mercato/cezar` are `{pull:true, push:false, triage:false,
@@ -427,11 +427,11 @@ No new routes in any phase. One existing response body gains two optional fields
   This workspace registers 12 projects across three owners (`MarcinWalendowski/*`,
   `Loki-Labs-AI/*`) plus four roots with no git remote at all, and this repo's own persisted runs
   carry `open-mercato/cezar`-lineage numbers (e.g. `issueNumber: 475`) against a `repoUrl` of
-  `https://github.com/MarcinWalendowski/cezar` — a repo with zero issues and zero PRs. When a
+  `https://github.com/MarcinWalendowski/cezar-plus` — a repo with zero issues and zero PRs. When a
   number arrives with **no** `referencedIssueCandidates`/`referencedPrCandidates` to prove it
   foreign — a bare `#N` typed into a prompt, or a `CEZ:ISSUE=`/`CEZ:PR=` marker declared for an
   upstream issue — Phases 1–3's guard has no evidence to act on and still synthesizes
-  `https://github.com/MarcinWalendowski/cezar/issues/N`, a guaranteed 404. This is a known,
+  `https://github.com/MarcinWalendowski/cezar-plus/issues/N`, a guaranteed 404. This is a known,
   accepted limitation of this spec, not a regression it introduces; closing it fully needs
   persisting the *origin repo* alongside the bare number, not just the number, and is left for a
   follow-up.

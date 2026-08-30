@@ -7,7 +7,7 @@ import {
   type ClusterOpScope,
   type ClusterProjectKey,
   type ClusterReplicaFrame,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 
 /**
  * Deciding what each node must be told, once the hub has applied a batch of ops — the SENDING half

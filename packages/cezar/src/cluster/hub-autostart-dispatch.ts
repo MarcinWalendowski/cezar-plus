@@ -18,7 +18,7 @@ import type {
   ClusterProjectKey,
   StoredClusterNodeIdentity,
   WorkflowDef,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { HubDispatcher } from './hub-dispatch.ts';
 import type { HubSeqAllocator } from './hub-seq.ts';
 import type { TodoStartConfirmer, TodoStartOptions } from '../todos.ts';

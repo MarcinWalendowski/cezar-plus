@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { Hono } from 'hono';
-import { type WorkspaceGitResponse } from '@loki-labs/better-cezar-contract';
+import { type WorkspaceGitResponse } from '@loki-labs/cezar-plus-contract';
 import { resolveCapabilities } from './capabilities.ts';
 import type { ProjectApiEnv } from './server.ts';
 import { WorkspaceGitIndex, type WorkspaceGitProjectSource } from '../workspace/git-index.ts';

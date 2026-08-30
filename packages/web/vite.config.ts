@@ -38,7 +38,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': resolve(appDir, 'src'),
-      '@loki-labs/better-cezar-api-client': resolve(packagesDir, 'api-client/src/index.ts'),
+      '@loki-labs/cezar-plus-api-client': resolve(packagesDir, 'api-client/src/index.ts'),
     },
   },
   build: {

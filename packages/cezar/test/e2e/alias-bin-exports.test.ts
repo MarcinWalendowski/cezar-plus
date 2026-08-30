@@ -18,7 +18,7 @@ const packageManifest = join(repoRoot, 'packages', 'cezar', 'package.json');
  * The `cezar-cli` alias must import this package through a specifier its `exports` map
  * actually exposes.
  *
- * 0.9.3 shipped an alias whose `bin.js` did `import('@loki-labs/better-cezar/dist/index.js')`
+ * 0.9.3 shipped an alias whose `bin.js` did `import('@loki-labs/cezar-plus/dist/index.js')`
  * while this manifest exported only `.`, `./app-type` and `./package.json`. Once a package
  * declares `exports`, Node serves ONLY the listed subpaths and hard-blocks the rest — so
  * every `npx cezar-cli` died with ERR_PACKAGE_PATH_NOT_EXPORTED against a file that was
@@ -36,10 +36,10 @@ const packageManifest = join(repoRoot, 'packages', 'cezar', 'package.json');
  * checkout with no `dist/`.
  */
 
-/** Every `@loki-labs/better-cezar` specifier the alias entry point imports. */
+/** Every `@loki-labs/cezar-plus` specifier the alias entry point imports. */
 async function aliasSpecifiers(): Promise<string[]> {
   const source = await readFile(aliasBin, 'utf8');
-  const pattern = /['"](@loki-labs\/better-cezar(?:\/[^'"]*)?)['"]/g;
+  const pattern = /['"](@loki-labs\/cezar-plus(?:\/[^'"]*)?)['"]/g;
   return [...source.matchAll(pattern)].map((match) => match[1] as string);
 }
 
@@ -48,7 +48,7 @@ test('the cezar-cli alias imports a specifier the exports map exposes', async ()
   // A computed specifier would slip past the regex; fail loudly rather than vacuously pass.
   assert.ok(
     specifiers.length > 0,
-    `${aliasBin} names no literal @loki-labs/better-cezar specifier — this guard can no longer see what the alias imports`,
+    `${aliasBin} names no literal @loki-labs/cezar-plus specifier — this guard can no longer see what the alias imports`,
   );
 
   const root = await mkdtemp(join(tmpdir(), 'cezar-alias-exports-'));
@@ -56,7 +56,7 @@ test('the cezar-cli alias imports a specifier the exports map exposes', async ()
     // A consumer that has only the published manifest installed — the exports gate reads
     // nothing else, so this reproduces a real `npx cezar-cli` resolution exactly.
     await writeFile(join(root, 'package.json'), '{"private":true,"type":"module"}\n', 'utf8');
-    const installed = join(root, 'node_modules', '@loki-labs', 'better-cezar');
+    const installed = join(root, 'node_modules', '@loki-labs', 'cezar-plus');
     await mkdir(installed, { recursive: true });
     await copyFile(packageManifest, join(installed, 'package.json'));
 
@@ -67,7 +67,7 @@ test('the cezar-cli alias imports a specifier the exports map exposes', async ()
         { cwd: root },
       ).catch((error: Error & { stderr?: string }) => {
         assert.fail(
-          `the alias imports '${specifier}', which the @loki-labs/better-cezar exports map does not expose — ` +
+          `the alias imports '${specifier}', which the @loki-labs/cezar-plus exports map does not expose — ` +
             `npx cezar-cli would fail for every user (#851): ${error.stderr?.trim() ?? error.message}`,
         );
       });

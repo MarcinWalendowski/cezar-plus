@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { transportHealthStatusSchema, type NotificationLogRow } from '@loki-labs/better-cezar-contract';
+import { transportHealthStatusSchema, type NotificationLogRow } from '@loki-labs/cezar-plus-contract';
 import { atomicWriteJsonSync } from '../workspace/config.ts';
 import { DueScheduler, type DueEntry } from '../scheduling/due-scheduler.ts';
 import type { DeliveryResult, Notification, NotificationSink } from './types.ts';

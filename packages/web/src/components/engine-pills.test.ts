@@ -4,7 +4,7 @@ import { createElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { LockableRunner, Runner } from '@loki-labs/better-cezar-api-client'
+import type { LockableRunner, Runner } from '@loki-labs/cezar-plus-api-client'
 
 import { engineBody, engineRunBody, type EnginePick, type ResolvedEngine, useResolvedEngine } from './engine-pills'
 

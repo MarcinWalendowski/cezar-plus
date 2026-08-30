@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { noteRecordSchema } from '@loki-labs/better-cezar-contract';
+import { noteRecordSchema } from '@loki-labs/cezar-plus-contract';
 
 /**
  * Storage shapes for `~/.cezar/notes.json` (P2.1, spec
@@ -7,7 +7,7 @@ import { noteRecordSchema } from '@loki-labs/better-cezar-contract';
  * never inside a project).
  *
  * **`.passthrough()`, deliberately, and only here.** The wire shapes in
- * `@loki-labs/better-cezar-contract` are CLOSED; the stored shape is open, exactly as
+ * `@loki-labs/cezar-plus-contract` are CLOSED; the stored shape is open, exactly as
  * `automations/types.ts` and `sources/types.ts` are. The reason is version skew on one machine: two
  * cezar builds share one `~/.cezar`, and a closed storage parse would let the older one silently
  * delete a key the newer one wrote every time it rewrote the file. Passthrough makes an unknown key

@@ -2,7 +2,7 @@ import { statSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { CLUSTER_CORPUS_DEFAULT_SCOPE } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_CORPUS_DEFAULT_SCOPE } from '@loki-labs/cezar-plus-contract';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildManifest,

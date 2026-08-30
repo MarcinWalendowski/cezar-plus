@@ -394,7 +394,7 @@ describe('workspace semaphore across RunManagers (step 2.5)', () => {
           .some(
             (event) =>
               event.type === 'lifecycle' &&
-              event.message === 'cezar restarted — interrupted continuation re-queued',
+              event.message === 'cezar-plus restarted — interrupted continuation re-queued',
           ),
       ).toBe(true);
     }

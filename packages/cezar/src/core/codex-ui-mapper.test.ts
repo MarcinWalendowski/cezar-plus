@@ -1000,7 +1000,7 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
     await expect(session.result).resolves.toMatchObject({ sessionId: 'th_mock_1' });
     expect(events).toContainEqual({
       type: 'note',
-      message: 'codex requested unsupported method mcpServer/elicitation/request; cezar replied -32601',
+      message: 'codex requested unsupported method mcpServer/elicitation/request; cezar-plus replied -32601',
     });
   }, 30_000);
 

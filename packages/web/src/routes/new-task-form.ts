@@ -1,4 +1,4 @@
-import { runnerDiscoversModels } from '@loki-labs/better-cezar-api-client'
+import { runnerDiscoversModels } from '@loki-labs/cezar-plus-api-client'
 import type {
   BackendCheck,
   LockableRunner,
@@ -12,7 +12,7 @@ import type {
   Skill,
   UiState,
   WorkflowDef,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 
 /**
  * The new-task form's picker rules and its POST body, as pure functions — the exact semantics

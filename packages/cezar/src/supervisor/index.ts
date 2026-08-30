@@ -1,5 +1,5 @@
 import { serve, type ServerType } from '@hono/node-server';
-import type { AuthProvider } from '@loki-labs/better-cezar-contract';
+import type { AuthProvider } from '@loki-labs/cezar-plus-contract';
 import { identityDir } from '../paths.ts';
 import { resolveAuthProvider } from '../server/capabilities.ts';
 import { IdentityStore } from '../auth/identity-store.ts';
@@ -180,7 +180,7 @@ export function supervisorBootLines(input: {
   readonly claim: BootstrapClaim;
   readonly hasOrg: boolean;
 }): string[] {
-  const lines = [`\n  cezar supervisor — auth provider: ${input.provider}, port ${input.port}\n`];
+  const lines = [`\n  cezar-plus supervisor — auth provider: ${input.provider}, port ${input.port}\n`];
   const banner = bootstrapClaimBanner(input.claim, input.hasOrg);
   if (banner) lines.push(banner);
   return lines;

@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import { getRepoSummary, type RepoSummary } from '../server/git.ts';
-import type { WorkspaceGitProject } from '@loki-labs/better-cezar-contract';
+import type { WorkspaceGitProject } from '@loki-labs/cezar-plus-contract';
 
 /**
  * `WorkspaceGitIndex` — the workspace git overview's read path

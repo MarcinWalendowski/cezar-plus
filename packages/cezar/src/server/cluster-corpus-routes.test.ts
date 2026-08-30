@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { CLUSTER_PROTOCOL, type StoredClusterNode } from '@loki-labs/better-cezar-contract';
+import { CLUSTER_PROTOCOL, type StoredClusterNode } from '@loki-labs/cezar-plus-contract';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import {

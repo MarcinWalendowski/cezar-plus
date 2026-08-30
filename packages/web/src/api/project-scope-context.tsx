@@ -6,7 +6,7 @@ import {
   ownsApiScope,
   releaseApiScope,
   setApiScope,
-} from '@loki-labs/better-cezar-api-client'
+} from '@loki-labs/cezar-plus-api-client'
 
 /**
  * The React face of the project scope (multi-project spec, step 3.1): components read

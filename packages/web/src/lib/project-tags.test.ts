@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ProjectListEntry } from '@loki-labs/better-cezar-api-client'
+import type { ProjectListEntry } from '@loki-labs/cezar-plus-api-client'
 
 import { TAG_SUGGESTION_LIMIT, allProjectTags, suggestTags } from './project-tags'
 

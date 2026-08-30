@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
 import { trackEvent } from '@/api/analytics'
-import type { ApiRun, HealthResponse, SpecReviewEntry, SpecReviewFeedResponse } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, HealthResponse, SpecReviewEntry, SpecReviewFeedResponse } from '@loki-labs/cezar-plus-api-client'
 
 import { TaskSpecRoute, specFeedMode, specFeedSource, toFeedCards, type SpecFeedMode } from './task-spec'
 

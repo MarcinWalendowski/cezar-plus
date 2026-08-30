@@ -2,7 +2,7 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { NotificationsResponse, TransportView } from '@loki-labs/better-cezar-api-client'
+import type { NotificationsResponse, TransportView } from '@loki-labs/cezar-plus-api-client'
 import { createQueryClient } from '@/api/query-client'
 import { NotificationsSection } from './notifications-section'
 
@@ -233,10 +233,10 @@ describe('the server transports pane', () => {
     renderSection()
     await waitFor(() =>
       expect(document.querySelector('[data-slot="notifications-transports-empty"]')?.textContent).toBe(
-        'No transports configured. cezar sends nothing.',
+        'No transports configured. cezar-plus sends nothing.',
       ),
     )
-    expect(transportsPane().textContent).toContain('Set CEZ_NOTIFY=1 and restart cezar to turn it on.')
+    expect(transportsPane().textContent).toContain('Set CEZ_NOTIFY=1 and restart cezar-plus to turn it on.')
   })
 
   it('renders a configured row: label, kind, endpoint host and its health chip', async () => {

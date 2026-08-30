@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { AgentConfigFile, AgentConfigListing } from '@loki-labs/better-cezar-api-client'
+import type { AgentConfigFile, AgentConfigListing } from '@loki-labs/cezar-plus-api-client'
 import { Toaster } from '@/components/ui/toaster'
 import { AgentConfigSection } from './agent-config-section'
 
@@ -154,7 +154,7 @@ describe('AgentConfigSection', () => {
     expect(block).toBeTruthy()
     expect(block.textContent).toContain('github')
     expect(block.textContent).toContain('sentry')
-    expect(block.textContent).toContain('cezar does not edit')
+    expect(block.textContent).toContain('cezar-plus does not edit')
     // the block belongs to Claude's pane only
     fireEvent.click(agentTab('codex'))
     await waitFor(() => expect(document.querySelector('[data-slot="agent-config-user-mcp"]')).toBeNull())

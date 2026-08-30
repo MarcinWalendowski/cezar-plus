@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { KnowledgeDocumentList } from '@loki-labs/better-cezar-api-client'
+import type { KnowledgeDocumentList } from '@loki-labs/cezar-plus-api-client'
 
 import { filterKnowledgeDocs } from './knowledge'
 

@@ -6,7 +6,7 @@ import { z } from 'zod';
 // Contract VALUES, like `workspaceUiStateSchema` in workspace/migrations.ts: the tag bounds this
 // file must not `.catch` away are the same constants the PATCH route validates against, so they
 // are imported rather than repeated.
-import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH, lockableRunnerSchema } from '@loki-labs/better-cezar-contract';
+import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH, lockableRunnerSchema } from '@loki-labs/cezar-plus-contract';
 import { PROVIDER_IDS, type ProviderId } from '../core/provider-auth.ts';
 import { assertCezarHomeWriteIsSandboxed, workspaceConfigPath } from '../paths.ts';
 
@@ -101,7 +101,7 @@ const resourcesSchema = z
      * second gate", which is exactly today's behaviour and the only value that is safe to ship.
      *
      * Deliberately `.optional()` and NOT `.default(2)`, which is the one thing about this key
-     * that is easy to get wrong. cezar is published as `@loki-labs/better-cezar` and installed by
+     * that is easy to get wrong. cezar is published as `@loki-labs/cezar-plus` and installed by
      * `npx` on machines this repo does not control, and `run-tests` declares `heavy: true` — so a
      * schema default of 2 would silently cap every installed user's concurrent heavy steps the
      * next time they upgraded. Someone running `maxParallel: 8` on a big machine would drop to 2

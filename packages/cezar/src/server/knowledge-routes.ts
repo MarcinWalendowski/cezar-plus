@@ -17,7 +17,7 @@ import {
   type KnowledgeRemovedResponse,
   type KnowledgeResponse,
   type KnowledgeSearchResponse,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import type { SearchFilters } from '../knowledge/search.ts';
 import { jsonZodValidator, queryZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';

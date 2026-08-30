@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react'
 
 import { continueRun } from '@/api/client'
 import { queryKeys, useConfig, useEngineAdvisory, useRunnerModels } from '@/api/queries'
-import type { ApiRun, ContinueResponse, ImageInput, Runner } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, ContinueResponse, ImageInput, Runner } from '@loki-labs/cezar-plus-api-client'
 import { PickerPill, RunnerPill } from '@/components/picker-pill'
 import {
   modelsForRunner,

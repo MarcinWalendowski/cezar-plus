@@ -265,7 +265,7 @@ export class PiRunner implements AgentRunner {
       if (terminatedByCezar && isSignalTerminationExit(exitCode)) {
         onEvent?.({
           type: 'note',
-          message: `pi CLI did not exit on its own after close; terminated by cezar (code ${exitCode})`,
+          message: `pi CLI did not exit on its own after close; terminated by cezar-plus (code ${exitCode})`,
         });
         onEvent?.({ type: 'done' });
         return { text: textChunks.join('').trim(), toolCalls, tokensUsed, sessionId };

@@ -1,4 +1,4 @@
-import { LOCKABLE_RUNNERS } from '@loki-labs/better-cezar-contract';
+import { LOCKABLE_RUNNERS } from '@loki-labs/cezar-plus-contract';
 import { describe, expect, it } from 'vitest';
 import { PROFILE_CAPABLE_PROVIDERS } from '../core/agent-profiles.ts';
 

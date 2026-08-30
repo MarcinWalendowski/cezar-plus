@@ -10,7 +10,7 @@ import {
   reportProcessPendingResponseSchema,
   reportReopenResponseSchema,
   reportsResponseSchema,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { KnowledgeStore } from '../knowledge/store.ts';
 import { readReportTriage, reportsTriagePath } from '../reports-triage.ts';
 import { readTodos } from '../todos.ts';

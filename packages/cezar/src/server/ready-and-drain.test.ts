@@ -102,7 +102,7 @@ describe('/api/v1/ready and the graceful drain', () => {
 
     const response = await apiRequest(app, '/api/v1/runs');
     expect(response.status).toBe(503);
-    expect(await response.json()).toEqual({ error: 'cezar is restarting — retry' });
+    expect(await response.json()).toEqual({ error: 'cezar-plus is restarting — retry' });
   });
 
   it('counts an in-flight request, so a drain waits for it instead of cutting it', async () => {

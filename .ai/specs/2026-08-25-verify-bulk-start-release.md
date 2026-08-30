@@ -1065,7 +1065,7 @@ Every claim in this spec traces to one of these, each re-measured on 2026-08-25 
    `packages/cezar/test/unit/deploy-e2e-probe.test.ts` (-348, deliberate),
    `packages/web/src/lib/filed-tasks.test.ts` (+53), `packages/web/src/lib/filed-tasks.ts` (+43),
    `packages/web/src/routes/global-tasks.test.tsx` (+151/-), `packages/web/src/routes/global-tasks.tsx` (+153).
-5. `git remote -v` lists only `origin` = `https://github.com/MarcinWalendowski/cezar.git`.
+5. `git remote -v` lists only `origin` = `https://github.com/MarcinWalendowski/cezar-plus.git`.
 6. `GET http://127.0.0.1:4321/api/v1/ready` → `{"ready":true,"version":"0.10.0",…,"deploy":
    {"releaseId":"20260825T082047Z-d217ab2e","sha":"d217ab2e9526e68248cad06c089fb887dff7c48b",
    "activatedAt":"2026-08-25T08:20:53.041Z","builtAt":"2026-08-25T08:20:47.391Z","dirty":false}}`.

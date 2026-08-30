@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
-import type { HealthResponse, NoteRecord, ProjectsResponse } from '@loki-labs/better-cezar-api-client'
+import type { HealthResponse, NoteRecord, ProjectsResponse } from '@loki-labs/cezar-plus-api-client'
 
 import { WorkspaceNewTaskRoute } from './workspace-new-task'
 
@@ -297,7 +297,7 @@ describe('WorkspaceNewTaskRoute: the explainer', () => {
     // never reads a `title` attribute.
     expect(
       screen.getByText(
-        'cezar reads each detected project and writes a spec there. It stops at the spec — you review the proposals, then start the implementation yourself.',
+        'cezar-plus reads each detected project and writes a spec there. It stops at the spec — you review the proposals, then start the implementation yourself.',
       ),
     ).toBeTruthy()
   })

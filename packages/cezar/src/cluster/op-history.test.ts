@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { ClusterAckResult } from '@loki-labs/better-cezar-contract';
+import type { ClusterAckResult } from '@loki-labs/cezar-plus-contract';
 import type { ClusterHomeOptions } from './node-identity.ts';
 import { clusterHomeDir } from './node-identity.ts';
 import { createOpHistoryStore, opHistoryPath, OP_HISTORY_RETENTION_MS } from './op-history.ts';

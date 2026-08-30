@@ -7,7 +7,7 @@ import {
   type ClusterCorpusBody,
   type ClusterCorpusDoc,
   type ClusterCorpusManifestResponse,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 import { z } from 'zod';
 import { signedNodeRequestHeaders } from '../../cluster/node-auth.ts';
 import type {

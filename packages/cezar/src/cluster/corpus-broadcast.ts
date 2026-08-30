@@ -4,7 +4,7 @@ import {
   type ClusterCorpusChangedFrame,
   type ClusterDownlinkFrame,
   type ClusterNodeId,
-} from '@loki-labs/better-cezar-contract';
+} from '@loki-labs/cezar-plus-contract';
 
 /**
  * The HUB side of the `corpus-changed` hint (spec `.ai/specs/2026-08-22-multi-node-cezar-

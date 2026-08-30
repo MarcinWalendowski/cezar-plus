@@ -87,7 +87,7 @@ export function WorkspaceNewTaskRoute() {
           icon={<NotebookPenIcon />}
           tone="neutral"
           title="The project-less composer is off"
-          subtitle="Set CEZ_NOTES=1 and restart cezar to turn it on."
+          subtitle="Set CEZ_NOTES=1 and restart cezar-plus to turn it on."
           heading="h2"
         />
       </Shell>
@@ -163,7 +163,7 @@ function NewTaskComposer() {
       <Textarea
         value={body}
         onChange={(event) => setBody(event.target.value)}
-        placeholder="What needs doing? cezar reads your registered projects and works out which ones this implies."
+        placeholder="What needs doing? cezar-plus reads your registered projects and works out which ones this implies."
         aria-label="New task"
         rows={6}
       />
@@ -184,8 +184,8 @@ function NewTaskComposer() {
           </label>
           <p data-slot="autonomous-explainer" className="text-xs text-muted-foreground">
             {autonomous
-              ? 'cezar writes a spec in each detected project, then keeps going: a bounded implementation run starts in the same repo, commits locally, and never pushes. A run can stop early on its step budget with the work incomplete — that shows up clearly on the task, never as a finished run.'
-              : 'cezar reads each detected project and writes a spec there. It stops at the spec — you review the proposals, then start the implementation yourself.'}
+              ? 'cezar-plus writes a spec in each detected project, then keeps going: a bounded implementation run starts in the same repo, commits locally, and never pushes. A run can stop early on its step budget with the work incomplete — that shows up clearly on the task, never as a finished run.'
+              : 'cezar-plus reads each detected project and writes a spec there. It stops at the spec — you review the proposals, then start the implementation yourself.'}
           </p>
         </div>
         <Switch
