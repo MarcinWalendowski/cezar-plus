@@ -1,11 +1,16 @@
 # Composer review-step toggles
 
-**Status:** Implemented. Gates green: `typecheck:contract`/`typecheck:client`/`typecheck:server`/
-`typecheck:web` all clean; full test suites `packages/contract` 25/25, `packages/api-client`
-57/57, `packages/web` 4254/4254 (192 files), `packages/cezar` 7967/7971 (458 files, 4 pre-existing
-skips unrelated to this change). **No runtime E2E has been executed yet** — starting a real
-`spec-to-deploy` task from the composer with a toggle off and watching the step rail omit the
-matching step. Ships as **QA needed** until that is run, per this repo's own Definition of Done.
+**Status:** Implemented and deployed. Gates green: `typecheck:contract`/`typecheck:client`/
+`typecheck:server`/`typecheck:web` all clean; full test suites `packages/contract` 25/25,
+`packages/api-client` 57/57, `packages/web` 4254/4254 (192 files), `packages/cezar` 7967/7971
+(458 files, 4 pre-existing skips unrelated to this change) — verified BOTH on the branch and again
+on the tree merged with `origin/main` (the merged-tree gate, since a clean textual merge alone is
+not evidence). Landed via PR #16 (`cez/2ac77920` → `main`, merge commit `2904159f`) and activated
+on `prod-host` via `scripts/activate-main.sh` on 2026-08-30 — `GET /api/v1/ready` confirms
+`deploy.sha: 2904159f...`, `dirty: false`, a clean blue-green cutover (93ms gap). **The one thing
+still not executed is a runtime E2E of the FEATURE ITSELF** — clicking the toggles in the composer
+in a real browser and confirming the step rail omits the matching step. The owner explicitly chose
+to skip that pass for this session; a future session should do it before removing this caveat.
 **Date:** 2026-08-30
 **Repo:** `cezar`
 
