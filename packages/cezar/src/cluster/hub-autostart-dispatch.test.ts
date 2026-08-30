@@ -168,6 +168,94 @@ describe('cluster/hub-autostart-dispatch', () => {
     expect(ack.opId.length).toBeLessThanOrEqual(64); // the contract's bound
   });
 
+  // ---- localStartOptions: the same claim, asked without a placement ----------------------------
+  //
+  // `.ai/specs/2026-08-30-run-button-claim-options.md` S1. `POST /todos/:id/start` needs the CLAIM
+  // and must never take the PLACEMENT — a person pressing Run runs it on this host (D15a row 1),
+  // and a route that called `place()` for the options alone would have to ignore a `remote`
+  // answer, dispatching the work elsewhere AND starting it here.
+
+  it('localStartOptions answers `{clustered: false}` for an unpaired project — and never dispatches', async () => {
+    writeConfig([{ id: 'proj-local', root: repoRoot }]);
+    writePeers([{ projectKey: 'proj-key-1', byNode: { 'hub-1': { nodeId: 'hub-1', projectId: 'proj-local' } } }]);
+    const { dispatch, hub } = fakeDispatcher(() => {
+      throw new Error('asking for start options must not place anything');
+    });
+
+    const seam = createHubAutostartDispatch(deps({ dispatcher: hub }));
+
+    await expect(seam.localStartOptions({ repoRoot })).resolves.toEqual({ clustered: false });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('localStartOptions answers a SELF-CONFIRMED clustered claim for a paired project', async () => {
+    writeConfig([{ id: 'proj-local', root: repoRoot }]);
+    writePeers([
+      {
+        projectKey: 'proj-key-1',
+        byNode: {
+          'hub-1': { nodeId: 'hub-1', projectId: 'proj-local', confirmedAt: '2026-08-23T00:00:00.000Z' },
+        },
+      },
+    ]);
+    const { dispatch, hub } = fakeDispatcher(() => {
+      throw new Error('asking for start options must not place anything');
+    });
+
+    const seam = createHubAutostartDispatch(deps({ dispatcher: hub }));
+    const options = await seam.localStartOptions({ repoRoot });
+
+    expect(options.clustered).toBe(true);
+    // Exercised, not merely present — the same standard the local-placement case above holds the
+    // confirmer to. A confirmer that answered nothing would leave `hub-unconfirmed` intact.
+    const ack = await options.confirmStart!({
+      dataDir: join(repoRoot, '.ai/cezar'),
+      todoId: 'todo-1',
+      taskId: 'run-1',
+    });
+    expect(ack?.accepted).toBe(true);
+    expect(ack?.hubSeq).toBe(7);
+  });
+
+  it('NO DRIFT — place() and localStartOptions agree in BOTH pairing states', async () => {
+    // The two answers used to be separate literals in separate branches, which is how a two-branch
+    // rule loses a half. Both now come from one `claimFor`, and this asserts that rather than
+    // stating it in a comment.
+    //
+    // Compared by SHAPE, not by `toEqual`: a correct paired answer carries a fresh `confirmStart`
+    // closure each call, so reference equality would fail against working code. The shape is what
+    // can actually diverge — `clustered`, and whether a confirmer exists at all. (Two branches
+    // re-inlined to the SAME literal would still pass; that is not drift, it is duplication, and
+    // no test can see it.)
+    const shape = (o: { clustered?: boolean; confirmStart?: unknown } | undefined) => ({
+      clustered: o?.clustered,
+      hasConfirmer: typeof o?.confirmStart === 'function',
+    });
+    const paired = {
+      projectKey: 'proj-key-1',
+      byNode: { 'hub-1': { nodeId: 'hub-1', projectId: 'proj-local', confirmedAt: '2026-08-23T00:00:00.000Z' } },
+    };
+    const unpaired = { projectKey: 'proj-key-1', byNode: { 'hub-1': { nodeId: 'hub-1', projectId: 'proj-local' } } };
+
+    for (const [name, pairing, expected] of [
+      ['unpaired', unpaired, { clustered: false, hasConfirmer: false }],
+      ['paired', paired, { clustered: true, hasConfirmer: true }],
+    ] as const) {
+      writeConfig([{ id: 'proj-local', root: repoRoot }]);
+      writePeers([pairing]);
+      const { hub } = fakeDispatcher(() => ({ placement: { status: 'placed', nodeId: 'hub-1' } }));
+      const seam = createHubAutostartDispatch(deps({ dispatcher: hub }));
+
+      const placed = await seam.place({ todo, workflow, repoRoot, dataDir: join(repoRoot, '.ai/cezar') });
+      const asked = await seam.localStartOptions({ repoRoot });
+
+      // Both halves: they agree with each other AND with the answer this state is supposed to have,
+      // so two branches that drifted together are still caught.
+      expect(shape((placed as { startOptions?: { clustered?: boolean } }).startOptions), name).toEqual(expected);
+      expect(shape(asked), name).toEqual(expected);
+    }
+  });
+
   it('a DECLINED dispatch (already-dispatched) becomes {start: "none"} naming the EXISTING dispatch, not a new reason', async () => {
     writeConfig([{ id: 'proj-local', root: repoRoot }]);
     writePeers([

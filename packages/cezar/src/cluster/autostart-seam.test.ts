@@ -14,6 +14,7 @@ import {
   createSpokeAutostartCluster,
   currentAutostartDispatch,
   currentClusterAutostart,
+  startOptionsForHumanStart,
 } from './autostart-seam.ts';
 
 /**
@@ -128,5 +129,56 @@ describe('cluster/autostart-seam — createHubAutostartCluster', () => {
     );
 
     expect(decision).toEqual({ allowed: false, reason: 'already claimed by node some-spoke' });
+  });
+});
+
+describe('cluster/autostart-seam — startOptionsForHumanStart', () => {
+  /**
+   * `.ai/specs/2026-08-30-run-button-claim-options.md` S2 — what `POST /todos/:id/start` asks
+   * before it stamps. The route is the one `markStarted` call site that reaches the write directly
+   * rather than through a placement, so this helper is the whole of its cluster awareness.
+   */
+  it('asks an armed placement policy — a hub confirms its OWN claim, so the stamp can land', async () => {
+    const asked: string[] = [];
+    const dispose = armClusterAutostart({
+      cluster: CLUSTERING_OFF,
+      dispatch: {
+        localStartOptions: async ({ repoRoot }) => {
+          asked.push(repoRoot);
+          return { clustered: true, confirmStart: async () => undefined };
+        },
+        place: () => {
+          throw new Error('a human start places nothing — D15a row 1 runs it on this host');
+        },
+      },
+    });
+    try {
+      const options = await startOptionsForHumanStart('/repos/cezar');
+
+      expect(asked).toEqual(['/repos/cezar']);
+      expect(options.clustered).toBe(true);
+      expect(options.confirmStart).toBeTypeOf('function');
+      // The hub's answer, NOT the fallback — if this were `humanIntent` the route would write an
+      // optimistic claim on the one node that has no hub to reconcile it.
+      expect(options.humanIntent).toBeUndefined();
+    } finally {
+      dispose();
+    }
+  });
+
+  it('falls back to humanIntent with nothing armed — D15a row 1, a person asserting intent here', async () => {
+    expect(currentAutostartDispatch()).toBe(DISPATCH_LOCAL);
+
+    await expect(startOptionsForHumanStart('/repos/cezar')).resolves.toEqual({ humanIntent: true });
+  });
+
+  it('NEGATIVE CONTROL — the fallback must not be `{clustered: false}`', async () => {
+    // The tempting shortcut, and a silent lie on a SPOKE: it would assert a claim nobody
+    // serialized, on the exact node where a second machine can hold a rival one. `humanIntent` is
+    // inert on single-node cezar (the environment reads as unclustered and the flag is never
+    // consulted), so the honest answer costs nothing there and is correct on a spoke.
+    const options = await startOptionsForHumanStart('/repos/cezar');
+
+    expect(options.clustered).toBeUndefined();
   });
 });
