@@ -106,6 +106,7 @@ import { currentUsage, onUsage } from '../core/process-usage.ts';
 import { currentHostMetrics } from '../core/host-metrics.ts';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.ts';
 import {
+  applyReviewStepToggles,
   DEFAULT_WORKFLOW,
   DEFAULT_WORKFLOW_NAME,
   normalizeWorkflowDoc,
@@ -964,6 +965,12 @@ const startRunSchema = z
     // Autonomous mode (#autonomous): the run never parks at `waiting` — it
     // auto-continues until the agent signals done. No "needs you" is raised.
     autonomous: z.boolean().optional(),
+    // Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`).
+    // Default true (absent = today's behaviour) — an explicit `false` drops the matching step
+    // (`review-spec-local` / `review-spec`) from the resolved workflow. No-op on a workflow
+    // without that step id.
+    reviewSameModel: z.boolean().optional(),
+    reviewCrossModel: z.boolean().optional(),
     // Generate follow-up inbox entries (spec 007, #444). Honoured only while
     // the `followups` capability is on (#471) — off, the server pins it to
     // false whatever the client asked for. Omitted still means "enabled" for
@@ -2791,21 +2798,40 @@ export function createApp(deps: ServerDeps) {
    */
   const resolveRunWorkflow = async (
     root: string,
-    body: { workflow?: string; steps?: WorkflowDef['steps'] },
+    body: {
+      workflow?: string;
+      steps?: WorkflowDef['steps'];
+      // Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`).
+      // Default true (absent = today's behaviour); applied below regardless of which branch
+      // resolved the workflow, so a named/default/inline chain all answer the same way.
+      reviewSameModel?: boolean;
+      reviewCrossModel?: boolean;
+    },
   ): Promise<{ workflow: WorkflowDef } | { error: string; status: 400 | 404 }> => {
+    const toggles = { reviewSameModel: body.reviewSameModel, reviewCrossModel: body.reviewCrossModel };
     if (body.steps) {
       const issue = stepsIssue(body.steps);
       if (issue) return { error: issue, status: 400 };
-      return { workflow: { name: '(planned)', source: 'built-in', steps: body.steps } };
+      return {
+        workflow: applyReviewStepToggles(
+          { name: '(planned)', source: 'built-in', steps: body.steps },
+          toggles,
+        ),
+      };
     }
     const { workflows } = await loadWorkflows(root);
     if (body.workflow) {
       const named = workflows.find((w) => w.name === body.workflow);
       return named
-        ? { workflow: named }
+        ? { workflow: applyReviewStepToggles(named, toggles) }
         : { error: `unknown workflow: ${body.workflow}`, status: 404 };
     }
-    return { workflow: workflows.find((w) => w.name === DEFAULT_WORKFLOW_NAME) ?? DEFAULT_WORKFLOW };
+    return {
+      workflow: applyReviewStepToggles(
+        workflows.find((w) => w.name === DEFAULT_WORKFLOW_NAME) ?? DEFAULT_WORKFLOW,
+        toggles,
+      ),
+    };
   };
 
   /**
@@ -5382,6 +5408,12 @@ export function createApp(deps: ServerDeps) {
       const resolvedWorkflow = await resolveRunWorkflow(repoRoot, {
         ...(parsed.data.workflow === undefined ? {} : { workflow: parsed.data.workflow }),
         ...(parsed.data.steps === undefined ? {} : { steps: parsed.data.steps }),
+        ...(parsed.data.reviewSameModel === undefined
+          ? {}
+          : { reviewSameModel: parsed.data.reviewSameModel }),
+        ...(parsed.data.reviewCrossModel === undefined
+          ? {}
+          : { reviewCrossModel: parsed.data.reviewCrossModel }),
       });
       if ('error' in resolvedWorkflow) {
         return c.json({ error: resolvedWorkflow.error }, resolvedWorkflow.status);
