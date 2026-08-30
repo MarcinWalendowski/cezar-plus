@@ -21,7 +21,7 @@ import type {
 } from '@loki-labs/better-cezar-contract';
 import type { HubDispatcher } from './hub-dispatch.ts';
 import type { HubSeqAllocator } from './hub-seq.ts';
-import type { TodoStartConfirmer } from '../todos.ts';
+import type { TodoStartConfirmer, TodoStartOptions } from '../todos.ts';
 import { buildPlacementCandidates } from './hub-candidates.ts';
 import { readPeers } from './peers.ts';
 import type { TodoAutostartDispatch, TodoDispatchOutcome } from '../todo-autostart.ts';
@@ -103,7 +103,24 @@ export function createHubAutostartDispatch(deps: HubAutostartDispatchDeps): Todo
       };
     };
 
+  /**
+   * **The one definition of "what kind of claim is a local start here".**
+   *
+   * `place()` and `localStartOptions` both need it and used to be the only caller each — two
+   * copies of a two-branch rule, which is how the halves drift. Keyed on the pairing because that
+   * is what makes a project clustered: `CEZ_CLUSTER=1` is a property of the NODE, and most
+   * projects on a hub have no peer that could hold a competing claim.
+   */
+  const claimFor = (projectKey: ClusterProjectKey | undefined): TodoStartOptions =>
+    projectKey === undefined
+      ? { clustered: false }
+      : { clustered: true, confirmStart: hubSelfConfirm(projectKey) };
+
   return {
+    async localStartOptions({ repoRoot }): Promise<TodoStartOptions> {
+      return claimFor(await pairedProjectKey(repoRoot, deps.identity.nodeId, deps.env, deps.warn));
+    },
+
     async place(input): Promise<TodoDispatchOutcome> {
       const projectKey = await pairedProjectKey(input.repoRoot, deps.identity.nodeId, deps.env, deps.warn);
       if (!projectKey) {
@@ -116,7 +133,7 @@ export function createHubAutostartDispatch(deps: HubAutostartDispatchDeps): Todo
         // competing claim. Left to the environment, `markStarted` would ask a hub that has nobody
         // to ask, refuse `hub-unconfirmed`, and write nothing — so every unpaired todo on a
         // clustered hub would start, fail to stamp, and be started again by the next pass.
-        return { start: 'local', startOptions: { clustered: false } };
+        return { start: 'local', startOptions: claimFor(undefined) };
       }
 
       const repoInfo = await getRepoInfo(input.repoRoot);
@@ -207,7 +224,7 @@ export function createHubAutostartDispatch(deps: HubAutostartDispatchDeps): Todo
         // cluster is this process. `markStartedWithClaim` re-reads under the todos lease AFTER
         // this returns and refuses `already-started` if a spoke's op won in between, so a genuine
         // race still resolves the normal way — this only removes a round trip to ourselves.
-        return { start: 'local', startOptions: { clustered: true, confirmStart: hubSelfConfirm(projectKey) } };
+        return { start: 'local', startOptions: claimFor(projectKey) };
       }
 
       const sent = attempt.dispatch;

@@ -27,7 +27,7 @@ import {
   type TodoAutostartDispatch,
   type TodoClaimResult,
 } from '../todo-autostart.ts';
-import type { TodoItem } from '../todos.ts';
+import type { TodoItem, TodoStartOptions } from '../todos.ts';
 
 // `DISPATCH_LOCAL` and the dispatch types are defined in `todo-autostart.ts`, beside
 // `CLUSTERING_OFF`, and imported here rather than the other way round. Both constants are compared
@@ -158,4 +158,33 @@ export function createSpokeAutostartCluster(input: {
           'dispatch this todo rather than starting a second copy of it here',
       }),
   };
+}
+
+/**
+ * **What claim a start that a PERSON asked for on this host should make** —
+ * `.ai/specs/2026-08-30-run-button-claim-options.md` S2. Asked by `POST /todos/:id/start`, the one
+ * `markStarted` call site that reaches the write directly instead of through a placement.
+ *
+ * Two branches, each naming its rule:
+ *
+ *  - **A placement policy is armed** — this node is a hub, and it is the thing that would
+ *    acknowledge its own claim. Ask it (`localStartOptions`), which answers `{clustered: false}` for
+ *    a project this hub has no confirmed pairing for and a self-confirmed clustered claim when it
+ *    does.
+ *  - **Nothing armed** — D15a row 1: *"a person clicks the Run button, or `cez run` — **proceeds**,
+ *    a human is asserting intent on this host."* Right for a **spoke** (optimistic, stamped
+ *    pending, reconciled when the link returns) and inert on **single-node** cezar, where
+ *    `clusteringOn()` reads the environment as off and never consults the flag. Deliberately not
+ *    `{clustered: false}`: on a spoke that would be a single-node lie, asserting a claim nobody
+ *    serialized.
+ *
+ * **Named for the human case, and autostart must not call it.** D15a row 3 says a *replicated*
+ * todo's autostart REFUSES while the link is down; a helper that answers "proceed" would erase that
+ * row. `startAutostartTodo` gets its options from `place()`, which is the only thing that knows
+ * whether the todo is this node's to start.
+ */
+export async function startOptionsForHumanStart(repoRoot: string): Promise<TodoStartOptions> {
+  const dispatch = currentAutostartDispatch();
+  if (dispatch !== DISPATCH_LOCAL) return dispatch.localStartOptions({ repoRoot });
+  return { humanIntent: true };
 }

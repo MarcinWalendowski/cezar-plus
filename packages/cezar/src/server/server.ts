@@ -124,6 +124,7 @@ import {
   clearStartedTaskId,
   createTodo,
   markStarted,
+  markStartedWithClaim,
   onTodosChanged,
   readTodos,
   removeTodo,
@@ -131,8 +132,18 @@ import {
   updateTodo,
   type TodoItem,
 } from '../todos.ts';
-import { watchTodoAutostart, type TodoAutostartProject } from '../todo-autostart.ts';
-import { currentAutostartDispatch, currentClusterAutostart } from '../cluster/autostart-seam.ts';
+import {
+  forgetPendingRun,
+  pendingRunForTodo,
+  rememberPendingRun,
+  watchTodoAutostart,
+  type TodoAutostartProject,
+} from '../todo-autostart.ts';
+import {
+  currentAutostartDispatch,
+  currentClusterAutostart,
+  startOptionsForHumanStart,
+} from '../cluster/autostart-seam.ts';
 import { watchReopenRequests, type ReopenWatchProject } from '../reopen-watch.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
 import {
@@ -6577,6 +6588,24 @@ export function createApp(deps: ServerDeps) {
         }
         if (todo.startedTaskId) return c.json({ error: 'already started' }, 409);
 
+        // **The guard `startedTaskId` cannot be** (D43;
+        // `.ai/specs/2026-08-30-run-button-claim-options.md` S4). A previous press — or an
+        // autostart pass — may have started a run whose claim could not be recorded, and the
+        // record therefore still reads unstarted. Pressing again would spend the subscription
+        // twice on one todo, which is what this route did in production for five days.
+        //
+        // 409 either way: a run for this todo EXISTS, and that is true whether or not the record
+        // can be made to say so. The retry is what turns the orphan into an ordinary started entry
+        // when the claim can finally land, so the board recovers on the next press with no reconcile
+        // pass involved.
+        const orphan = pendingRunForTodo(dataDir, id);
+        if (orphan !== undefined) {
+          if (await markStarted(dataDir, id, orphan, await startOptionsForHumanStart(repoRoot))) {
+            forgetPendingRun(dataDir, id);
+          }
+          return c.json({ error: 'already started' }, 409);
+        }
+
         let task = todoTaskText(todo);
         if (parsed.data?.prompt) task += `\n\n${parsed.data.prompt}`;
 
@@ -6601,6 +6630,17 @@ export function createApp(deps: ServerDeps) {
         const blocked = await providerActionError(requirements, repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
 
+        // **Resolved BEFORE the start, so nothing but `startRun` sits between the run and its
+        // stamp** — the window `todo-autostart.ts` keeps deliberately small, for the same reason: a
+        // crash inside it leaves a run the record does not know about.
+        //
+        // Without this the options were absent, so `markStarted` decided from the environment —
+        // and on a node with `CEZ_CLUSTER=1` that means asking a hub that has nobody to ask,
+        // refusing `hub-unconfirmed`, and writing NOTHING. Measured on `prod-host`: 0 of 13
+        // Run presses stamped since the cluster flip, against 8 of 8 autostarts, which is the
+        // control that says the environment was never the problem — this call site was.
+        const startOptions = await startOptionsForHumanStart(repoRoot);
+
         const run = manager.startRun(workflow, {
           task,
           runner: parsed.data?.runner,
@@ -6611,7 +6651,38 @@ export function createApp(deps: ServerDeps) {
           // autostart path (`todo-autostart.ts`) is the opposite case and inherits instead.
           author: authorOf(c, 'todo-start'),
         });
-        await markStarted(dataDir, id, run.id);
+        // The answer is READ. Discarding it is what made the failure silent: the refusal is
+        // deliberate and correct in `markStartedWithClaim` ("the absence is the point"), but the
+        // stamp it withholds is the only thing joining this run to its todo, so the absence that
+        // was meant to prevent a second run is what caused one.
+        // The answer is READ, and its REASON decides what to do with the run that already exists.
+        // Discarding it is what made the failure silent: the refusal is deliberate and correct in
+        // `markStartedWithClaim` ("the absence is the point"), but the stamp it withholds is the
+        // only thing joining this run to its todo — so the absence meant to prevent a second run is
+        // what caused one.
+        //
+        // **A refusal that names a WINNER means this run is the duplicate; one that means "nobody
+        // could confirm" leaves it standing.** That split is the whole decision:
+        //  - `already-started` — two presses raced past the guard above (both read the todo before
+        //    either stamped, which no re-read narrows to zero), or an autostart pass claimed it in
+        //    between. Someone else's run holds the todo, so the loser cancels ITSELF rather than
+        //    leaving two agents on one task.
+        //  - `hub-refused` — another NODE holds the claim. Same thing across machines, which is the
+        //    more expensive version: two worktrees, neither able to see the other.
+        //  - `hub-unconfirmed` / `not-found` — nobody won; this run is the only one, and it is real.
+        //    Remember it (D43) so the next press settles it instead of starting a second.
+        const claim = await markStartedWithClaim(dataDir, id, run.id, startOptions);
+        if (!claim.started) {
+          if (claim.reason === 'already-started' || claim.reason === 'hub-refused') {
+            manager.cancel(run.id);
+            return c.json({ error: claim.message ?? 'already started' }, 409);
+          }
+          rememberPendingRun(dataDir, id, run.id);
+          console.warn(
+            `[cezar] run ${run.id} started for todo ${id} but the record could not be stamped ` +
+              `(${claim.reason ?? 'unknown'}) — the next press will settle it rather than starting a second run`,
+          );
+        }
         return c.json({ run }, 201);
       },
     );
