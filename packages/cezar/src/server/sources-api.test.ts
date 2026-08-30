@@ -1,11 +1,14 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { FileSourceSink } from '../sources/sink.ts';
+import type { SourceDocumentRef, SourceProvider } from '../sources/provider-types.ts';
+import { SourceRuntime } from '../sources/runtime.ts';
 import { SourceStore } from '../sources/store.ts';
+import { computeDocId } from '../sources/sync.ts';
 import { mirroredDocumentSchema, type MirroredDocument } from '../sources/types.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
@@ -17,20 +20,15 @@ import { createApp } from './server.ts';
  * `.ai/specs/2026-08-06-external-source-connectors-notion.md` ("API Contracts", "Phase 4") and
  * `.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D19.
  *
- * **Why the "on" cases go through a NON-boot project.** `server.ts`'s `bootContext` (the object
- * every unscoped `/api/v1/...` request AND the `default`/boot-id `/p/:projectId` spellings resolve
- * to) is built without a `sourceStore` field at all — unlike `ProjectContexts.build()`, which wires
- * it correctly under `CEZ_SOURCES=1` (`project-context.test.ts`'s own "central-hub activation"
- * suite proves that half). That gap is in `server.ts`, which this package does not own (plan D6),
- * so it is reported rather than patched here — see the implementation report. Routing every "flag
- * on" case through a project registered under its OWN id (never `default`, never the boot id) is
- * what keeps this suite green regardless of that gap AND is what a real second project already
- * exercises correctly today.
+ * The tests inject the runtime-owned SourceStore into both the boot and lazy project contexts, the
+ * same instance the scheduler uses. That keeps each route request and the workspace scheduler on
+ * one durable source view.
  */
 describe('sources HTTP handlers (F2, CEZ_SOURCES)', () => {
   let bootRoot: string;
   let projectRoot: string;
   let bootStore: RunStore;
+  const runtimes: SourceRuntime[] = [];
 
   beforeEach(() => {
     bootRoot = mkdtempSync(join(tmpdir(), 'cezar-sources-api-boot-'));
@@ -40,17 +38,46 @@ describe('sources HTTP handlers (F2, CEZ_SOURCES)', () => {
   });
 
   afterEach(() => {
+    for (const runtime of runtimes.splice(0)) void runtime.stop();
     bootStore.flush();
     rmSync(bootRoot, { recursive: true, force: true });
     rmSync(projectRoot, { recursive: true, force: true });
   });
 
-  function app(env: NodeJS.ProcessEnv): ReturnType<typeof createApp> {
+  function app(
+    env: NodeJS.ProcessEnv,
+    resolveProvider: () => SourceProvider = testProvider,
+  ): ReturnType<typeof createApp> {
+    const runtime = env.CEZ_SOURCES === '1'
+      ? new SourceRuntime({
+          listProjects: async () => [{ id: 'proj', root: projectRoot, status: 'not-git' as const }],
+          bootProjectId: 'boot',
+          bootRoot,
+          env,
+          resolveProvider,
+        })
+      : undefined;
+    if (runtime) runtimes.push(runtime);
     const contexts = new ProjectContexts({
       listProjects: async () => [{ id: 'proj', root: projectRoot, status: 'not-git' as const }],
       env,
+      sourceStore: runtime ? (projectId, root) => runtime.store(projectId, root)! : undefined,
     });
-    return createApp({ repoRoot: bootRoot, store: bootStore, manager: {} as RunManager, version: 'test', contexts });
+    return createApp({ repoRoot: bootRoot, store: bootStore, manager: {} as RunManager, version: 'test', contexts, sourceRuntime: runtime });
+  }
+
+  function testProvider(): SourceProvider {
+    return {
+      kind: 'notion',
+      capabilities: { list: true, fetch: true, poll: true, push: false, comments: false },
+      detect: async () => ({ available: true }),
+      detectCached: () => ({ available: true }),
+      listCollections: async () => [],
+      listDocuments: async () => ({ documents: [], nextPageCursor: null, complete: true, truncated: false }),
+      fetchDocument: async () => null,
+      pollChanges: async () => ({ changes: [], watermark: null, nextPageCursor: null, complete: true, truncated: false }),
+      viewUrl: () => null,
+    };
   }
 
   const json = (body: unknown, method = 'POST'): RequestInit => ({
@@ -131,7 +158,7 @@ describe('sources HTTP handlers (F2, CEZ_SOURCES)', () => {
         kind: 'notion',
         name: 'Team wiki',
         revision: 1,
-        enabled: false,
+        enabled: true,
         mode: 'mirror',
         intervalSeconds: 900,
         syncState: 'never-synced',
@@ -192,6 +219,56 @@ describe('sources HTTP handlers (F2, CEZ_SOURCES)', () => {
       expect(deletedAgain.status).toBe(404);
     });
 
+    it('persists paused state for disabled and archived connections, and makes re-enable immediately due', async () => {
+      const server = app(ON);
+      const created = ((await (await apiRequest(server, `${base}/sources`, json({ kind: 'notion', name: 'Stateful' }))).json()) as {
+        connection: { id: string; revision: number };
+      }).connection;
+
+      const disabled = await apiRequest(
+        server,
+        `${base}/sources/${created.id}`,
+        json({ kind: 'notion', name: 'Stateful', enabled: false, expectedRevision: created.revision }, 'PUT'),
+      );
+      expect(disabled.status).toBe(200);
+      const disabledConnection = (await disabled.json() as { connection: Record<string, unknown> }).connection;
+      expect(disabledConnection).toMatchObject({ enabled: false, syncState: 'paused' });
+      expect(disabledConnection.syncStateAt).toBe(disabledConnection.updatedAt);
+
+      const reenabled = await apiRequest(
+        server,
+        `${base}/sources/${created.id}`,
+        json({ kind: 'notion', name: 'Stateful', enabled: true, expectedRevision: disabledConnection.revision }, 'PUT'),
+      );
+      expect(reenabled.status).toBe(200);
+      const reenabledConnection = (await reenabled.json() as { connection: Record<string, unknown> }).connection;
+      expect(reenabledConnection.nextDueAt).toBe(reenabledConnection.updatedAt);
+
+      const archived = await apiRequest(
+        server,
+        `${base}/sources/${created.id}`,
+        json({ kind: 'notion', name: 'Stateful', mode: 'archived', expectedRevision: reenabledConnection.revision }, 'PUT'),
+      );
+      expect(archived.status).toBe(200);
+      expect((await archived.json() as { connection: Record<string, unknown> }).connection).toMatchObject({
+        mode: 'archived',
+        syncState: 'paused',
+      });
+    });
+
+    it('creates disabled connections already paused', async () => {
+      const response = await apiRequest(
+        app(ON),
+        `${base}/sources`,
+        json({ kind: 'notion', name: 'Paused from birth', enabled: false }),
+      );
+      expect(response.status).toBe(201);
+      expect((await response.json() as { connection: Record<string, unknown> }).connection).toMatchObject({
+        enabled: false,
+        syncState: 'paused',
+      });
+    });
+
     it('the providers catalog lists notion with capability data, a credential hint, and never a token field', async () => {
       const res = await apiRequest(app(ON), `${base}/sources/providers`);
       const { providers } = (await res.json()) as { providers: Array<Record<string, unknown>> };
@@ -217,6 +294,37 @@ describe('sources HTTP handlers (F2, CEZ_SOURCES)', () => {
 
       const unknown = await apiRequest(server, `${base}/sources/nope/collections`);
       expect(unknown.status).toBe(404);
+    });
+
+    it('comments route reads the durable per-connection comment stream', async () => {
+      const server = app(ON);
+      const created = ((await (await apiRequest(
+        server,
+        `${base}/sources`,
+        json({ kind: 'notion', name: 'Comments', watchComments: true }),
+      )).json()) as { connection: { id: string } }).connection;
+      const sourceStore = runtimes.at(-1)!.store('proj', projectRoot)!;
+      sourceStore.appendComments(created.id, 'doc-1', [{
+        externalId: 'comment-1',
+        author: 'user-1',
+        body: 'Keep this separate from the document body.',
+        createdAt: '2026-08-30T00:00:00.000Z',
+        attachments: [{ type: 'image', downloadable: false }],
+      }]);
+
+      const response = await apiRequest(server, `${base}/sources/${created.id}/comments`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        comments: [{
+          id: 'comment-1',
+          docId: 'doc-1',
+          externalId: 'comment-1',
+          author: 'user-1',
+          body: 'Keep this separate from the document body.',
+          createdAt: '2026-08-30T00:00:00.000Z',
+          attachments: [{ type: 'image', downloadable: false }],
+        }],
+      });
     });
 
     // ---- the headline control: a document GET carries STORED provenance, never computed --------
@@ -303,28 +411,129 @@ describe('sources HTTP handlers (F2, CEZ_SOURCES)', () => {
       expect(repeat.status).toBe(404);
     });
 
-    it('sync and resolve stay 409 even with the flag on — the sweep (plan W4.4) has not landed', async () => {
+    it('manual sync returns 202 and resolve rejects a non-conflict document', async () => {
       const server = app(ON);
       const created = ((await (await apiRequest(server, `${base}/sources`, json({ kind: 'notion', name: 'A' }))).json()) as {
-        connection: { id: string };
+        connection: { id: string; kind: string; revision: number };
       }).connection;
 
       const sync = await apiRequest(server, `${base}/sources/${created.id}/sync`, { method: 'POST' });
-      expect(sync.status).toBe(409);
-      expect(((await sync.json()) as { error: string }).error).toMatch(/sync engine/i);
+      expect(sync.status).toBe(202);
+      expect(((await sync.json()) as { syncId: string }).syncId).toBeTruthy();
+
+      // A document that really exists and is deliberately NOT quarantined — otherwise this asserts
+      // the unknown-document 404 below, not the "not in conflict" refusal it is named for.
+      const sink = new FileSourceSink(join(projectRoot, '.ai/cezar'), created.id);
+      const okDocId = computeDocId(created, 'doc-1');
+      await sink.upsert(
+        mirroredDocumentSchema.parse({
+          docId: okDocId,
+          title: 'Settled document',
+          source: {
+            kind: 'notion',
+            connectionId: created.id,
+            externalId: 'doc-1',
+            url: 'https://notion.so/doc-1',
+            remoteVersion: 'v1',
+            mirroredAt: '2026-08-30T00:00:00.000Z',
+          },
+          collectionExternalId: 'db-1',
+          remoteVersionSeen: 'v1',
+        }),
+        'Settled body.',
+      );
 
       const resolve = await apiRequest(
         server,
-        `${base}/sources/${created.id}/documents/doc-1/resolve`,
+        `${base}/sources/${created.id}/documents/${okDocId}/resolve`,
         json({ action: 'keep-local' }),
       );
       expect(resolve.status).toBe(409);
-      expect(((await resolve.json()) as { error: string }).error).toMatch(/conflict resolution/i);
+      expect(((await resolve.json()) as { error: string }).error).toMatch(/not in conflict/i);
+
+      // An unknown docId is a 404, exactly like the unknown connection id below — the conflict
+      // refusal is never used to paper over an id that does not resolve.
+      const unknownDoc = await apiRequest(
+        server,
+        `${base}/sources/${created.id}/documents/${computeDocId(created, 'nope')}/resolve`,
+        json({ action: 'keep-local' }),
+      );
+      expect(unknownDoc.status).toBe(404);
 
       // A well-formed but unknown connection id still 404s before the "pending" answer — the
       // pending 409 is not used to paper over a bad id.
       const unknownSync = await apiRequest(server, `${base}/sources/nope/sync`, { method: 'POST' });
       expect(unknownSync.status).toBe(404);
+    });
+
+    it('resolves both conflict actions through the current remote ref and preserves displaced bytes', async () => {
+      const currentRef: SourceDocumentRef = {
+        externalId: 'doc-1',
+        collectionExternalId: 'db-1',
+        title: 'Current document',
+        url: 'https://notion.so/doc-1',
+        remoteVersion: 'v4',
+        docType: 'row',
+        properties: {},
+      };
+      const server = app(ON, () => ({
+        ...testProvider(),
+        listDocuments: async () => ({
+          documents: [currentRef],
+          nextPageCursor: null,
+          complete: true,
+          truncated: false,
+          callsUsed: 1,
+        }),
+        fetchDocument: async (ref) => ({ ...ref, body: 'Current remote body.', lossy: [] }),
+      }));
+      const created = ((await (await apiRequest(
+        server,
+        `${base}/sources`,
+        json({ kind: 'notion', name: 'Conflicts', collections: [{ externalId: 'db-1', collectionKind: 'database' }] }),
+      )).json()) as { connection: { id: string; kind: string } }).connection;
+      const dataDir = join(projectRoot, '.ai/cezar');
+      const sink = new FileSourceSink(dataDir, created.id);
+      // `resolveSourceConflict` refuses a docId it cannot re-derive from (kind, connectionId,
+      // externalId), so the fixture has to mint the real one rather than an arbitrary hex string.
+      const docId = computeDocId(created, 'doc-1');
+      const doc: MirroredDocument = mirroredDocumentSchema.parse({
+        docId,
+        title: 'Original document',
+        source: {
+          kind: 'notion',
+          connectionId: created.id,
+          externalId: 'doc-1',
+          url: currentRef.url,
+          remoteVersion: 'v1',
+          mirroredAt: '2026-08-30T00:00:00.000Z',
+        },
+        collectionExternalId: 'db-1',
+        remoteVersionSeen: 'v1',
+      });
+      await sink.upsert(doc, 'Local keep body.');
+      const path = join(dataDir, 'sources', created.id, `${docId}.md`);
+      writeFileSync(path, readFileSync(path, 'utf8').replace('Local keep body.', 'Local keep body edited.'));
+      await sink.quarantine(docId, 'stale-v2', 'Stale remote body.');
+
+      const keep = await apiRequest(server, `${base}/sources/${created.id}/documents/${docId}/resolve`, json({ action: 'keep-local' }));
+      expect(keep.status).toBe(200);
+      expect((await sink.readMeta(docId))?.source.state).toBe('ok');
+      expect((await sink.readMeta(docId))?.remoteVersionSeen).toBe('v4');
+      expect((await sink.read(docId))?.body).toBe('Local keep body edited.');
+
+      const resolved = await sink.readMeta(docId);
+      if (!resolved) throw new Error('resolved document disappeared');
+      await sink.upsert(resolved, 'Local take body edited.');
+      await sink.quarantine(docId, 'stale-v3', 'Stale second remote body.');
+      const take = await apiRequest(server, `${base}/sources/${created.id}/documents/${docId}/resolve`, json({ action: 'take-remote' }));
+      expect(take.status).toBe(200);
+      expect((await sink.read(docId))?.body).toBe('Current remote body.');
+      const conflicts = readdirSync(join(dataDir, 'sources', created.id, 'conflicts'));
+      expect(conflicts.some((name) => name.startsWith(`${docId}.local-`))).toBe(true);
+      expect(conflicts.map((name) => readFileSync(join(dataDir, 'sources', created.id, 'conflicts', name), 'utf8'))).toContain(
+        'Local take body edited.',
+      );
     });
 
     it('the log route paginates by a numeric cursor, newest first', async () => {

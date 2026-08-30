@@ -398,7 +398,7 @@ describe('GET /api/v1/workspace/events', () => {
     ]);
   });
 
-  it('relays workspace-level bus events under their own names (projects, checkout, provider status)', async () => {
+  it('relays workspace-level bus events under their own names (projects, checkout, sources)', async () => {
     const ws = await openStream('/api/v1/workspace/events');
     await ws.readUntil('event: ping');
 
@@ -406,11 +406,13 @@ describe('GET /api/v1/workspace/events', () => {
     bus.emit('checkout-progress', { url: 'octo/repo', phase: 'cloning' });
     bus.emit('project-removed', { id: 'newbie' });
     bus.emit('automation-change', { project: 'newbie', automationId: 'review-prs', revision: 2 });
+    bus.emit('source-sync', { project: 'newbie', connectionId: 'source-1', revision: 3, syncState: 'ok' });
 
-    const body = await ws.readUntil('event: automation-change');
+    const body = await ws.readUntil('event: source-sync');
     expect(payloadsOf(body, 'project-added')).toEqual([{ project: { id: 'newbie', name: 'newbie' } }]);
     expect(payloadsOf(body, 'checkout-progress')).toEqual([{ url: 'octo/repo', phase: 'cloning' }]);
     expect(payloadsOf(body, 'project-removed')).toEqual([{ id: 'newbie' }]);
     expect(payloadsOf(body, 'automation-change')).toEqual([{ project: 'newbie', automationId: 'review-prs', revision: 2 }]);
+    expect(payloadsOf(body, 'source-sync')).toEqual([{ project: 'newbie', connectionId: 'source-1', revision: 3, syncState: 'ok' }]);
   });
 });

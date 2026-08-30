@@ -640,6 +640,9 @@ export class KnowledgeStore {
       read: (docId: string) => base.read(docId),
       list: (connectionId: string) => base.list(connectionId),
       quarantine: (docId, remoteVersion, body) => base.quarantine(docId, remoteVersion, body),
+      ...(base.backupLocal
+        ? { backupLocal: (docId: string, localVersion: string, body: string) => base.backupLocal!(docId, localVersion, body) }
+        : {}),
       tombstone: (docId, at) => base.tombstone(docId, at),
       async adopt(docId: string) {
         const result = await base.adopt(docId);

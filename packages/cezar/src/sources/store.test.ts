@@ -178,6 +178,41 @@ describe('SourceStore', () => {
     expect(store.logs({ limit: 1 })[0]?.seq).toBe(10_501);
   });
 
+  it('recovers the sequence from the newest intact row, stepping over a torn trailing line', async () => {
+    const dir = await directory();
+    const first = SourceStore.open(dir);
+    first.create(input, 'one');
+    for (let i = 0; i < 3; i++) first.appendLog({ connectionId: 'one', event: 'tick' });
+
+    // A crash mid-append leaves a half-written final line. Recovering the sequence must step
+    // over it rather than restart at 0, which would reissue seq values that are already live.
+    const log = join(dir, 'source-log.ndjson');
+    writeFileSync(log, `${readFileSync(log, 'utf8')}{"seq":4,"connectionId":"one"`);
+
+    const reopened = SourceStore.open(dir);
+    expect(reopened.appendLog({ connectionId: 'one', event: 'tick' }).seq).toBe(4);
+  });
+
+  it('recovers the comment sequence from a row larger than the tail window', async () => {
+    const dir = await directory();
+    const store = SourceStore.open(dir);
+    store.create(input, 'one');
+    // A comment body is uncapped (unlike a log `message`), so one row can exceed the 64KiB first
+    // read. The tail scan has to widen until it finds a complete line instead of falling through
+    // to a zeroed sequence, which would reissue ids that are already on disk.
+    const entry = {
+      externalId: 'comment-1',
+      body: 'x'.repeat(200_000),
+      createdAt: '2026-08-30T00:00:00.000Z',
+      attachments: [],
+    };
+    expect(store.appendComments('one', 'doc-1', [entry])[0]?.seq).toBe(1);
+
+    const reopened = SourceStore.open(dir);
+    const next = reopened.appendComments('one', 'doc-1', [{ ...entry, externalId: 'comment-2', body: 'short' }]);
+    expect(next[0]?.seq).toBe(2);
+  });
+
   it('NC-7 (store scope): no key in a serialized connection matches SECRET_NAME_RE', async () => {
     const store = SourceStore.open(await directory());
     store.create(input, 'one');

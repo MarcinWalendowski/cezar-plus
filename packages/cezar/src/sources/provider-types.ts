@@ -98,6 +98,8 @@ export interface SourceDocumentPage {
   nextPageCursor: string | null;
   complete: boolean;
   truncated: boolean;
+  callsUsed?: number;
+  retryAfterMs?: number;
 }
 
 // ---- polling -------------------------------------------------------------------------------
@@ -127,6 +129,10 @@ export interface SourceChangePage {
   nextPageCursor: string | null;
   complete: boolean;
   truncated: boolean;
+  /** Actual provider calls consumed by this page. Missing means charge the full supplied budget. */
+  callsUsed?: number;
+  /** Provider supplied lower bound for the next retry, in milliseconds. */
+  retryAfterMs?: number;
 }
 
 // ---- comments (spec Q17) ------------------------------------------------------------------------
@@ -145,6 +151,15 @@ export interface SourceCommentPage {
   nextPageCursor: string | null;
   complete: boolean;
   truncated: boolean;
+  /** Actual provider calls consumed by this page. Missing means charge the full supplied budget. */
+  callsUsed?: number;
+  /** Provider supplied lower bound for the next retry, in milliseconds. */
+  retryAfterMs?: number;
+}
+
+export interface SourceCommentListOptions {
+  cursor?: string | null;
+  callBudget?: number;
 }
 
 // ---- push (declared, unused in phase 1 — spec Q9) ------------------------------------------------
@@ -177,7 +192,11 @@ export interface SourceProvider {
   listDocuments(opts: SourceListOptions): Promise<SourceDocumentPage>;
   fetchDocument(ref: SourceDocumentRef): Promise<SourceDocument | null>;
   pollChanges(since: SourceWatermark | null, opts: SourcePollOptions): Promise<SourceChangePage>;
-  listComments?(ref: SourceDocumentRef, since?: string): Promise<SourceCommentPage>;
+  listComments?(
+    ref: SourceDocumentRef,
+    since?: string,
+    options?: SourceCommentListOptions,
+  ): Promise<SourceCommentPage>;
   pushDocument?(input: SourcePushInput): Promise<SourcePushResult>;
   viewUrl(ref: SourceDocumentRef): string | null;
 }

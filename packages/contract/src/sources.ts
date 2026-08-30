@@ -152,8 +152,7 @@ export const sourceConnectionWireSchema = z.object({
 });
 export type SourceConnectionWire = z.infer<typeof sourceConnectionWireSchema>;
 
-/** A collection as `GET /sources/:connectionId/collections` browses it on the remote — not yet a
- *  connection's configured `collections[]`. */
+/** A collection configured on a source connection. */
 export const sourceRemoteCollectionSchema = z.object({
   externalId: z.string(),
   collectionKind: sourceCollectionKindSchema,

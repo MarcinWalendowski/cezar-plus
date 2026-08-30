@@ -4,7 +4,7 @@ import { resolveSourceProvider } from './registry.ts';
 import { FileSourceSink } from './sink.ts';
 import type { SourceCoordinator } from './coordinator.ts';
 import type { SourceProvider, SourceProviderDeps } from './provider-types.ts';
-import { runSourceSync } from './sync.ts';
+import { runSourceSync, type SourceSyncResult } from './sync.ts';
 import type { SourceStore } from './store.ts';
 import type { SourceConnection, SourceSink } from './types.ts';
 
@@ -25,8 +25,8 @@ import type { SourceConnection, SourceSink } from './types.ts';
  * **Flag gating is not this file's job.** `CEZ_SOURCES` is read nowhere here, per D4/D19 "no
  * background timer" when the flag is unset is enforced by whoever CONSTRUCTS a
  * `WorkspaceSourceScheduler` (the boot flow in `server.ts`/`project-context.ts`, W1.1/W3.1's
- * ownership), by simply not constructing one. Nothing wires this scheduler into the boot flow yet,
- * see this package's implementation report.
+ * ownership), by simply not constructing one. `SourceRuntime` owns that construction in the
+ * enabled server path.
  */
 
 export interface ProjectSourceHandle {
@@ -40,7 +40,7 @@ export interface ProjectSourceHandle {
   sink?: (connectionId: string) => SourceSink;
   providerDeps?: SourceProviderDeps;
   callBudget?: number;
-  onChange?: (connectionId: string, revision: number) => void;
+  onChange?: (connectionId: string, revision: number, result?: SourceSyncResult) => void;
 }
 
 export interface WorkspaceSourceSchedulerOptions {
@@ -49,6 +49,12 @@ export interface WorkspaceSourceSchedulerOptions {
   now?: () => number;
   /** Injectable for tests, defaults to the real `./registry.ts` dispatch table. */
   resolveProvider?: (connection: SourceConnection, deps?: SourceProviderDeps) => SourceProvider | null;
+  /** Runtime-owned project queue. Due and manual work must enter through the same queue. */
+  enqueue?: (
+    projectId: string,
+    connectionId: string,
+    operation: () => Promise<SourceSyncResult | undefined>,
+  ) => Promise<SourceSyncResult | undefined>;
 }
 
 interface DueConnectionSync {
@@ -135,14 +141,36 @@ export class WorkspaceSourceScheduler {
   }
 
   private async runOne(next: DueConnectionSync): Promise<void> {
+    if (this.options.enqueue) {
+      await this.options.enqueue(next.handle.projectId, next.connectionId, () => this.execute(next));
+      return;
+    }
+    await this.execute(next);
+  }
+
+  /** Run one connection immediately for the runtime queue, bypassing the queue callback itself. */
+  async runConnection(projectId: string, connectionId: string): Promise<SourceSyncResult | undefined> {
+    const store = this.options.coordinator.store(projectId);
+    if (!store) return undefined;
+    const handle = this.options.handle(projectId, store);
+    if (!handle) return undefined;
+    return this.execute({ handle, store, connectionId });
+  }
+
+  private async execute(next: DueConnectionSync): Promise<SourceSyncResult | undefined> {
     const { handle, store, connectionId } = next;
+    // A sibling process may have changed the definition after this due entry was collected.
+    // Refresh before provider resolution as well as inside the poll-lease winner, so a queued
+    // item never selects a provider from a stale kind or stale connection object.
+    store.reload();
     const connection = store.get(connectionId);
-    if (!connection) return;
+    if (!connection) return undefined;
+    let result: SourceSyncResult | undefined;
     try {
       const provider = this.resolveProvider(connection, handle.providerDeps);
       if (!provider) {
         const at = this.nowIso();
-        store.updateState(connectionId, {
+        const state = store.updateState(connectionId, {
           syncState: 'error',
           syncStateAt: at,
           lastAttemptAt: at,
@@ -151,10 +179,19 @@ export class WorkspaceSourceScheduler {
             message: `no source provider registered for kind "${connection.kind}"`,
           },
         });
-        return;
+        result = {
+          ran: true,
+          syncState: state.syncState,
+          reason: state.lastError?.message,
+          documentCount: state.documentCount,
+          conflictCount: state.conflictCount,
+          tombstoneCount: state.tombstoneCount,
+          complete: false,
+        };
+        return result;
       }
       const sink = handle.sink ? handle.sink(connectionId) : new FileSourceSink(handle.dataDir, connectionId);
-      await runSourceSync({
+      result = await runSourceSync({
         connection,
         store,
         sink,
@@ -163,9 +200,12 @@ export class WorkspaceSourceScheduler {
         callBudget: handle.callBudget,
         now: this.options.now ? () => new Date(this.options.now!()) : undefined,
       });
-      handle.onChange?.(connectionId, connection.revision);
+      return result;
     } finally {
-      this.writeNextDueAt(store, connectionId, connection);
+      store.reload();
+      const latest = store.get(connectionId) ?? connection;
+      this.writeNextDueAt(store, connectionId, latest);
+      handle.onChange?.(connectionId, latest.revision, result);
     }
   }
 

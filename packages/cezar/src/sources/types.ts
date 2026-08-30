@@ -239,6 +239,9 @@ export const sourceStateSchema = z
     conflictCount: z.number().int().nonnegative().default(0),
     tombstoneCount: z.number().int().nonnegative().default(0),
     unresolvedComments: z.number().int().nonnegative().default(0),
+    commentWatermarks: z.record(z.string(), z.string()).default({}),
+    commentPageCursors: z.record(z.string(), z.string()).default({}),
+    commentSweepAt: z.record(z.string(), z.string()).default({}),
     /** The set a naive adoption forgets: without it the next sweep re-mirrors an adopted page as a
      *  brand new document (Q11). Keyed by `externalId`, not `docId`. */
     adoptedExternalIds: z.array(z.string()).max(20_000).default([]),
@@ -268,6 +271,26 @@ export const sourceLogRecordSchema = z
   })
   .passthrough();
 export type SourceLogRecord = z.infer<typeof sourceLogRecordSchema>;
+
+export const sourceCommentAttachmentSchema = z.object({
+  type: z.string(),
+  downloadable: z.boolean(),
+});
+
+export const sourceCommentRecordSchema = z
+  .object({
+    seq: z.number().int().positive(),
+    connectionId: z.string().min(1),
+    id: z.string().min(1),
+    docId: z.string().min(1),
+    externalId: z.string().min(1),
+    author: z.string().optional(),
+    body: z.string(),
+    createdAt: z.string(),
+    attachments: z.array(sourceCommentAttachmentSchema).default([]),
+  })
+  .passthrough();
+export type SourceCommentRecord = z.infer<typeof sourceCommentRecordSchema>;
 
 // ---- the mirrored document record (frontmatter) ----------------------------------------------
 
@@ -352,6 +375,8 @@ export interface SourceSink {
   list(connectionId: string): Promise<MirroredDocumentMeta[]>;
   /** The incoming body is quarantined; the local body is left byte-identical (Q14). */
   quarantine(docId: string, remoteVersion: string, body: string): Promise<void>;
+  /** Preserve the current local body before a take-remote replacement. */
+  backupLocal?(docId: string, localVersion: string, body: string): Promise<void>;
   tombstone(docId: string, at: string): Promise<void>;
   /**
    * The cutover. Moves the file OUT of the mirror root into F1's writable knowledge root

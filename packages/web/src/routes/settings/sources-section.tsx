@@ -1,13 +1,27 @@
-import { useMutation } from '@tanstack/react-query'
 import { PlugZapIcon, RefreshCwIcon } from 'lucide-react'
 import { useState } from 'react'
 
-import { useHealth, useSourceProviders, useSources } from '@/api/queries'
+import {
+  useAdoptSourceDocument,
+  useCreateSourceConnection,
+  useDeleteSourceConnection,
+  useHealth,
+  useResolveSourceConflict,
+  useSourceComments,
+  useSourceDocument,
+  useSourceDocuments,
+  useSourceProviders,
+  useSources,
+  useSyncSourceConnection,
+  useUpdateSourceConnection,
+} from '@/api/queries'
 import type {
   CreateSourceConnectionInput,
   SourceConnectionWire,
   SourceProviderInfo,
+  SourceDocumentListItem,
 } from '@loki-labs/cezar-plus-api-client'
+import { queryScope } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { SourceStatusBadge } from '@/components/source-status-badge'
 import { Button } from '@/components/ui/button'
@@ -22,32 +36,20 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { toast } from '@/components/ui/toaster'
+import { track } from '@/lib/analytics'
 import { cn } from '@/lib/utils'
 
 /**
- * Settings → Sources (F2, central-hub scaffold, `CEZ_SOURCES=1`). Project scope.
+ * Settings → Sources (F2, `CEZ_SOURCES=1`). Project scope.
  * `.ai/specs/2026-08-06-external-source-connectors-notion.md` "UI/UX", narrowed to this
- * package's own brief: configure a connection, list connections, refresh one on demand, and
- * show a connection as stale or erroring. The document browser, the comment stream and the
- * conflict resolver are a later pass (see this file's own "not built here" note below).
+ * package's brief: configure connections, browse mirrored documents and comments, refresh on
+ * demand, and resolve local/remote conflicts without writing to the remote provider.
  *
  * `visibleSettingsSections` keeps this entry out of the nav and unrouted while
  * `capabilities.sources` is false, so the "off" branch below is reachable only through a stale
  * bookmark or a direct visit while the flag is unset — never a plain 404 (D19's shape applies to
  * the cockpit surface too, not only the HTTP routes).
  *
- * ## The mutation gap this package inherited
- *
- * `packages/web/src/api/client.ts` and `queries.ts` are the central-hub scaffold's exclusive
- * files (PLAN.md D6, dispatch clause 5) and, as landed, only carry the sources family's READS
- * (`useSources`, `useSourceProviders`, …) — there is no `createSourceConnection`,
- * `updateSourceConnection`, or `syncSourceConnection` wrapper for this package to call, and this
- * package may not add one without touching a file it does not own. Rather than a button that
- * silently does nothing (indistinguishable from a broken app) or one permanently greyed out with
- * no way to know why, "Add source" and "Sync now" below are wired to a real `useMutation` that
- * fails LOUDLY through the same toast path a genuine `ApiError` would take, naming exactly what
- * is missing. Swap `unwiredSourceMutation` for the real client function once one exists — the
- * `useMutation({ mutationFn })` call shape does not change.
  */
 export function SourcesSection() {
   const health = useHealth()
@@ -77,7 +79,7 @@ export function SourcesSection() {
           icon={<PlugZapIcon />}
           tone="neutral"
           title="External sources are off"
-          subtitle="Set CEZ_SOURCES=1 and restart cezar-plus to turn them on."
+          subtitle="Set CEZ_SOURCES=1 and restart cezar to turn them on."
           heading="h2"
         />
       )}
@@ -85,24 +87,15 @@ export function SourcesSection() {
   )
 }
 
-/** A mutation this package cannot wire yet (see the module docblock) — fails with a message
- *  naming exactly what is missing, through the same `onError` → toast path a real `ApiError`
- *  would take, so a click never reads as the button simply doing nothing. */
-async function unwiredSourceMutation(action: string): Promise<never> {
-  throw new Error(
-    `${action} needs a mutation wrapper in packages/web/src/api/client.ts — not wired up yet.`,
-  )
-}
-
 function SourcesPane() {
   const connections = useSources()
   const providers = useSourceProviders()
   const [addOpen, setAddOpen] = useState(false)
-
-  const syncConnection = useMutation({
-    mutationFn: (_connectionId: string) => unwiredSourceMutation('Refreshing this source'),
-    onError: (error: Error) => toast(error.message, { tone: 'danger' }),
-  })
+  const [editing, setEditing] = useState<SourceConnectionWire | null>(null)
+  const [deleting, setDeleting] = useState<SourceConnectionWire | null>(null)
+  const [browsing, setBrowsing] = useState<SourceConnectionWire | null>(null)
+  const syncConnection = useSyncSourceConnection()
+  const deleteConnection = useDeleteSourceConnection()
 
   if (connections.isPending) {
     return (
@@ -168,8 +161,14 @@ function SourcesPane() {
             <ConnectionRow
               key={connection.id}
               connection={connection}
-              onSync={() => syncConnection.mutate(connection.id)}
-              syncing={syncConnection.isPending}
+              onSync={() => syncConnection.mutate(connection.id, {
+                onSuccess: () => trackSourceEvent('source.sync_requested', connection),
+                onError: (error) => toast(error.message, { tone: 'danger' }),
+              })}
+              onEdit={() => setEditing(connection)}
+              onDelete={() => setDeleting(connection)}
+              onBrowse={() => setBrowsing(connection)}
+              syncing={syncConnection.isPending && syncConnection.variables === connection.id}
             />
           ))}
         </ul>
@@ -182,6 +181,42 @@ function SourcesPane() {
           onOpenChange={setAddOpen}
         />
       ) : null}
+      {editing ? (
+        <AddSourceDialog
+          providers={providers.data?.providers ?? []}
+          providersLoading={providers.isPending}
+          initial={editing}
+          onOpenChange={(open) => !open && setEditing(null)}
+        />
+      ) : null}
+      {deleting ? (
+        <Dialog open onOpenChange={(open) => !open && setDeleting(null)}>
+          <DialogContent data-slot="source-delete-dialog">
+            <DialogHeader>
+              <DialogTitle>Delete {deleting.name}?</DialogTitle>
+              <DialogDescription>
+                This removes the connection definition. Mirrored files remain on disk until you remove them separately.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setDeleting(null)}>Cancel</Button>
+              <Button
+                type="button"
+                variant="danger-ghost"
+                data-action="source-delete-confirm"
+                disabled={deleteConnection.isPending}
+                onClick={() => deleteConnection.mutate(deleting.id, {
+                  onSuccess: () => setDeleting(null),
+                  onError: (error) => toast(error.message, { tone: 'danger' }),
+                })}
+              >
+                Delete connection
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
+      {browsing ? <SourceBrowser connection={browsing} onClose={() => setBrowsing(null)} /> : null}
     </div>
   )
 }
@@ -194,13 +229,32 @@ function reasonFor(connection: SourceConnectionWire): string | undefined {
   return undefined
 }
 
+function trackSourceEvent(
+  name: string,
+  connection: Pick<SourceConnectionWire, 'id' | 'kind'>,
+  extra: Record<string, string | number | boolean> = {},
+): void {
+  track(name, {
+    project: queryScope(),
+    providerKind: connection.kind,
+    connectionId: connection.id,
+    ...extra,
+  })
+}
+
 function ConnectionRow({
   connection,
   onSync,
+  onEdit,
+  onDelete,
+  onBrowse,
   syncing,
 }: {
   connection: SourceConnectionWire
   onSync: () => void
+  onEdit: () => void
+  onDelete: () => void
+  onBrowse: () => void
   syncing: boolean
 }) {
   return (
@@ -216,17 +270,28 @@ function ConnectionRow({
           </div>
         </div>
 
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          data-action="source-sync"
-          disabled={syncing || connection.mode === 'archived'}
-          onClick={onSync}
-        >
-          <RefreshCwIcon aria-hidden="true" />
-          Sync now
-        </Button>
+        <div className="flex flex-wrap gap-1.5">
+          <Button type="button" variant="ghost" size="sm" data-action="source-browse" onClick={onBrowse}>
+            Browse
+          </Button>
+          <Button type="button" variant="ghost" size="sm" data-action="source-edit" onClick={onEdit}>
+            Edit
+          </Button>
+          <Button type="button" variant="ghost" size="sm" data-action="source-delete" onClick={onDelete}>
+            Delete
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            data-action="source-sync"
+            disabled={syncing || !connection.enabled || connection.mode === 'archived' || !connection.availability.available}
+            onClick={onSync}
+          >
+            <RefreshCwIcon aria-hidden="true" />
+            Sync now
+          </Button>
+        </div>
       </div>
 
       <dl className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-soft-foreground">
@@ -255,6 +320,12 @@ function ConnectionRow({
           </div>
         ) : null}
       </dl>
+      {connection.collections.length > 0 ? (
+        <div data-slot="source-configured-collections" className="text-[11.5px] text-soft-foreground">
+          <span className="font-medium text-foreground">Configured collections:</span>{' '}
+          {connection.collections.map((collection) => `${collection.label ?? collection.externalId} (${collection.collectionKind})`).join(', ')}
+        </div>
+      ) : null}
     </li>
   )
 }
@@ -262,28 +333,61 @@ function ConnectionRow({
 function AddSourceDialog({
   providers,
   providersLoading,
+  initial,
   onOpenChange,
 }: {
   providers: readonly SourceProviderInfo[]
   providersLoading: boolean
+  initial?: SourceConnectionWire
   onOpenChange: (open: boolean) => void
 }) {
-  const [selectedKind, setSelectedKind] = useState<string | null>(null)
-  const [name, setName] = useState('')
-
-  const createConnection = useMutation({
-    mutationFn: (_input: CreateSourceConnectionInput) => unwiredSourceMutation('Adding a source'),
-    onError: (error: Error) => toast(error.message, { tone: 'danger' }),
-  })
+  const [selectedKind, setSelectedKind] = useState<string | null>(initial?.kind ?? null)
+  const [name, setName] = useState(initial?.name ?? '')
+  const [enabled, setEnabled] = useState(initial?.enabled ?? true)
+  const [mode, setMode] = useState<'mirror' | 'archived'>(initial?.mode ?? 'mirror')
+  const [intervalSeconds, setIntervalSeconds] = useState(initial?.intervalSeconds ?? 900)
+  const [watchComments, setWatchComments] = useState(initial?.watchComments ?? false)
+  const [collectionId, setCollectionId] = useState(initial?.collections[0]?.externalId ?? '')
+  const [collectionKind, setCollectionKind] = useState<'database' | 'page-tree'>(initial?.collections[0]?.collectionKind ?? 'page-tree')
+  const createConnection = useCreateSourceConnection()
+  const updateConnection = useUpdateSourceConnection()
 
   const selected = providers.find((provider) => provider.kind === selectedKind) ?? null
-  const canSubmit = selected !== null && selected.availability.available && name.trim() !== ''
+  const minimumInterval = selectedKind === 'cezar-hub' ? 60 : 300
+  const canSubmit = selected !== null && (initial || selected.availability.available) && name.trim() !== '' && collectionId.trim() !== '' && intervalSeconds >= minimumInterval
+  const mutationPending = createConnection.isPending || updateConnection.isPending
+  const input: CreateSourceConnectionInput = {
+    kind: selectedKind ?? '',
+    name: name.trim(),
+    enabled,
+    mode,
+    intervalSeconds,
+    collections: [{ externalId: collectionId.trim(), collectionKind }],
+    watchComments,
+  }
+  const submit = () => {
+    if (!canSubmit) return
+    if (initial) {
+      updateConnection.mutate(
+        { connectionId: initial.id, input: { ...input, expectedRevision: initial.revision } },
+        { onSuccess: () => onOpenChange(false), onError: (error) => toast(error.message, { tone: 'danger' }) },
+      )
+    } else {
+      createConnection.mutate(input, {
+        onSuccess: (result) => {
+          trackSourceEvent('source.connection_created', result.connection)
+          onOpenChange(false)
+        },
+        onError: (error) => toast(error.message, { tone: 'danger' }),
+      })
+    }
+  }
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
       <DialogContent data-slot="source-add-dialog">
         <DialogHeader>
-          <DialogTitle>Add a source</DialogTitle>
+          <DialogTitle>{initial ? 'Edit source' : 'Add a source'}</DialogTitle>
           <DialogDescription>
             Pick a provider, then name the connection. Nothing here ever asks for a credential —
             it is read from the machine&apos;s own environment.
@@ -324,6 +428,65 @@ function AddSourceDialog({
           />
         </div>
 
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="source-collection-id">Configured collection ID</Label>
+            <Input
+              id="source-collection-id"
+              data-slot="source-collection-id"
+              placeholder="Notion page or database ID"
+              value={collectionId}
+              onChange={(event) => setCollectionId(event.target.value)}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="source-collection-kind">Collection kind</Label>
+            <select
+              id="source-collection-kind"
+              data-slot="source-collection-kind"
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              value={collectionKind}
+              onChange={(event) => setCollectionKind(event.target.value as 'database' | 'page-tree')}
+            >
+              <option value="page-tree">Page tree</option>
+              <option value="database">Database</option>
+            </select>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="source-interval">Interval, seconds</Label>
+            <Input
+              id="source-interval"
+              data-slot="source-interval"
+              type="number"
+              min={minimumInterval}
+              value={intervalSeconds}
+              onChange={(event) => setIntervalSeconds(Number(event.target.value))}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="source-mode">Mode</Label>
+            <select
+              id="source-mode"
+              data-slot="source-mode"
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              value={mode}
+              onChange={(event) => setMode(event.target.value as 'mirror' | 'archived')}
+            >
+              <option value="mirror">Mirror</option>
+              <option value="archived">Archived</option>
+            </select>
+          </div>
+        </div>
+
+        <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+          <input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />
+          Enabled
+        </label>
+        <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+          <input type="checkbox" checked={watchComments} onChange={(event) => setWatchComments(event.target.checked)} />
+          Watch comments
+        </label>
+
         <DialogFooter>
           <Button
             type="button"
@@ -335,17 +498,155 @@ function AddSourceDialog({
           <Button
             type="button"
             data-action="source-create"
-            disabled={!canSubmit || createConnection.isPending}
-            onClick={() =>
-              selected &&
-              createConnection.mutate({ kind: selected.kind, name: name.trim() })
-            }
+            disabled={!canSubmit || mutationPending}
+            onClick={submit}
           >
-            Create connection
+            {initial ? 'Save connection' : 'Create connection'}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function SourceBrowser({ connection, onClose }: { connection: SourceConnectionWire; onClose: () => void }) {
+  const documents = useSourceDocuments(connection.id)
+  const comments = useSourceComments(connection.id, connection.watchComments)
+  const [selectedDocId, setSelectedDocId] = useState<string | null>(null)
+  const selected = documents.data?.documents.find((document) => document.docId === selectedDocId) ?? null
+  const detail = useSourceDocument(connection.id, selectedDocId ?? '', selectedDocId !== null)
+  const adopt = useAdoptSourceDocument()
+  const resolve = useResolveSourceConflict()
+
+  const mutateDocument = (action: 'keep-local' | 'take-remote') => {
+    if (!selected) return
+    resolve.mutate(
+      { connectionId: connection.id, docId: selected.docId, input: { action } },
+      {
+        onSuccess: () => trackSourceEvent('source.conflict_resolved', connection, { action }),
+        onError: (error) => toast(error.message, { tone: 'danger' }),
+      },
+    )
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent data-slot="source-browser" className="max-h-[90vh] overflow-y-auto sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle>{connection.name} documents</DialogTitle>
+          <DialogDescription>Mirrored content, provenance, comments, and conflict actions.</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 md:grid-cols-[minmax(180px,0.7fr)_minmax(0,1.5fr)]">
+          <div>
+            <h3 className="mb-2 text-xs font-semibold text-foreground">Documents</h3>
+            {documents.isPending ? <p className="text-[13px] text-soft-foreground">Loading documents…</p> : null}
+            <ul data-slot="source-document-list" className="flex max-h-72 flex-col gap-1 overflow-y-auto">
+              {(documents.data?.documents ?? []).map((document: SourceDocumentListItem) => (
+                <li key={document.docId}>
+                  <button
+                    type="button"
+                    data-action="source-document-select"
+                    data-doc-id={document.docId}
+                    aria-pressed={selectedDocId === document.docId}
+                    onClick={() => setSelectedDocId(document.docId)}
+                    className={cn(
+                      'w-full rounded-md border px-2.5 py-2 text-left text-[12px]',
+                      selectedDocId === document.docId ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted',
+                    )}
+                  >
+                    <span className="block font-medium text-foreground">{document.title}</span>
+                    <span className="text-soft-foreground">{document.state} · {document.docType}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div data-slot="source-document-detail" className="min-w-0 rounded-md border border-border p-3">
+            {!selected ? (
+              <p className="text-[13px] text-soft-foreground">Select a document to inspect it.</p>
+            ) : detail.isPending ? (
+              <p className="text-[13px] text-soft-foreground">Loading document…</p>
+            ) : detail.data?.document ? (
+              <DocumentDetail
+                document={detail.data.document}
+                comments={comments.data?.comments.filter((comment) => comment.docId === selected.docId) ?? []}
+                onAdopt={() => adopt.mutate(
+                  { connectionId: connection.id, docId: selected.docId },
+                  {
+                    onSuccess: () => trackSourceEvent('source.document_adopted', connection),
+                    onError: (error) => toast(error.message, { tone: 'danger' }),
+                  },
+                )}
+                onResolve={mutateDocument}
+                mutating={adopt.isPending || resolve.isPending}
+              />
+            ) : (
+              <p className="text-[13px] text-soft-foreground">Document is no longer available.</p>
+            )}
+          </div>
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function DocumentDetail({
+  document,
+  comments,
+  onAdopt,
+  onResolve,
+  mutating,
+}: {
+  document: NonNullable<ReturnType<typeof useSourceDocument>['data']>['document']
+  comments: Array<{ id: string; body: string; createdAt: string; author?: string }>
+  onAdopt: () => void
+  onResolve: (action: 'keep-local' | 'take-remote') => void
+  mutating: boolean
+}) {
+  if (!document) return null
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <h3 className="text-sm font-semibold text-foreground">{document.title}</h3>
+        <a className="text-[12px] text-primary underline" href={document.url} target="_blank" rel="noreferrer">Open source</a>
+      </div>
+      <dl data-slot="source-provenance" className="grid gap-x-3 gap-y-1 text-[11.5px] sm:grid-cols-2">
+        <dt className="text-soft-foreground">Origin</dt><dd>{document.origin}</dd>
+        <dt className="text-soft-foreground">State</dt><dd>{document.state}</dd>
+        <dt className="text-soft-foreground">Mirrored</dt><dd>{document.mirroredAt}</dd>
+        <dt className="text-soft-foreground">External ID</dt><dd>{document.externalId}</dd>
+      </dl>
+      {document.lossy.length > 0 ? (
+        <p data-slot="source-lossiness" className="text-[12px] text-pending-strong">Lossy conversion: {document.lossy.join(', ')}</p>
+      ) : null}
+      {document.state === 'conflict' ? (
+        <p data-slot="source-conflict-evidence" className="text-[12px] text-pending-strong">
+          The incoming remote body remains in the source conflicts folder. Keep local preserves this body; Take remote saves it under conflicts before replacement.
+        </p>
+      ) : null}
+      <pre data-slot="source-document-body" className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-muted p-3 text-[12px]">{document.body ?? ''}</pre>
+      <div className="flex flex-wrap gap-1.5">
+        {document.state === 'conflict' ? (
+          <>
+            <Button type="button" size="sm" data-action="source-conflict-keep-local" disabled={mutating} onClick={() => onResolve('keep-local')}>Keep local</Button>
+            <Button type="button" size="sm" data-action="source-conflict-take-remote" disabled={mutating} onClick={() => onResolve('take-remote')}>Take remote</Button>
+          </>
+        ) : document.origin === 'remote' ? (
+          <Button type="button" variant="outline" size="sm" data-action="source-adopt" disabled={mutating} onClick={onAdopt}>Adopt locally</Button>
+        ) : null}
+      </div>
+      <section data-slot="source-comments" className="border-t border-border pt-3">
+        <h4 className="mb-1 text-xs font-semibold text-foreground">Comments</h4>
+        {comments.length === 0 ? <p className="text-[12px] text-soft-foreground">No mirrored comments.</p> : (
+          <ul className="flex flex-col gap-2">
+            {comments.map((comment) => <li key={comment.id} className="rounded bg-muted p-2 text-[12px]"><span className="font-medium">{comment.author ?? 'Unknown author'}</span> <time dateTime={comment.createdAt}>{comment.createdAt}</time><p>{comment.body}</p></li>)}
+          </ul>
+        )}
+      </section>
+    </div>
   )
 }
 

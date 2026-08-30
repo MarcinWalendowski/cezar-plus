@@ -1,4 +1,3 @@
-import { dirname } from 'node:path';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import {
@@ -19,6 +18,8 @@ import {
   type SourceProvidersResponse,
   type SourceRemoteCollection,
   type SourceRemovedResponse,
+  type SourceSyncKickResponse,
+  type ResolveSourceConflictResponse,
   type SourceSyncState,
   type SourcesListResponse,
 } from '@loki-labs/cezar-plus-contract';
@@ -29,40 +30,36 @@ import type { SourceAvailability, SourceProvider } from '../sources/provider-typ
 import { resolveSourceProvider, SOURCE_PROVIDERS } from '../sources/registry.ts';
 import { FileSourceSink } from '../sources/sink.ts';
 import type { SourceStore } from '../sources/store.ts';
-import type { MirroredDocumentMeta, SourceCollectionRef, SourceConnection, SourceState } from '../sources/types.ts';
+import type { MirroredDocumentMeta, SourceCollectionRef, SourceConnection, SourceSink, SourceState } from '../sources/types.ts';
+import { resolveSourceConflict } from '../sources/conflicts.ts';
+import type { SourceRuntime } from '../sources/runtime.ts';
 
 /**
  * The SOURCES family of `/api/v1` (F2, `CEZ_SOURCES=1`). See
  * `.ai/specs/2026-08-06-external-source-connectors-notion.md` ("API Contracts", 13 routes) and
  * `.ai/runs/2026-08-06-cezar-central-hub/PLAN.md` D19.
  *
- * W4.6: fills the inert family with real handlers over `sources/{store,types,sink}.ts` (W1.5) and
- * the `SourceProvider` seam (W2.2). **The sync engine (`sources/{sync,coordinator,scheduler}.ts`,
- * W4.4) does not exist yet at the time of this package** — `POST .../sync` and
- * `POST .../documents/:docId/resolve` stay on their scaffold 409 (see `SYNC_ENGINE_PENDING` /
- * `RESOLVE_ENGINE_PENDING` below) even when `CEZ_SOURCES=1`; every other route is real. This is a
- * known, reported gap, not a silent narrowing — see the package's implementation report.
- *
  * Every handler reads its state from `c.get('project')` (`sourceStore`, `dataDir`) — never a
  * boot-time singleton — so the family behaves identically mounted unscoped, at `/p/default` or at
  * `/p/:projectId` (`route-parity.test.ts`). `FileSourceSink` (the "default, standalone"
  * implementation, `sink.ts`'s own header) is constructed per request, bound to `(dataDir,
- * connectionId)`: `ProjectContext` does not yet expose a shared sink (F1's `CEZ_KB=1` swap-in is
- * future work per that file's own comment), so this is the correct seam to use today.
+ * connectionId)`. The runtime wraps it with the resident project's knowledge sink when
+ * `CEZ_KB=1`, while non-resident projects use the standalone sink until their context exists.
  *
  * Chained into ONE family with an INFERRED return type, mounted into `v1` (project-scoped, mirrored
  * at the unscoped, `/p/:projectId` and `/p/default` spellings — `route-parity.test.ts`).
  */
 
-export interface SourcesRouteDeps {}
+export interface SourcesRouteDeps {
+  runtime?: SourceRuntime;
+  kick?: (projectId: string, connectionId: string) => { syncId: string; promise: Promise<unknown> };
+  sink?: (projectId: string, dataDir: string, connectionId: string) => SourceSink;
+  reschedule?: (projectId: string) => void;
+}
 
-const SOURCES_OFF = 'external sources are disabled — set CEZ_SOURCES=1 to enable them';
+const SOURCES_OFF = 'external sources are disabled, set CEZ_SOURCES=1 to enable them';
 const UNKNOWN_CONNECTION = 'unknown source connection';
 const UNKNOWN_DOCUMENT = 'document not found';
-const SYNC_ENGINE_PENDING =
-  'manual sync is not available yet — the sync engine (plan W4.4) has not landed; connections can be created, browsed and adopted, but no sweep runs';
-const RESOLVE_ENGINE_PENDING =
-  'conflict resolution is not available yet — it depends on the sync engine (plan W4.4), which has not landed';
 
 const EMPTY_SOURCES_LIST: SourcesListResponse = { connections: [] };
 const EMPTY_SOURCE_PROVIDERS: SourceProvidersResponse = { providers: [] };
@@ -196,7 +193,16 @@ function connectionSyncState(store: SourceStore, connectionId: string): SourceSy
   return store.state(connectionId)?.syncState ?? 'never-synced';
 }
 
-export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
+export function createSourcesRoutes(deps: SourcesRouteDeps = {}) {
+  const sinkFor = (project: ProjectApiEnv['Variables']['project'], dataDir: string, connectionId: string): SourceSink =>
+    deps.sink?.(project.id, dataDir, connectionId)
+      ?? deps.runtime?.sink(project.id, dataDir, connectionId)
+      ?? new FileSourceSink(dataDir, connectionId);
+  const reschedule = (projectId: string): void => {
+    deps.reschedule?.(projectId);
+    void deps.runtime?.reschedule();
+  };
+
   return new Hono<ProjectApiEnv>()
     // ---- connections -------------------------------------------------------------------------
     .get('/sources', async (c) => {
@@ -243,7 +249,7 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
       const connection = sourceStore.create({
         kind: input.kind,
         name: input.name,
-        enabled: input.enabled ?? false,
+        enabled: input.enabled ?? true,
         mode: input.mode ?? 'mirror',
         intervalSeconds: input.intervalSeconds ?? 900,
         collections: (input.collections ?? []).map(toStorageCollectionRef),
@@ -251,10 +257,18 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
         maxDocuments: input.maxDocuments ?? 5_000,
         maxBodyBytes: input.maxBodyBytes ?? 524_288,
       });
+      if (!connection.enabled || connection.mode === 'archived') {
+        sourceStore.updateState(connection.id, {
+          revision: connection.revision,
+          syncState: 'paused',
+          syncStateAt: connection.updatedAt,
+        });
+      }
       const availability = await resolveAvailability(connection.kind);
       const response: SourceConnectionResponse = {
         connection: toConnectionWire(connection, sourceStore.state(connection.id), availability),
       };
+      reschedule(c.get('project').id);
       return c.json(response, 201);
     })
 
@@ -284,9 +298,21 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
         return c.json({ error: message }, 409);
       }
       const availability = await resolveAvailability(connection.kind);
+      const wasActive = current.enabled && current.mode !== 'archived';
+      const isActive = connection.enabled && connection.mode !== 'archived';
+      if (!isActive) {
+        sourceStore.updateState(connection.id, {
+          revision: connection.revision,
+          syncState: 'paused',
+          syncStateAt: connection.updatedAt,
+        });
+      } else if (!wasActive) {
+        sourceStore.updateState(connection.id, { revision: connection.revision, nextDueAt: connection.updatedAt });
+      }
       const response: SourceConnectionResponse = {
         connection: toConnectionWire(connection, sourceStore.state(connection.id), availability),
       };
+      reschedule(c.get('project').id);
       return c.json(response);
     })
 
@@ -296,6 +322,7 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
       const removed = sourceStore.delete(c.req.param('connectionId'));
       if (!removed) return c.json({ error: UNKNOWN_CONNECTION }, 404);
       const response: SourceRemovedResponse = { removed: true };
+      reschedule(c.get('project').id);
       return c.json(response);
     })
 
@@ -305,27 +332,32 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
       if (!sourceStore) return c.json(EMPTY_SOURCE_COLLECTIONS);
       const connection = sourceStore.get(c.req.param('connectionId'));
       if (!connection) return c.json({ error: UNKNOWN_CONNECTION }, 404);
-      const provider = resolveSourceProvider(connection);
-      if (!provider) return c.json(EMPTY_SOURCE_COLLECTIONS);
-      const collections = await provider.listCollections();
       const response: SourceCollectionsResponse = {
-        collections: collections.map((collection): SourceRemoteCollection => ({
+        collections: connection.collections.map((collection): SourceRemoteCollection => ({
           externalId: collection.externalId,
           collectionKind: collection.collectionKind,
           ...(collection.label ? { label: collection.label } : {}),
-          ...(collection.documentCount !== undefined ? { documentCount: collection.documentCount } : {}),
         })),
       };
       return c.json(response);
     })
 
-    .post('/sources/:connectionId/sync', (c) => {
+    .post('/sources/:connectionId/sync', async (c) => {
       const { sourceStore } = c.get('project');
       if (!sourceStore) return c.json({ error: SOURCES_OFF }, 409);
       const connection = sourceStore.get(c.req.param('connectionId'));
       if (!connection) return c.json({ error: UNKNOWN_CONNECTION }, 404);
-      // See this file's header: the sweep (`sources/sync.ts`, plan W4.4) has not landed.
-      return c.json({ error: SYNC_ENGINE_PENDING }, 409);
+      if (!connection.enabled) return c.json({ error: 'source connection is disabled' }, 409);
+      if (connection.mode === 'archived') return c.json({ error: 'source connection is archived' }, 409);
+      const kick = deps.kick ?? deps.runtime?.kick.bind(deps.runtime);
+      if (!kick) return c.json({ error: 'source runtime is unavailable' }, 409);
+      const provider = deps.runtime ? deps.runtime.provider(connection) : resolveSourceProvider(connection);
+      if (!provider) return c.json({ error: `unknown source kind "${connection.kind}"` }, 409);
+      const availability = provider.detectCached() ?? await provider.detect();
+      if (!availability.available) return c.json({ error: availability.reason ?? 'source unavailable' }, 409);
+      const { syncId } = kick(c.get('project').id, connection.id);
+      const response: SourceSyncKickResponse = { syncId };
+      return c.json(response, 202);
     })
 
     .get('/sources/:connectionId/documents', async (c) => {
@@ -334,7 +366,7 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
       const connectionId = c.req.param('connectionId');
       const connection = sourceStore.get(connectionId);
       if (!connection) return c.json({ error: UNKNOWN_CONNECTION }, 404);
-      const sink = new FileSourceSink(dataDir, connectionId);
+      const sink = sinkFor(c.get('project'), dataDir, connectionId);
       const metas = await sink.list(connectionId);
       const syncState = connectionSyncState(sourceStore, connectionId);
       const response: SourceDocumentsResponse = {
@@ -350,7 +382,7 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
       const connection = sourceStore.get(connectionId);
       if (!connection) return c.json({ error: UNKNOWN_CONNECTION }, 404);
       const docId = c.req.param('docId');
-      const sink = new FileSourceSink(dataDir, connectionId);
+      const sink = sinkFor(c.get('project'), dataDir, connectionId);
       const meta = await sink.readMeta(docId);
       if (!meta) return c.json(EMPTY_SOURCE_DOCUMENT);
       const bodyResult = await sink.read(docId);
@@ -368,7 +400,7 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
       const connection = sourceStore.get(connectionId);
       if (!connection) return c.json({ error: UNKNOWN_CONNECTION }, 404);
       const docId = c.req.param('docId');
-      const sink = new FileSourceSink(dataDir, connectionId);
+      const sink = sinkFor(c.get('project'), dataDir, connectionId);
       const meta = await sink.readMeta(docId);
       if (!meta) return c.json({ error: UNKNOWN_DOCUMENT }, 404);
       const result = await sink.adopt(docId);
@@ -377,7 +409,7 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
       sourceStore.adopt(connectionId, meta.source.externalId);
       // D15: required after a commit to the knowledge root, never best effort. A no-op standalone
       // (`FileSourceSink.notifyChanged`'s own doc comment) until `CEZ_KB=1` wires a real index.
-      sink.notifyChanged(dirname(result.path), [docId]);
+      sink.notifyChanged(dataDir, [docId]);
       const response: AdoptSourceDocumentResponse = result;
       return c.json(response);
     })
@@ -385,16 +417,32 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
     .post(
       '/sources/:connectionId/documents/:docId/resolve',
       jsonZodValidator(resolveSourceConflictInputSchema),
-      (c) => {
-        const { sourceStore } = c.get('project');
+      async (c) => {
+        const { sourceStore, dataDir } = c.get('project');
         if (!sourceStore) return c.json({ error: SOURCES_OFF }, 409);
-        const connection = sourceStore.get(c.req.param('connectionId'));
+        const connectionId = c.req.param('connectionId');
+        const connection = sourceStore.get(connectionId);
         if (!connection) return c.json({ error: UNKNOWN_CONNECTION }, 404);
-        // See this file's header: resolving a conflict needs the incoming `remoteVersion` the
-        // sweep (plan W4.4) would have recorded when it quarantined the document; nothing on the
-        // `SourceSink` port persists that today (`sink.quarantine` keeps only a truncated hash in
-        // the conflict filename). Reported as a gap alongside the missing sync engine.
-        return c.json({ error: RESOLVE_ENGINE_PENDING }, 409);
+        const provider = deps.runtime ? deps.runtime.provider(connection) : resolveSourceProvider(connection);
+        if (!provider) return c.json({ error: `unknown source kind "${connection.kind}"` }, 409);
+        try {
+          const meta = await resolveSourceConflict({
+            connection,
+            store: sourceStore,
+            sink: sinkFor(c.get('project'), dataDir, connectionId),
+            provider,
+            docId: c.req.param('docId'),
+            action: c.req.valid('json').action,
+          });
+          const response: ResolveSourceConflictResponse = {
+            document: toDocumentWire(meta, connectionSyncState(sourceStore, connectionId)),
+          };
+          return c.json(response);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (message === UNKNOWN_DOCUMENT) return c.json({ error: message }, 404);
+          return c.json({ error: message }, 409);
+        }
       },
     )
 
@@ -403,9 +451,17 @@ export function createSourcesRoutes(_deps: SourcesRouteDeps = {}) {
       if (!sourceStore) return c.json(EMPTY_SOURCE_COMMENTS);
       const connection = sourceStore.get(c.req.param('connectionId'));
       if (!connection) return c.json({ error: UNKNOWN_CONNECTION }, 404);
-      // Honestly empty, not stubbed: `source-comments.ndjson` (spec Q17) is written by the sweep
-      // (plan W4.4), which has not landed, so nothing has ever populated it for any connection.
-      return c.json(EMPTY_SOURCE_COMMENTS);
+      const comments = sourceStore.listComments(c.req.param('connectionId')).map((comment) => ({
+        id: comment.id,
+        docId: comment.docId,
+        externalId: comment.externalId,
+        ...(comment.author !== undefined ? { author: comment.author } : {}),
+        body: comment.body,
+        createdAt: comment.createdAt,
+        attachments: comment.attachments,
+      }));
+      const response: SourceCommentsResponse = { comments };
+      return c.json(response);
     })
 
     .get('/sources/:connectionId/log', queryZodValidator(sourcesLogQuerySchema), (c) => {

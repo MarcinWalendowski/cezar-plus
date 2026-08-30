@@ -15,10 +15,9 @@ import type { SourceProvider } from './provider-types.ts';
  * zero timers are armed." Mirrors `automations/scheduler.test.ts`'s `WorkspaceAutomationScheduler`
  * suite in shape.
  *
- * The `CEZ_SOURCES`-unset half of that Test line is NOT exercised here, see this package's
- * implementation report: this file reads no `CEZ_*` variable at all, by design (the flag gate is
- * whoever CONSTRUCTS a `WorkspaceSourceScheduler`, not this class), so "zero timers armed" is
- * trivially true today only because nothing in the boot flow constructs one yet.
+ * The `CEZ_SOURCES`-unset half of that test is exercised by the boot/runtime wiring, not here:
+ * this file reads no `CEZ_*` variable by design. The flag gate belongs to whoever constructs a
+ * `WorkspaceSourceScheduler`, and `SourceRuntime` is that construction owner in the live server.
  */
 
 const dirs: string[] = [];

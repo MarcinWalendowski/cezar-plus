@@ -70,7 +70,7 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
       cwd: consumerDir,
       maxBuffer: 10 * 1024 * 1024,
     });
-    assert.match(help.stdout, /cezar — local cockpit/);
+    assert.match(help.stdout, /cezar-plus — local cockpit/);
     assert.match(help.stdout, /cezar run "<task>"/);
 
     const fixtureRepo = join(root, 'fixture-repo');
