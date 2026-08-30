@@ -70,10 +70,17 @@ export interface WorkspaceRunRouteDeps {
   bootRoot: string;
   startRun: (workflow: WorkflowDef, input: StartRunInput) => RunRecord;
   /** `POST /runs`' own workflow resolution, injected whole (project file wins, `quick-task` is
-   *  the floor, an unknown name is a 404). */
+   *  the floor, an unknown name is a 404). Includes the composer review-step toggles
+   *  (`.ai/specs/2026-08-30-composer-review-step-toggles.md`) — no-op unless the resolved
+   *  workflow carries a matching step id, so `input-to-tasks` (the default here) is unaffected. */
   resolveWorkflow: (
     root: string,
-    body: { workflow?: string; steps?: WorkflowDef['steps'] },
+    body: {
+      workflow?: string;
+      steps?: WorkflowDef['steps'];
+      reviewSameModel?: boolean;
+      reviewCrossModel?: boolean;
+    },
   ) => Promise<{ workflow: WorkflowDef } | { error: string; status: 400 | 404 }>;
   /** `POST /runs`' own pre-start guards, injected whole — model policy, provider availability,
    *  agent account. Returns the error to answer with, or null. */
@@ -106,6 +113,8 @@ export function createWorkspaceRunRoutes(deps: WorkspaceRunRouteDeps) {
       const resolved = await deps.resolveWorkflow(deps.bootRoot, {
         ...(workflowName === undefined ? {} : { workflow: workflowName }),
         ...(body.steps === undefined ? {} : { steps: body.steps as WorkflowDef['steps'] }),
+        ...(body.reviewSameModel === undefined ? {} : { reviewSameModel: body.reviewSameModel }),
+        ...(body.reviewCrossModel === undefined ? {} : { reviewCrossModel: body.reviewCrossModel }),
       });
       if ('error' in resolved) return c.json({ error: resolved.error }, resolved.status);
       const workflow = inputToTasksPlan(resolved.workflow, body.autoStart === true);

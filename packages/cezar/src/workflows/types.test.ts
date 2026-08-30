@@ -3,6 +3,7 @@ import { workflowStepDefSchema as contractWorkflowStepDefSchema } from '@loki-la
 import { KNOWN_PRESETS_BY_RUNNER, modelConflictsWithRunner } from '../core/model-presets.ts';
 import type { RunnerId } from '../core/agent-runner.ts';
 import {
+  applyReviewStepToggles,
   AUTONOMOUS_IMPLEMENTATION_WORKFLOW,
   BRIEFS_DIR,
   CLASS_CHOICE_BY_RUNNER,
@@ -11,7 +12,10 @@ import {
   CODEX_ONLY_WORKFLOW_SUFFIX,
   DEFAULT_ALLOWED_TOOLS,
   FILE_WRITE_RECIPE,
+  QUICK_TASK_WORKFLOW,
   RECORD_READ_RECIPE,
+  REVIEW_CROSS_MODEL_STEP_ID,
+  REVIEW_SAME_MODEL_STEP_ID,
   SPEC_TO_DEPLOY_CODEX_NAME,
   parseReviewVerdict,
   pinWorkflowRunner,
@@ -618,6 +622,62 @@ describe('SPEC_TO_DEPLOY_WORKFLOW pipeline shape', () => {
     expect(deploy?.prompt).toContain('work around it');
     // The park has to be framed as correct, or the agent's own report reads it as a failure to fix.
     expect(deploy?.prompt).toContain('park for a human');
+  });
+});
+
+/**
+ * `applyReviewStepToggles` (`.ai/specs/2026-08-30-composer-review-step-toggles.md`) — the
+ * composer's per-run opt-out of `spec-to-deploy`'s two review stages.
+ */
+describe('applyReviewStepToggles', () => {
+  const ids = (def: { steps: readonly { id: string }[] }) => def.steps.map((s) => s.id);
+
+  it('drops only review-spec-local when reviewSameModel is false', () => {
+    const result = applyReviewStepToggles(SPEC_TO_DEPLOY_WORKFLOW, { reviewSameModel: false });
+    expect(ids(result)).not.toContain(REVIEW_SAME_MODEL_STEP_ID);
+    expect(ids(result)).toContain(REVIEW_CROSS_MODEL_STEP_ID);
+    expect(ids(result).length).toBe(SPEC_TO_DEPLOY_WORKFLOW.steps.length - 1);
+  });
+
+  it('drops only review-spec when reviewCrossModel is false', () => {
+    const result = applyReviewStepToggles(SPEC_TO_DEPLOY_WORKFLOW, { reviewCrossModel: false });
+    expect(ids(result)).toContain(REVIEW_SAME_MODEL_STEP_ID);
+    expect(ids(result)).not.toContain(REVIEW_CROSS_MODEL_STEP_ID);
+    expect(ids(result).length).toBe(SPEC_TO_DEPLOY_WORKFLOW.steps.length - 1);
+  });
+
+  it('drops both when both toggles are false, leaving spec followed directly by implement', () => {
+    const result = applyReviewStepToggles(SPEC_TO_DEPLOY_WORKFLOW, {
+      reviewSameModel: false,
+      reviewCrossModel: false,
+    });
+    expect(ids(result)).not.toContain(REVIEW_SAME_MODEL_STEP_ID);
+    expect(ids(result)).not.toContain(REVIEW_CROSS_MODEL_STEP_ID);
+    const specAt = ids(result).indexOf('spec');
+    expect(ids(result)[specAt + 1]).toBe('implement');
+  });
+
+  it('is a no-op (same object reference) when neither toggle is false', () => {
+    expect(applyReviewStepToggles(SPEC_TO_DEPLOY_WORKFLOW, {})).toBe(SPEC_TO_DEPLOY_WORKFLOW);
+    expect(
+      applyReviewStepToggles(SPEC_TO_DEPLOY_WORKFLOW, {
+        reviewSameModel: true,
+        reviewCrossModel: true,
+      }),
+    ).toBe(SPEC_TO_DEPLOY_WORKFLOW);
+  });
+
+  it('is a no-op on a workflow that carries neither step id', () => {
+    expect(
+      applyReviewStepToggles(QUICK_TASK_WORKFLOW, { reviewSameModel: false, reviewCrossModel: false }),
+    ).toBe(QUICK_TASK_WORKFLOW);
+  });
+
+  it('leaves every other step, and their order, untouched', () => {
+    const result = applyReviewStepToggles(SPEC_TO_DEPLOY_WORKFLOW, { reviewSameModel: false });
+    expect(ids(result)).toEqual(
+      SPEC_TO_DEPLOY_WORKFLOW.steps.map((s) => s.id).filter((id) => id !== REVIEW_SAME_MODEL_STEP_ID),
+    );
   });
 });
 
