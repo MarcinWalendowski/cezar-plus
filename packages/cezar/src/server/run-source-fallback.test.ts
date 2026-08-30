@@ -145,4 +145,59 @@ describe('POST /api/v1/runs — neither workflow nor steps resolves to the defau
     expect(res.status).toBe(201);
     expect(capturedWorkflow?.name).toBe('spec-to-deploy');
   });
+
+  /**
+   * Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`):
+   * `reviewSameModel`/`reviewCrossModel` drop `review-spec-local`/`review-spec` from the resolved
+   * workflow. Applied inside `resolveRunWorkflow`, so it reaches the frozen `workflowDef` this
+   * route hands `manager.startRun` — the same choke point every other resolution branch above
+   * goes through.
+   */
+  describe('review-step toggles', () => {
+    it('an untouched body keeps both review steps — byte-identical to today', async () => {
+      const res = await post({ task: 't' });
+      expect(res.status).toBe(201);
+      const ids = capturedWorkflow?.steps.map((s) => s.id) ?? [];
+      expect(ids).toContain('review-spec-local');
+      expect(ids).toContain('review-spec');
+    });
+
+    it('reviewSameModel: false drops only review-spec-local', async () => {
+      const res = await post({ task: 't', reviewSameModel: false });
+      expect(res.status).toBe(201);
+      const ids = capturedWorkflow?.steps.map((s) => s.id) ?? [];
+      expect(ids).not.toContain('review-spec-local');
+      expect(ids).toContain('review-spec');
+    });
+
+    it('reviewCrossModel: false drops only review-spec', async () => {
+      const res = await post({ task: 't', reviewCrossModel: false });
+      expect(res.status).toBe(201);
+      const ids = capturedWorkflow?.steps.map((s) => s.id) ?? [];
+      expect(ids).toContain('review-spec-local');
+      expect(ids).not.toContain('review-spec');
+    });
+
+    it('both false drops both, and spec is followed directly by implement', async () => {
+      const res = await post({ task: 't', reviewSameModel: false, reviewCrossModel: false });
+      expect(res.status).toBe(201);
+      const ids = capturedWorkflow?.steps.map((s) => s.id) ?? [];
+      expect(ids).not.toContain('review-spec-local');
+      expect(ids).not.toContain('review-spec');
+      expect(ids[ids.indexOf('spec') + 1]).toBe('implement');
+    });
+
+    it('applies the same way to the named spec-to-deploy-codex sibling', async () => {
+      const res = await post({ task: 't', workflow: 'spec-to-deploy-codex', reviewSameModel: false });
+      expect(res.status).toBe(201);
+      expect(capturedWorkflow?.steps.map((s) => s.id)).not.toContain('review-spec-local');
+      expect(capturedWorkflow?.steps.map((s) => s.id)).toContain('review-spec');
+    });
+
+    it('is a no-op on a workflow with neither step id', async () => {
+      const res = await post({ task: 't', workflow: 'quick-task', reviewSameModel: false, reviewCrossModel: false });
+      expect(res.status).toBe(201);
+      expect(capturedWorkflow?.name).toBe('quick-task');
+    });
+  });
 });

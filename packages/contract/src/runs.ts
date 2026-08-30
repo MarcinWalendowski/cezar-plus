@@ -1050,6 +1050,12 @@ export const createRunInputBaseSchema = z
     worktree: z.boolean().optional(),
     /** true → autonomous run: never parks at "waiting"; auto-continues until done. */
     autonomous: z.boolean().optional(),
+    /** Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`).
+     *  Default true (absent = today's behaviour) — an explicit `false` drops the matching step
+     *  (`review-spec-local`) from the resolved workflow. No-op on a workflow without that step id. */
+    reviewSameModel: z.boolean().optional(),
+    /** Same, for `review-spec` (a different model/provider). */
+    reviewCrossModel: z.boolean().optional(),
     /** false → keep the handoff journal but do not expose or request a follow-up todos file.
      *  Omit for the default (enabled); a server with the capability off pins it to false. */
     generateFollowups: z.boolean().optional(),

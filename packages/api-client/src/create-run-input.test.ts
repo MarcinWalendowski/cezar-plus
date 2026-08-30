@@ -43,3 +43,25 @@ describe('createRunInputSchema — at most one of workflow/steps', () => {
     }
   })
 })
+
+/**
+ * Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`). The
+ * filtering itself is server-side (`applyReviewStepToggles`); this only pins that the contract
+ * accepts the two fields, matching the server's own duplicate schema per this file's own header.
+ */
+describe('createRunInputSchema — review-step toggles', () => {
+  const base = { task: 'do the thing' }
+
+  it('validates with neither field present', () => {
+    expect(createRunInputSchema.safeParse(base).success).toBe(true)
+  })
+
+  it('validates with either or both booleans', () => {
+    expect(createRunInputSchema.safeParse({ ...base, reviewSameModel: false }).success).toBe(true)
+    expect(createRunInputSchema.safeParse({ ...base, reviewCrossModel: false }).success).toBe(true)
+    expect(
+      createRunInputSchema.safeParse({ ...base, reviewSameModel: false, reviewCrossModel: false })
+        .success,
+    ).toBe(true)
+  })
+})

@@ -353,6 +353,19 @@ describe('buildCreateRunBody — the exact POST /api/v1/runs payloads legacy sen
     expect(variant.worktree).toBeUndefined()
   })
 
+  it('review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`): sent only when explicitly off', () => {
+    const base = {
+      task: 't', source: { source: 'skill' as const, ref: 'om-review' }, model: '',
+      runner: 'claude' as const, defaultRunner: 'claude' as const, variants: 1, images: [],
+    }
+    expect(buildCreateRunBody({ ...base, reviewSameModel: false }).reviewSameModel).toBe(false)
+    expect(buildCreateRunBody({ ...base, reviewSameModel: true }).reviewSameModel).toBeUndefined()
+    expect(buildCreateRunBody(base).reviewSameModel).toBeUndefined()
+    expect(buildCreateRunBody({ ...base, reviewCrossModel: false }).reviewCrossModel).toBe(false)
+    expect(buildCreateRunBody({ ...base, reviewCrossModel: true }).reviewCrossModel).toBeUndefined()
+    expect(buildCreateRunBody(base).reviewCrossModel).toBeUndefined()
+  })
+
   it('generateFollowups=false is sent only when follow-up generation is disabled', () => {
     const base = {
       task: 't', source: { source: 'skill' as const, ref: 'om-review' }, model: '',

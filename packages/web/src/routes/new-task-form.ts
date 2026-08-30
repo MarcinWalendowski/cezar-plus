@@ -308,6 +308,10 @@ export function buildCreateRunBody(opts: {
   worktree?: boolean
   /** true → autonomous run (never pauses for the user). Sent only when on. */
   autonomous?: boolean
+  /** Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`).
+   *  Default on (today's behaviour) — sent only when explicitly turned OFF, mirroring `worktree`. */
+  reviewSameModel?: boolean
+  reviewCrossModel?: boolean
   /** false → do not ask the agent for follow-up todos. Sent only when off. */
   generateFollowups?: boolean
   /** The inbox entry this composer was prefilled from (`/new?…&todo=`, #374) — sent back so
@@ -329,6 +333,8 @@ export function buildCreateRunBody(opts: {
     images,
     worktree,
     autonomous,
+    reviewSameModel,
+    reviewCrossModel,
     generateFollowups,
     todoId,
   } = opts
@@ -350,6 +356,10 @@ export function buildCreateRunBody(opts: {
     // Off only matters for a single run — variants always isolate.
     worktree: worktree === false && variants <= 1 ? false : undefined,
     autonomous: autonomous === true ? true : undefined,
+    // Default on (today's behaviour) — sent only when explicitly turned off, same "untouched
+    // means byte-identical to today" rule `worktree` follows above.
+    reviewSameModel: reviewSameModel === false ? false : undefined,
+    reviewCrossModel: reviewCrossModel === false ? false : undefined,
     generateFollowups: generateFollowups === false ? false : undefined,
     todoId: todoId || undefined,
   }

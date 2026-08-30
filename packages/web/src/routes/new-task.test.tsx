@@ -37,6 +37,7 @@ function pickSource(source: { source: 'skill' | 'workflow'; ref: string } | null
   writeDraft({
     text: '', source, runner: null, agentProfile: null, model: null, variants: 1,
     runMode: 'start', worktree: null, autonomous: null, generateFollowups: null,
+    reviewSameModel: null, reviewCrossModel: null,
   })
 }
 
@@ -503,6 +504,7 @@ describe('picker data flows', () => {
     writeDraft({
       text: '', source: null, runner: 'codex', agentProfile: null, model: 'claude-opus-4-8', variants: 1,
       runMode: 'start', worktree: null, autonomous: null, generateFollowups: null,
+      reviewSameModel: null, reviewCrossModel: null,
     })
     serve({ health: HEALTH_MULTI, providerStatus: PROVIDERS_MULTI })
     renderNewTask()
@@ -873,6 +875,7 @@ describe('submit', () => {
     writeDraft({
       text: '', source: { source: 'skill', ref: 'om-fix' }, runner: null, agentProfile: null, model: null,
       variants: 1, runMode: 'start', worktree: null, autonomous: null, generateFollowups: null,
+      reviewSameModel: null, reviewCrossModel: null,
     })
     serve({ createRun: { id: 'run-9' }, uiStateStatus: 404 })
     renderNewTask()
@@ -1190,6 +1193,62 @@ describe('submit', () => {
     fireEvent.change(textarea(), { target: { value: 'Run the whole workflow in place' } })
     await startTask()
     expect(postedBody()).toMatchObject({ workflow: 'fix-and-verify', worktree: false })
+  })
+
+  // Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`). The
+  // shared `spec-to-deploy` fixture above carries `steps: []`, so these tests supply their own
+  // catalog entry naming the two step ids the toggles target — the same shape
+  // `applyReviewStepToggles` filters on server-side.
+  const SPEC_TO_DEPLOY_WITH_REVIEW: WorkflowsResponse = {
+    workflows: [
+      WORKFLOWS.workflows[0]!,
+      {
+        name: 'spec-to-deploy',
+        description: 'Spec, build, gates, ship',
+        source: 'built-in',
+        steps: [
+          { id: 'spec', name: 'Write the spec', prompt: '{{task}}' },
+          { id: 'review-spec-local', name: 'Review the spec (same-provider pass)', prompt: '{{task}}' },
+          { id: 'review-spec', name: 'Review the spec', prompt: '{{task}}' },
+          { id: 'implement', name: 'Implement', prompt: '{{task}}' },
+        ],
+      },
+    ],
+    issues: [],
+  }
+
+  const reviewSameModelToggle = () =>
+    document.querySelector('[data-slot="review-same-model-toggle"]') as HTMLButtonElement | null
+  const reviewCrossModelToggle = () =>
+    document.querySelector('[data-slot="review-cross-model-toggle"]') as HTMLButtonElement | null
+
+  it('shows both review-step toggles, checked by default, when None resolves to spec-to-deploy', async () => {
+    serve({ workflows: SPEC_TO_DEPLOY_WITH_REVIEW })
+    renderNewTask()
+    await pillReady()
+    expect(reviewSameModelToggle()?.getAttribute('aria-checked')).toBe('true')
+    expect(reviewCrossModelToggle()?.getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('hides both review-step toggles for a workflow without either step id', async () => {
+    pickSource({ source: 'workflow', ref: 'quick-task' })
+    serve({ workflows: SPEC_TO_DEPLOY_WITH_REVIEW })
+    renderNewTask()
+    await pillReady('quick-task')
+    expect(reviewSameModelToggle()).toBeNull()
+    expect(reviewCrossModelToggle()).toBeNull()
+  })
+
+  it('unchecking a review-step toggle submits the matching false, the other stays implicit', async () => {
+    serve({ workflows: SPEC_TO_DEPLOY_WITH_REVIEW })
+    renderNewTask()
+    await pillReady()
+    fireEvent.click(reviewSameModelToggle()!)
+    expect(reviewSameModelToggle()?.getAttribute('aria-checked')).toBe('false')
+    fireEvent.change(textarea(), { target: { value: 'skip the cheap review pass' } })
+    await startTask()
+    expect(postedBody()).toMatchObject({ reviewSameModel: false })
+    expect(postedBody()).not.toHaveProperty('reviewCrossModel')
   })
 
   // #471 — the composer must not offer a switch the server overrides anyway.
@@ -1651,6 +1710,7 @@ describe('the Start | Plan first | Backlog control', () => {
     writeDraft({
       text: '', source: null, runner: null, agentProfile: null, model: null, variants: 1,
       runMode: 'backlog', worktree: null, autonomous: null, generateFollowups: null,
+      reviewSameModel: null, reviewCrossModel: null,
     })
     serve({
       providerStatus: PROVIDERS_NONE,

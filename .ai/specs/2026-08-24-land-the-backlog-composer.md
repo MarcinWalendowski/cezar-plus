@@ -1,5 +1,10 @@
 # Land the Backlog composer
 
+**Status:** implemented, QA verified; exact-SHA production deployment and live behavior verification remain pending.
+**CORRECTED 2026-08-30:** The Backlog composer is on `origin/main` at `78295445`; the retained
+branch is an ancestor and must not be reapplied. Typecheck, three full root test runs, unit,
+build, package, and the focused browser E2E passed. Production currently serves `5d59a16f`, so
+exact-SHA activation and live behavior verification remain pending for the manual deploy step.
 **Status:** implemented, QA needed until the merged-tree gates and runtime E2E pass. Written 2026-08-24 for run `235c9e50-6ac4-4d0b-a96e-55cad81a7908`.
 **Supersedes nothing.** It is the landing plan for `.ai/specs/2026-08-22-backlog-add-without-starting.md`,
 which stays the design record for the feature itself. Its `Status:` is now implemented, QA needed,

@@ -52,6 +52,11 @@ export interface NewTaskDraft {
   autonomous: boolean | null
   /** Follow-up generation is default-on. null → remembered value / on. */
   generateFollowups: boolean | null
+  /** Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`):
+   *  false drops the matching step from a `spec-to-deploy`-shaped workflow. null → untouched →
+   *  the default (on), same as today's unconditional behaviour. */
+  reviewSameModel: boolean | null
+  reviewCrossModel: boolean | null
 }
 
 export interface ComposerRunModeInput {
@@ -153,6 +158,8 @@ const EMPTY: NewTaskDraft = {
   worktree: null,
   autonomous: null,
   generateFollowups: null,
+  reviewSameModel: null,
+  reviewCrossModel: null,
 }
 
 const STORAGE_KEY = 'cez-new-task-draft'
@@ -222,6 +229,8 @@ function normalize(raw: unknown): NewTaskDraft {
     autonomous: typeof obj.autonomous === 'boolean' ? obj.autonomous : null,
     generateFollowups:
       typeof obj.generateFollowups === 'boolean' ? obj.generateFollowups : null,
+    reviewSameModel: typeof obj.reviewSameModel === 'boolean' ? obj.reviewSameModel : null,
+    reviewCrossModel: typeof obj.reviewCrossModel === 'boolean' ? obj.reviewCrossModel : null,
   }
 }
 
