@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.ts';
 import { depCheckStep, generatePassword, owned, shared, shquote, StepAborted, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.ts';
 import { resolveAuthBootGate } from '../../auth-boot-gate.ts';
+import { serverConfigDir } from '../../paths.ts';
 
 /**
  * The `ubuntu-vps` strategy: stand up an authenticated, proxied cezar on a bare
@@ -36,7 +37,8 @@ function vhostEnabled(ctx: InstallContext): string {
 }
 function htpasswdPath(ctx: InstallContext): string {
   const i = inst(ctx);
-  return i === 'default' ? '/etc/cezar/htpasswd' : `/etc/cezar/htpasswd-${i}`;
+  const dir = serverConfigDir();
+  return i === 'default' ? `${dir}/htpasswd` : `${dir}/htpasswd-${i}`;
 }
 function unitName(ctx: InstallContext): string {
   const i = inst(ctx);
@@ -138,7 +140,11 @@ async function confirmCezarRunning(ctx: InstallContext, statusCmd: string, logsC
  * `serverName` defaults to the catch-all `_`; the SSL step rewrites it to the
  * real domain so the `certbot --nginx` plugin can find this vhost to edit.
  */
-export function nginxVhost(port: number, serverName = '_', htpasswd = '/etc/cezar/htpasswd'): string {
+export function nginxVhost(
+  port: number,
+  serverName = '_',
+  htpasswd = `${serverConfigDir()}/htpasswd`,
+): string {
   return `# Managed by cezar server-install — do not edit by hand.
 server {
     listen 80;
@@ -310,7 +316,7 @@ const nginxProxyStep: InstallStep = {
     await sudoStep(ctx, {
       description: 'Write the htpasswd identity file that nginx checks on every request.',
       note: `${htpasswd}\n\n${user}:<apr1 hash of your password>`,
-      command: `install -d -m 0755 /etc/cezar && cat > ${htpasswd} && chown root:www-data ${htpasswd} && chmod 0640 ${htpasswd}`,
+      command: `install -d -m 0755 ${serverConfigDir()} && cat > ${htpasswd} && chown root:www-data ${htpasswd} && chmod 0640 ${htpasswd}`,
       input: `${user}:${hash}\n`,
       inputLabel: 'credential line (username:hash)',
       verify: (c) => verifyCommand(c, 'test', ['-f', htpasswd]),
@@ -411,7 +417,7 @@ const nginxProxyStep: InstallStep = {
       command:
         `rm -f ${vhostEnbl} ${vhostAvailable(ctx)} ${htpasswdPath(ctx)}` +
         restoreClause +
-        ` && { rmdir /etc/cezar 2>/dev/null || true; }` +
+        ` && { rmdir ${serverConfigDir()} 2>/dev/null || true; }` +
         ` && { nginx -t && systemctl reload nginx || true; }`,
       verify: (c) => verifyCommand(c, 'sh', ['-c', `! test -f ${vhostEnbl}`]),
     });

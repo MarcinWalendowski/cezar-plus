@@ -157,6 +157,17 @@ describe('nginxVhost', () => {
     expect(nginxVhost(4321)).toContain('http2 on;');
   });
 
+  it('CEZ_CONFIG_DIR moves the htpasswd nginx is pointed at', () => {
+    // Positive control for the default asserted in the next test: without this, every
+    // /etc/cezar assertion in this file would still pass against a hard-coded literal.
+    process.env.CEZ_CONFIG_DIR = '/opt/etc/cezar';
+    try {
+      expect(nginxVhost(4321)).toContain('auth_basic_user_file /opt/etc/cezar/htpasswd;');
+    } finally {
+      delete process.env.CEZ_CONFIG_DIR;
+    }
+  });
+
   it('defaults to the legacy htpasswd path but accepts an instance-scoped one', () => {
     expect(nginxVhost(4321)).toContain('auth_basic_user_file /etc/cezar/htpasswd;');
     expect(nginxVhost(4322, 'shop.example.com', '/etc/cezar/htpasswd-shop-example-com')).toContain(
@@ -183,6 +194,20 @@ describe('ubuntu-vps multi-instance artifact paths', () => {
     expect(paths).toContain('/etc/nginx/sites-available/cezar');
     expect(paths).toContain('/etc/nginx/sites-enabled/cezar');
     expect(paths).toContain('/etc/cezar/htpasswd');
+  });
+
+  it('CEZ_CONFIG_DIR moves the htpasswd artifact the nginx step records', async () => {
+    process.env.CEZ_CONFIG_DIR = '/opt/etc/cezar';
+    try {
+      const ui = { ...createAutoUi(), text: async () => 'ops', password: async () => 'longenough' } as Ui;
+      const ctx = { ...ctxWith({ ui, dryRun: true }), assumeYes: true } as InstallContext;
+      const created = await stepById('nginx-proxy').run(ctx);
+      const paths = (created?.artifacts ?? []).map((a) => a.path).filter(Boolean);
+      expect(paths).toContain('/opt/etc/cezar/htpasswd');
+      expect(paths).not.toContain('/etc/cezar/htpasswd');
+    } finally {
+      delete process.env.CEZ_CONFIG_DIR;
+    }
   });
 
   it('a named instance suffixes the nginx site + htpasswd with its slug', async () => {

@@ -374,6 +374,20 @@ describe('hetzner supervisor-systemd / org-systemd — generator wiring + once-o
     );
   });
 
+  it('CEZ_CONFIG_DIR moves the environment file the unit is pointed at', async () => {
+    // Positive control for the /etc/cezar defaults asserted above and below.
+    process.env.CEZ_CONFIG_DIR = '/opt/etc/cezar';
+    try {
+      const ctx = ctxWith({ dryRun: true, state: { domain: 'acme.cezar.example.com', orgSlug: 'acme', primaryPort: 4322 } });
+      await stepById(ctx, 'org-systemd').run(ctx);
+      expect(orgSystemdUnit).toHaveBeenCalledWith(
+        expect.objectContaining({ environmentFile: '/opt/etc/cezar/hetzner-default.env' }),
+      );
+    } finally {
+      delete process.env.CEZ_CONFIG_DIR;
+    }
+  });
+
   it('org-systemd threads the org\'s unix user, CEZ_HOME, port and environment file into orgSystemdUnit', async () => {
     const ctx = ctxWith({ dryRun: true, state: { domain: 'acme.cezar.example.com', orgSlug: 'acme', primaryPort: 4322 } });
     await stepById(ctx, 'org-systemd').run(ctx);

@@ -39,6 +39,7 @@ import {
 import { orgSystemdUnit, supervisorSystemdUnit } from './hetzner/systemd-unit.ts';
 import { orgVhost, supervisorVhost, wsUpgradeMapSnippet } from './hetzner/nginx.ts';
 import { createTlsStep, publicUrlForDomain } from './hetzner/tls.ts';
+import { serverConfigDir } from '../../paths.ts';
 
 /**
  * The `hetzner` platform strategy (D4/D10, spec `.ai/specs/2026-08-06-org-team-auth-onboarding.md`,
@@ -247,7 +248,7 @@ function vhostEnabled(ctx: InstallContext): string {
   return `/etc/nginx/sites-enabled/cezar-hetzner-${ctx.instance}`;
 }
 function environmentFilePath(ctx: InstallContext): string {
-  return `/etc/cezar/hetzner-${ctx.instance}.env`;
+  return `${serverConfigDir()}/hetzner-${ctx.instance}.env`;
 }
 
 /** `wsUpgradeMapSnippet()` is `http{}`-context and must be written ONCE per host, not once per
@@ -290,7 +291,7 @@ function resolveSupervisorPort(ctx: InstallContext): number {
  *  supervisor instance, never from the org's own `ctx.instance`. */
 function supervisorEnvironmentFilePath(): string | undefined {
   const supervisor = findSupervisorInstance();
-  return supervisor ? `/etc/cezar/hetzner-${supervisor.instance}.env` : undefined;
+  return supervisor ? `${serverConfigDir()}/hetzner-${supervisor.instance}.env` : undefined;
 }
 
 /** The admin credential `supervisor/internal-auth.ts` checks. 32 bytes of entropy, hex — the same

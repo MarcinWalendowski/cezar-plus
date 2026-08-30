@@ -306,3 +306,22 @@ export function claudeStateFilePath(claudeHome: string, env: NodeJS.ProcessEnv =
     || claudeHome !== join(env.HOME || env.USERPROFILE || homedir(), '.claude');
   return seesOverride ? join(claudeHome, '.claude.json') : join(dirname(claudeHome), '.claude.json');
 }
+
+/**
+ * The system config directory a SERVER INSTALL owns: the root-owned `0600` env files
+ * (`hetzner-<instance>.env`) and the nginx `htpasswd` that guards the cockpit. Root-owned
+ * and outside `cezarHomeDir()` on purpose — the service user must not be able to rewrite
+ * its own credentials.
+ *
+ * `CEZ_CONFIG_DIR` overrides it, for an operator whose distro or policy puts this
+ * elsewhere. The default is unchanged, so an existing install keeps working and the
+ * generated systemd `EnvironmentFile=` lines still resolve.
+ *
+ * Only `server-install` touches this. A local `npx cezar-plus` cockpit never reads it,
+ * which is why there is no bootstrapping problem in leaving the default here.
+ */
+export function serverConfigDir(env: NodeJS.ProcessEnv = process.env): string {
+  // `|| undefined` so an EMPTY CEZ_CONFIG_DIR falls back rather than yielding
+  // relative paths — same guard, and same reason, as `cezarHomeDir()` above.
+  return (env.CEZ_CONFIG_DIR || undefined) ?? '/etc/cezar';
+}

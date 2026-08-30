@@ -10,6 +10,7 @@ import {
   notesLogPath,
   notesPath,
   serverInstancesDir,
+  serverConfigDir,
   serverLockPath,
   serverStatePath,
   workspaceConfigPath,
@@ -26,6 +27,22 @@ describe('paths', () => {
   it('defaults cezarHomeDir to ~/.cezar', () => {
     delete process.env.CEZ_HOME;
     expect(cezarHomeDir()).toBe(join(homedir(), '.cezar'));
+  });
+
+  it('defaults serverConfigDir to /etc/cezar', () => {
+    // The default has to stay exactly this: it is baked into already-generated systemd
+    // `EnvironmentFile=` lines on every existing install, so moving it orphans them.
+    expect(serverConfigDir({})).toBe('/etc/cezar');
+  });
+
+  it('honors the CEZ_CONFIG_DIR override', () => {
+    expect(serverConfigDir({ CEZ_CONFIG_DIR: '/opt/etc/cezar' })).toBe('/opt/etc/cezar');
+  });
+
+  it('falls back when CEZ_CONFIG_DIR is set but empty', () => {
+    // Same guard, and the same reason, as CEZ_HOME: an empty value must not yield a
+    // RELATIVE config path, which would write credentials into the process cwd.
+    expect(serverConfigDir({ CEZ_CONFIG_DIR: '' })).toBe('/etc/cezar');
   });
 
   it('honors the CEZ_HOME override', () => {
