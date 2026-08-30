@@ -1,5 +1,8 @@
 # Close The Backlog Composer
 
+- **CORRECTED 2026-08-30:** This record is partial, not fully closed. Implementation and QA are
+  verified at landed `78295445`, while exact-SHA production activation and live Backlog behavior
+  verification remain pending. The parent tracker therefore remains `in-progress`.
 - **CORRECTED 2026-08-30:** Implemented and verified on the reconciled candidate. The onboarding
   fixture repair passed its focused browser E2E in 12.00 seconds after a pre-fix negative control
   failed. Typecheck, three full root test runs, unit, build, and package gates all passed. Both
@@ -10,6 +13,7 @@
   fresh `CEZ_HOME` has no organization, so the async onboarding gate redirects the initially
   rendered composer to `/onboarding` before the Backlog interaction settles. Phase 3 below now
   specifies the fixture repair and its regression proof.
+**Status:** partial, implementation and QA verified; exact-SHA deployment and live behavior remain pending.
 - **Status:** Specified (no code written, no gate run, no deploy performed by this step)
 - **Date:** 2026-08-29
 - **Task:** `1f02b61d-6f55-4b7f-a6e9-c929ab407eaf`, workflow `spec-to-deploy`, branch `cez/1f02b61d`

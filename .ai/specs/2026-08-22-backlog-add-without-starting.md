@@ -1,5 +1,11 @@
 # Backlog Task Composer
 
+**Status:** implemented, QA verified; exact-SHA production deployment and live behavior verification remain pending.
+**CORRECTED 2026-08-30:** The implementation is landed at `78295445` and QA is verified. Three
+full root test runs, typecheck, unit, build, package, and the focused browser E2E passed. The E2E
+proved one project-scoped submit creates exactly one unstarted todo, creates no run, navigates to
+`/tasks`, and captures both required artifacts. Exact-SHA production activation and live behavior
+verification remain pending because production currently serves `5d59a16f`.
 **Status:** implemented, QA needed. The feature landed on `origin/main` at `c406f2fa`; focused tests, typecheck, build, and diff checks passed. The authoritative root, unit, and package gates remain red on reproduced shared drift, browser runtime E2E was skipped because `agent-browser` was unavailable, and production deployment plus live behavior verification remain pending.
 **Date:** 2026-08-22
 **Owner ask:** "allow to add new tasks to backlog without starting it"
