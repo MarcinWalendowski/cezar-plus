@@ -182,5 +182,29 @@ cancelled before the answer is sent).
    pass by throwing away every run started during a hub outage. *Mutation-checked:* dropping the
    cancel branch fails the race case alone.
 5. Full gates (`typecheck`, `test`, `build`).
-6. **Production E2E:** press ▶ Run on a filed task; the row leaves the Filed board, and a second
-   press is refused. Then the 13 orphaned records are backfilled from their runs.
+6. **Shipped and verified on `prod-host`, 2026-08-30.** Release
+   `20260830T053441Z-5d59a16f`, 91 ms cutover, cockpit 200, service active.
+
+   - **The fix is in the live release, with a control:** `startOptionsForHumanStart` appears 3x in
+     the release's `server/server.js` and **0x** in the release it replaced.
+   - **The armed policy is the hub's, proven from data rather than assumed** — the one layer the
+     unit tests cannot reach, because it is a property of the running process. **7 of 8**
+     autostarted todos carry `startedOn = 06495ac4…`, this hub's own node id, which only
+     `hubSelfConfirm` writes. (The 8th is the unpaired answer, `{clustered: false}`, which sets
+     none.) So the next press takes the hub branch, and the checkable prediction is:
+     `startedTaskId` set, `startedOn` = that node id, `hubSeq` bumped, **no `pendingSince`**.
+   - **Backfill.** 10 orphaned records stamped with the run each was started from — the earliest
+     non-cancelled `todo-start` run whose task text begins with the todo's summary. **3 of the 10
+     had a duplicate run**, which is the double-start's residue; cancelled runs are excluded
+     deliberately, since `clearStartedTaskId` un-hides a cancelled todo on purpose
+     (`2026-08-22-run-cancel-restores-todo.md`). Written through `markStartedWithClaim` under the
+     todos lease — never a hand-edit of `todos.json` beside a running server — with
+     `{clustered: false}`, which is honest here for a repair of a historical fact on records that
+     already carry a `hubSeq`, with the pairing's only peer (`mac-worker`) disabled since
+     2026-08-24. Backup at `todos.json.bak-preclaim-backfill`.
+   - **Measured after:** rows still doubled on the board **0** (was 13); `pendingSince` **0 of
+     208** and `hubSeq` **208 of 208**, both unchanged, so the repair added no outbox debt;
+     `find /var/lib/cezar -not -user cezar | wc -l` = **0**.
+   - **Not run here:** a real Run press. Doing it would start a live agent on the production box
+     for a task nobody asked for. The next genuine press is the E2E, and the prediction above is
+     what it must show.
