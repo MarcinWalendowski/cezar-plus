@@ -106,6 +106,7 @@ import {
   accountUsageKey,
   DEFAULT_AGENT_ACCOUNT_ID,
   formatAgentRoute,
+  isAgentPoolId,
   runAccountKey,
   usageHoldAccountKey,
   type LockableRunner,
@@ -980,8 +981,12 @@ export function loopBackResumeDecision(args: {
   targetRecord: { sessionId?: string; profileId?: string; backend?: RunnerId } | undefined;
   /** The run's own backend, i.e. what an unpinned step runs on. */
   taskBackend: RunnerId;
+  /** The workspace provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D4 site g).
+   *  It overrides the target's own `runner` pin, so it has to be part of "where would this run
+   *  now" or the predicate would authorise a resume onto a provider dispatch will not use. */
+  runnerLock?: LockableRunner | undefined;
 }): { reason: LoopBackResumeReason; resume?: LoopBackResumeHandle } {
-  const { enabled, target, targetRecord, taskBackend } = args;
+  const { enabled, target, targetRecord, taskBackend, runnerLock } = args;
   if (!enabled || !target) return { reason: 'disabled' };
   if (stepKind(target) !== 'agent') return { reason: 'not-agent' };
   if (!targetRecord?.sessionId) return { reason: 'no-session' };
@@ -993,7 +998,7 @@ export function loopBackResumeDecision(args: {
   // `?? would` on the recorded side deliberately: `runAgentStep` stamps `backend` before it
   // spawns, so a record with a session but no backend is a hand-edited or pre-#547 file rather
   // than a real mismatch — widen the READ, per this repo's own precedent, instead of refusing it.
-  const would = target.runner ?? taskBackend;
+  const would = applyRunnerLock(runnerLock, target.runner ?? taskBackend).runner;
   if ((targetRecord.backend ?? would) !== would) return { reason: 'backend-changed' };
   return {
     reason: 'resumed',
@@ -1586,7 +1591,9 @@ export class RunManager {
     task: string,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
   ): Promise<TaskClass> {
-    const result = await classifyTask(this.repoRoot, task);
+    const result = await classifyTask(this.repoRoot, task, {
+      ...(this.runnerLock() ? { runnerLock: this.runnerLock() as LockableRunner } : {}),
+    });
     this.autoTaskClasses.set(runId, result.taskClass);
     const why = result.reason ? ` — ${result.reason}` : '';
     emit({
@@ -2218,6 +2225,69 @@ export class RunManager {
   }
 
   /**
+   * The workspace-wide provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D7),
+   * read synchronously off the `WorkspaceSemaphore` snapshot.
+   *
+   * Read at each decision rather than captured once per run, because D2 requires the lock to
+   * apply to **a run already in flight** at its next step dispatch: a value closed over at
+   * `execute()` would pin the run to whatever the lock was when it started, and the recovery case
+   * the whole control exists for ("everything is stuck on codex, flip it") would not work.
+   */
+  private runnerLock(): LockableRunner | undefined {
+    return this.semaphore.runnerLock();
+  }
+
+  /**
+   * Is the cross-account availability ladder on (D3c)?
+   *
+   * `fallbackAcrossAccountsWhenLimited` governs **Auto mode only**. With a lock set, the provider
+   * is not a per-run choice the user made about this task, it is a platform routing rule, so "do
+   * not move my work off the account I named" has no referent — they named a provider for the
+   * workspace, not an account for this run. Without this the two settings compose into the one
+   * state this feature must not have: `downgradePinnedRunner` returns before it ever looks at the
+   * other provider and the step spawns on a provider with no usable account (D3a's failure,
+   * reached from the opposite direction).
+   */
+  private accountFallbackEnabled(): boolean {
+    return this.semaphore.fallbackAcrossAccountsWhenLimited() || this.runnerLock() !== undefined;
+  }
+
+  /**
+   * The account a lock-forced provider change may keep (D6a).
+   *
+   * **An account id is provider-scoped.** With the lock at `claude` and a task carrying a codex
+   * account id, `run.runner` becomes `claude` while `run.agentProfile` still names a codex login;
+   * `agentEnvForStep`'s `backend === runRunner` guard is then SATISFIED, so the codex id reaches
+   * `resolveProfileEnvForRoot(root, 'claude', '<codex id>')`, `selectProfile` finds no claude
+   * account by that id, and it degrades to claude's DEFAULT login with no pool ranking and no
+   * limited-skip. That is the defect `rerouteExplicitAccountIfUnavailable` records from
+   * `prod-host` verbatim, arrived at through the lock instead of a dangling id.
+   *
+   * So: a pool id survives (D5 narrows it to the lock), `default` survives (it is
+   * provider-relative and still means "the locked provider's discovered login"), and a concrete
+   * id survives only if it belongs to the locked provider. Anything else is DROPPED, never
+   * translated, and the locked provider's own selection resolves in its place.
+   */
+  private async accountForLockedProvider(
+    agentProfile: string | undefined,
+    locked: RunnerId,
+  ): Promise<string | undefined> {
+    if (agentProfile === undefined) return undefined;
+    if (agentProfile === DEFAULT_AGENT_ACCOUNT_ID || isAgentPoolId(agentProfile)) return agentProfile;
+    try {
+      const accounts = await loadAgentAccounts();
+      return accounts.accounts.some((account) => account.provider === locked && account.id === agentProfile)
+        ? agentProfile
+        : undefined;
+    } catch {
+      // An unreadable home must never fail a run. Dropping degrades to the locked provider's own
+      // selection, which is the safe direction: a kept foreign id resolves to a login on the
+      // WRONG provider's list.
+      return undefined;
+    }
+  }
+
+  /**
    * Which account is holding this queued run right now, or undefined when nothing is.
    *
    * TWO keys, because the two gates ask about different accounts and a run BOUNCES forever when
@@ -2266,8 +2336,16 @@ export class RunManager {
     // and runs on every pump sweep, while choosing an account means reading two JSON files; worse,
     // the obvious helper (`resolvePoolForDispatch`) advances the round-robin cursor as a side
     // effect, so asking it per sweep would corrupt the balancer it is asking.
+    //
+    // **Under a lock this branch never holds** (D3b item 3), which `accountFallbackEnabled`
+    // delivers as a side effect of D3c and is worth naming because item 1's phrasing does not
+    // reach here: this branch keys on `runAccountKey(run, defaultRunner)`, the PRE-LOCK routing
+    // decision read off the record, so a hold on it is a hold on a stale decision — under a lock
+    // the record's account is not what the run will run on at all. Admission must fall through to
+    // dispatch, the only layer allowed to resolve an alternative. The `heldAtSpawn` half below is
+    // governed by item 2 instead: `onRunnerLockChanged` DROPS the memo at the lock write.
     const own = runAccountKey(run, defaultRunner);
-    if (!this.semaphore.fallbackAcrossAccountsWhenLimited() && accountHeldOn(own, run, holds)) {
+    if (!this.accountFallbackEnabled() && accountHeldOn(own, run, holds)) {
       return own;
     }
     const atSpawn = this.heldAtSpawn.get(run.id);
@@ -2357,7 +2435,11 @@ export class RunManager {
       return { ok: false, error: 'this task has no queued work item yet, try again in a moment' };
     }
 
-    const targetRunner = target.runner ?? run.runner ?? 'claude';
+    // Site g (D4): "Run on…" keeps its MODEL choice and loses its PROVIDER choice while a lock is
+    // set (D6). The account is re-resolved for the locked provider below rather than carried
+    // across, because an account id is provider-scoped (D6a).
+    const retargetDecision = applyRunnerLock(this.runnerLock(), target.runner ?? run.runner ?? 'claude');
+    const targetRunner = retargetDecision.runner;
     // The same pairing guard `continueRun` applies, for the same reason and with the same words:
     // a model that is recognizably another runner's preset would corrupt the run. Free-form and
     // custom ids pass untouched.
@@ -2372,7 +2454,16 @@ export class RunManager {
     const inheritedPinIsForeign =
       target.model === undefined && run.model !== undefined && modelConflictsWithRunner(run.model, targetRunner);
     const model = target.model === undefined ? (inheritedPinIsForeign ? undefined : run.model) : target.model || undefined;
-    const agentProfile = target.agentProfile === undefined ? run.agentProfile : target.agentProfile || undefined;
+    const requestedProfile = target.agentProfile === undefined ? run.agentProfile : target.agentProfile || undefined;
+    const agentProfile = retargetDecision.locked
+      ? await this.accountForLockedProvider(requestedProfile, targetRunner)
+      : requestedProfile;
+    if (retargetDecision.locked) {
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: `this workspace is locked to ${targetRunner}, so this task stays on ${targetRunner} instead of ${retargetDecision.wouldHaveBeen}`,
+      });
+    }
 
     this.store.updateRun(runId, {
       runner: targetRunner,
@@ -3069,7 +3160,11 @@ export class RunManager {
     // question, which is async and reads two JSON files, from a synchronous predicate that runs on
     // every recovery sweep — and getting that wrong reattaches a session to the wrong provider,
     // which corrupts the run rather than costing a turn.
-    const stepBackend = def.runner ?? run.runner ?? 'claude';
+    // Site e (D4). Where the step WOULD run now, which under a lock is the lock — so a session
+    // recorded against the other provider reads as a mismatch and the step starts fresh. That is
+    // the right answer, not a loss: session ids are provider-owned opaque values, and handing one
+    // across corrupts the run. Synchronous by design; `runnerLock()` reads an in-memory snapshot.
+    const stepBackend = applyRunnerLock(this.runnerLock(), def.runner ?? run.runner ?? 'claude').runner;
     const sessionBackend = record?.backend ?? run.runner ?? 'claude';
     // `pending` means the step never opened a session in the first place — any `sessionId` on it
     // was minted for an attempt that did not start, so there is nothing on the other end.
@@ -3409,8 +3504,16 @@ export class RunManager {
     // account/provider a resume is about to pin to.
     input: Pick<ExecuteRunInput, 'agentProfile' | 'runner'>,
     defaultRunner: RunnerId,
+    /**
+     * The workspace lock, when it is what chose `input.runner`
+     * (`.ai/specs/2026-08-29-global-provider-toggle.md`, D4a). This site is AVAILABILITY, so it
+     * keeps its cross-provider candidate set and MAY cross the lock — but a silent cross is the
+     * one outcome that makes the toggle a lie, so the note below names the lock rather than the
+     * task as what was overridden.
+     */
+    lockedRunner?: LockableRunner,
   ): Promise<AccountPlacement> {
-    if (!this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
+    if (!this.accountFallbackEnabled()) return undefined;
     try {
       const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
       const provider = (input.runner ?? defaultRunner) as ProviderId;
@@ -3459,15 +3562,21 @@ export class RunManager {
         const causeText = currentTier === 'waitable' ? 'is out of quota' : 'is logged out';
         this.store.appendEvent(runId, {
           type: 'note',
-          message: `${current} ${causeText}, so this task starts on ${target} instead ` +
-            '(Settings, Resources, "Account fallback")',
+          message: lockedRunner
+            ? `this workspace is locked to ${lockedRunner}, and ${current} ${causeText}, so this task starts on ${target} instead ` +
+              '(Settings, Resources, "Account fallback")'
+            : `${current} ${causeText}, so this task starts on ${target} instead ` +
+              '(Settings, Resources, "Account fallback")',
         });
       } else {
         // `currentTier` is `disconnected` here by construction (see `pool` above).
         this.store.appendEvent(runId, {
           type: 'note',
-          message: `${current} is logged out, so this task waits on ${target} instead ` +
-            '(Settings, Resources, "Account fallback")',
+          message: lockedRunner
+            ? `this workspace is locked to ${lockedRunner}, and ${current} is logged out, so this task waits on ${target} instead ` +
+              '(Settings, Resources, "Account fallback")'
+            : `${current} is logged out, so this task waits on ${target} instead ` +
+              '(Settings, Resources, "Account fallback")',
         });
       }
       this.store.appendEvent(runId, {
@@ -3483,6 +3592,9 @@ export class RunManager {
         selectedAccount: target,
         selectedTier: tier,
         cause: currentTier === 'disconnected' ? 'credentials' : 'quota',
+        // Present only when the lock is what was crossed, so a lock-crossing fallback is
+        // countable separately from an ordinary one (D3/D4a).
+        ...(lockedRunner ? { lockedRunner } : {}),
         skippedDisconnected: disconnected.map((p) => accountUsageKey(p.provider, p.isDefault ? undefined : p.id)),
       });
       return { tier, choice };
@@ -3514,8 +3626,13 @@ export class RunManager {
     runId: string,
     step: { id: string; model?: string | undefined },
     pinned: RunnerId,
+    /** Set when `pinned` is the workspace LOCK's value rather than the step's own
+     *  (`.ai/specs/2026-08-29-global-provider-toggle.md`, D3). Under a lock EVERY agent step is
+     *  effectively pinned, so an unamended note would tell the user the STEP asked for something
+     *  the WORKSPACE asked for. */
+    lockedRunner?: LockableRunner,
   ): Promise<PinnedPlacement> {
-    if (!this.semaphore.fallbackAcrossAccountsWhenLimited()) return undefined;
+    if (!this.accountFallbackEnabled()) return undefined;
     try {
       const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
       const all = listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS);
@@ -3547,9 +3664,11 @@ export class RunManager {
         this.store.appendEvent(runId, {
           type: 'note',
           stepId: step.id,
-          message:
-            `this step asks for ${step.model ? `${step.model} on ` : ''}${pinned}, and every ${pinned} account is ${causeText} — ` +
-            `running on ${target} instead`,
+          message: lockedRunner
+            ? `this workspace is locked to ${pinned}, and every ${pinned} account is ${causeText} — ` +
+              `running on ${target} instead`
+            : `this step asks for ${step.model ? `${step.model} on ` : ''}${pinned}, and every ${pinned} account is ${causeText} — ` +
+              `running on ${target} instead`,
         });
         // Named now (`.ai/specs/2026-08-24-codex-only-default-workflow.md`, Analytics), alongside
         // the note above: CORRECTED 2026-08-29 (`.ai/specs/2026-08-29-global-provider-toggle.md`,
@@ -3570,6 +3689,8 @@ export class RunManager {
           actualRunner: choice.provider,
           actualAccount: target,
           reason: cause,
+          // A downgrade UNDER a lock is countable separately from an ordinary step-pin downgrade.
+          ...(lockedRunner ? { lockedRunner } : {}),
         });
       }
       // Emitted for both tiers, same as the explicit-reroute site — the `waitable` case is a real
@@ -3584,6 +3705,7 @@ export class RunManager {
         site: 'pinned-step',
         requestedRoute: formatAgentRoute({ kind: 'pool', provider: pinned }),
         requestedProvider: pinned,
+        ...(lockedRunner ? { lockedRunner } : {}),
         selectedProvider: choice.provider,
         selectedAccount: target,
         selectedTier: tier,
@@ -3617,10 +3739,15 @@ export class RunManager {
     pinned: RunnerId,
     waitableRunner: RunnerId,
     waitableProfileId: string | undefined,
+    /** Set when `pinned` is the workspace LOCK's value (D3). Both notes are lock-aware or
+     *  neither is: the runnable path and the park path are two halves of one story, and D3a is
+     *  what made this path reachable under a lock at all. */
+    lockedRunner?: LockableRunner,
   ): string {
     const target = accountUsageKey(waitableRunner, waitableProfileId);
+    const asks = lockedRunner ? `this workspace is locked to ${pinned}` : `this step asks for ${pinned}`;
     const message =
-      `this step asks for ${pinned}, and every ${pinned} account is logged out; the best account cezar can move it to ` +
+      `${asks}, and every ${pinned} account is logged out; the best account cezar can move it to ` +
       `(${target}) is out of quota, so this task waits for that window`;
     this.store.appendEvent(runId, { type: 'note', stepId: step.id, message });
     const deadline = this.holdReopensAt(target) ?? new Date(Date.now() + ASSUMED_LIMIT_COOLDOWN_MS);
@@ -3787,6 +3914,9 @@ export class RunManager {
     /** What dispatch resolved for this run, when it resolved anything — a pool choice or an
      *  out-of-quota reroute. The record does not carry it; see the comment on `account` below. */
     resolved?: PoolChoice,
+    /** True when `runner` is the workspace LOCK's answer rather than the run's own
+     *  (`.ai/specs/2026-08-29-global-provider-toggle.md`, D3b item 1). */
+    lockedTarget = false,
   ): boolean {
     const run = this.store.getRun(runId);
     if (!run || run.status === 'cancelled' || state?.cancelled) return false;
@@ -3818,6 +3948,19 @@ export class RunManager {
       ? accountUsageKey(resolved.provider, resolved.accountId)
       : runAccountKey({ ...run, runner }, runner);
     if (!accountHeldOn(account, run, this.semaphore.accountHolds())) return false;
+    if (lockedTarget) {
+      // D3b item 1. This gate is EARLY: it refuses without having resolved an alternative, and
+      // the account it is refusing on is one the user did not choose — the lock did. Parking here
+      // would mean nothing ever looks at the other provider, which is the whole point of the
+      // lock ("everything is stuck on codex, flip it" only works if the flip reaches dispatch).
+      //
+      // The lock buys passage TO dispatch, never THROUGH it: `downgradePinnedRunner` there either
+      // makes the loud cross-provider move D3 specifies, or — with nothing runnable anywhere —
+      // parks per D3a with a real appointment behind it. And no memo is written here, because
+      // there was no refusal to remember; a memo from a dispatch-level park is a real
+      // post-resolve verdict and is still written (D3b item 2's write rule).
+      return false;
+    }
     this.holdRunOnAccount(runId, workflow, input, account, state);
     return true;
   }
@@ -4658,7 +4801,10 @@ export class RunManager {
     }
     const sessionStep = [...run.steps].reverse().find((s) => s.sessionId);
     if (!sessionStep?.sessionId) return { ok: false, error: 'no agent session to resume' };
-    const targetRunner = opts.runner ?? run.runner ?? 'claude';
+    // Site f (D4/D6): the follow-up composer's engine override keeps its MODEL choice and loses
+    // its PROVIDER choice while a lock is set.
+    const continueDecision = applyRunnerLock(this.runnerLock(), opts.runner ?? run.runner ?? 'claude');
+    const targetRunner = continueDecision.runner;
     // Session ids are provider-owned opaque values. New records carry explicit
     // affinity; for legacy records, the run's current runner is the conservative
     // owner until a continuation emits a new, attributed session id (#562).
@@ -4671,7 +4817,7 @@ export class RunManager {
     // run's current backend — `runContinuation` reads it off the record, later continuations
     // default to it, and the header reflects the active engine. An empty model ('') clears the
     // pin, letting the runner pick the model (auto).
-    if (opts.runner !== undefined || opts.model !== undefined) {
+    if (opts.runner !== undefined || opts.model !== undefined || continueDecision.locked) {
       // Guard the pairing before persisting anything: the model override applies to the runner
       // this continuation will actually use (`opts.runner ?? record.runner ?? 'claude'` — the
       // same resolution `runContinuation` reads off the record). A model that is recognizably
@@ -4690,13 +4836,26 @@ export class RunManager {
         run.model !== undefined &&
         modelConflictsWithRunner(run.model, targetRunner);
       this.store.updateRun(runId, {
-        ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
+        // `targetRunner`, not `opts.runner`: under a lock the effective provider is the lock's,
+        // and the record has to name what will actually run or `runContinuation` resolves the
+        // account against the wrong provider's login list.
+        ...(opts.runner !== undefined || continueDecision.locked ? { runner: targetRunner } : {}),
+        // D6a: a lock-forced provider change drops a foreign account id rather than carrying it.
+        ...(continueDecision.locked
+          ? { agentProfile: await this.accountForLockedProvider(run.agentProfile, targetRunner) }
+          : {}),
         ...(opts.model !== undefined
           ? { model: opts.model === '' ? undefined : opts.model }
           : inheritedPinIsForeign
             ? { model: undefined }
             : {}),
       });
+      if (continueDecision.locked) {
+        this.store.appendEvent(runId, {
+          type: 'note',
+          message: `this workspace is locked to ${targetRunner}, so this follow-up runs there instead of ${continueDecision.wouldHaveBeen}`,
+        });
+      }
     }
 
     // Everything that could refuse this continuation has now passed, so a pending usage-limit
@@ -4843,6 +5002,29 @@ export class RunManager {
     const resumedProfileId = sessionId === undefined
       ? undefined
       : record?.steps.find((s) => s.sessionId === sessionId)?.profileId;
+    // Site f, second half (D4/D6). `continueRun` applies the lock to a DIRECT follow-up, but this
+    // method is also entered by the queue replay (`pendingContinuations`, whose `backend` was
+    // stamped before the lock may have been written), by `fireAutoResume`, and by its own two
+    // internal retries. This is the single funnel all four go through, so the lock is re-read
+    // here rather than trusted from whatever stamped `backend`.
+    const runLock = this.runnerLock();
+    const continuationLock = applyRunnerLock(runLock, backend);
+    const lockedBackend = continuationLock.runner;
+    if (continuationLock.locked) {
+      this.store.appendEvent(runId, {
+        type: 'note',
+        stepId,
+        message: `this workspace is locked to ${lockedBackend}, so this continuation runs there instead of ${continuationLock.wouldHaveBeen}`,
+      });
+      // D6a: the account and the provider are a PAIR. Re-resolved for the locked provider, never
+      // carried across, and persisted with `runner` for the same reason the reroute below
+      // persists its own pair — `agentEnvForStep` resolves `run.agentProfile` against
+      // `run.runner`, so a crossed pair reads the WRONG provider's login list.
+      this.store.updateRun(runId, {
+        runner: lockedBackend,
+        agentProfile: await this.accountForLockedProvider(record?.agentProfile, lockedBackend),
+      });
+    }
     // Out-of-quota-or-logged-out fallback for a RESUME (extends spec 2026-08-24-reroute-checks-
     // dangling-account-key, and Phase 1 of 2026-08-25-logged-out-account-fallback.md for
     // credentials). `execute()` checks a fresh dispatch against a hold via
@@ -4857,8 +5039,17 @@ export class RunManager {
     // `2026-08-24-reroute-checks-dangling-account-key.md` fixed for `execute()`.
     const placement = await this.rerouteExplicitAccountIfUnavailable(
       runId,
-      { agentProfile: resumedProfileId ?? record?.agentProfile, runner: backend },
-      backend,
+      {
+        // A session's own account is meaningless on the provider the lock moved this
+        // continuation to, so a locked move re-resolves rather than checking a hold on a login
+        // that will not run (D6a).
+        agentProfile: continuationLock.locked
+          ? await this.accountForLockedProvider(record?.agentProfile, lockedBackend)
+          : resumedProfileId ?? record?.agentProfile,
+        runner: lockedBackend,
+      },
+      lockedBackend,
+      runLock,
     );
     if (placement?.tier === 'waitable') {
       // The session's own account is logged out and the best fallback is only out of quota, not
@@ -4900,18 +5091,24 @@ export class RunManager {
     // first place. Forcing the downgrade here reuses the exact fresh-session mechanism the
     // "no transcript for the recorded session" branch below already has for the same shape of
     // problem (a resume that cannot honor the session it was given).
-    let resumeDowngraded = rerouted !== undefined;
-    if (resumeDowngraded) {
+    // A lock that moved the provider cannot reattach the old transcript either — it lives inside
+    // the OTHER provider's config dir. Same fresh-session mechanism, same reason.
+    let resumeDowngraded = rerouted !== undefined || continuationLock.locked;
+    // Only worth saying when there WAS a session to lose; a cold continuation has nothing to
+    // start fresh from, and the two causes read differently to the person in the thread.
+    if (resumeDowngraded && sessionId !== undefined) {
       this.store.appendEvent(runId, {
         type: 'note',
         stepId,
-        message: 'the account this session belongs to is out of quota — starting fresh on the new account',
+        message: rerouted
+          ? 'the account this session belongs to is out of quota — starting fresh on the new account'
+          : `this session belongs to ${continuationLock.wouldHaveBeen} — starting fresh on ${lockedBackend}`,
       });
     }
     // Backend + model come off the record: the run's current backend by default, or the
     // follow-up override that `continueRun` persisted before scheduling (#401) — or the reroute
     // just above, which takes the same precedence a fresh dispatch gives `chosen` over `input.runner`.
-    const continueBackend = rerouted?.provider ?? backend;
+    const continueBackend = rerouted?.provider ?? lockedBackend;
     // The env is a live ceiling: a run created while the inbox was on must not keep writing
     // follow-ups after it is switched off.
     const generateFollowups = followupsEnabled() && record?.generateFollowups !== false;
@@ -5602,9 +5799,24 @@ export class RunManager {
     // balancer sees the real state of the workspace — a run queued ten minutes ago must not be
     // routed on ten-minute-old in-flight counts. `pool:*` picks the PROVIDER too, which is why this
     // sits above `taskBackend` rather than inside the account lookup.
+    //
+    // THE WORKSPACE PROVIDER LOCK (`.ai/specs/2026-08-29-global-provider-toggle.md`, D4 sites a+b).
+    // Read ONCE here and reused for the pool lookup, the account re-resolution and `taskBackend`
+    // below, so those three cannot answer from three different reads of the same setting — the
+    // "one snapshot per decision" rule D4b states one layer up.
+    const lock = this.runnerLock();
+    const lockDecision = applyRunnerLock(lock, (input.runner ?? config.defaultRunner) as RunnerId);
+    // D6a: a lock that MOVES the provider may not carry the task's account across, because an
+    // account id is provider-scoped. Dropped, never translated — see `accountForLockedProvider`.
+    const dispatchProfile = lockDecision.locked
+      ? await this.accountForLockedProvider(input.agentProfile, lockDecision.runner)
+      : input.agentProfile;
     const pooled = await resolvePoolForDispatch({
-      agentProfile: input.agentProfile,
-      fallbackProvider: (input.runner ?? config.defaultRunner) as ProviderId,
+      agentProfile: dispatchProfile,
+      // Site a: the lock becomes the lookup provider, so the stored selection consulted is the
+      // LOCKED provider's — not the unlocked default's, whose route may name the other provider
+      // outright.
+      fallbackProvider: lockDecision.runner as ProviderId,
       repoRoot: this.repoRoot,
       // Workspace-wide, via the semaphore every manager registers with — the boot project's
       // included, which no project-context map can see. See `SemaphoreParticipant.accountInflight`.
@@ -5615,6 +5827,13 @@ export class RunManager {
       // Credentials only, deliberately: quota is `selectPoolAccount`'s own job against its `usage`
       // argument, and `disconnected` never depends on quota either way.
       tier: (profile) => this.credentialTier(profile),
+      // D5: a lock confines the pool's candidates to the locked provider. The pool still balances
+      // ACCOUNTS, it just may no longer hop PROVIDERS. Without this a `pool:*` route — which is
+      // the shipped per-provider default on a multi-account host — silently discards an explicit
+      // engine pick AND the lock: measured on `prod-host` 2026-08-30, run
+      // `2ac77920-d5e5-4695-97da-70bba72c87a4` was started with `requestedRunner: 'codex'` under
+      // a codex lock and executed on `claude:secondary`.
+      ...(lock ? { lock: lock as ProviderId } : {}),
     });
     this.notePoolSkip(runId, pooled);
     // Out-of-quota-or-logged-out fallback (spec 2026-08-23-retarget-task-to-another-engine, Phase 4,
@@ -5624,7 +5843,15 @@ export class RunManager {
     // `2026-08-23-never-block-a-task.md` (this comment said "Off by default" until then).
     const placement: AccountPlacement = pooled
       ? { tier: 'runnable', choice: pooled }
-      : await this.rerouteExplicitAccountIfUnavailable(runId, input, config.defaultRunner);
+      : await this.rerouteExplicitAccountIfUnavailable(
+          runId,
+          { agentProfile: dispatchProfile, runner: lockDecision.runner },
+          lockDecision.runner,
+          // Passed whenever a lock is SET, not only when it changed the answer: this note is
+          // about what the reroute crossed, and a lock the request agreed with is still the
+          // thing being crossed.
+          lock,
+        );
     if (placement?.tier === 'waitable') {
       // The current account is logged out and nothing is runnable anywhere: an unconditional
       // park, not a hold lookup that would find nothing recorded against a login nobody has run
@@ -5639,12 +5866,21 @@ export class RunManager {
       return;
     }
     const chosen = placement?.choice;
-    const taskBackend: RunnerId = chosen?.provider ?? input.runner ?? config.defaultRunner;
+    // Site b. `chosen` STILL WINS over the lock, and that is D3 rather than an oversight: it is
+    // either the pool (already narrowed to the lock above, so it cannot disagree) or
+    // `rerouteExplicitAccountIfUnavailable`, which is AVAILABILITY — the one thing that outranks
+    // the lock (D4a). Everything else that could have produced a runner here is a SETTING, and
+    // the lock beats every one of them.
+    const taskBackend: RunnerId = chosen?.provider ?? lockDecision.runner;
+    // D3b item 1: is this backend the LOCK's answer rather than the run's own? A hold on an
+    // account the user never chose is not a reason to park BEFORE dispatch has looked for an
+    // alternative. The lock buys passage TO dispatch, never THROUGH it.
+    const lockedTarget = lockDecision.locked && taskBackend === lockDecision.runner;
     // The account may have gone into a usage-limit hold since this run was dequeued — the queue
     // gate cannot be the only one, because dequeue is not the moment of no return. Nothing has
     // happened yet here, so the run goes back to the queue untouched (spec
     // 2026-08-03-auto-resume-after-usage-limit).
-    if (this.requeueWhileHeld(runId, workflow, input, taskBackend, undefined, chosen)) return;
+    if (this.requeueWhileHeld(runId, workflow, input, taskBackend, undefined, chosen, lockedTarget)) return;
     // Extra system prompt (R2 2.3): POST override > config default; echoed on
     // the record so the UI/API can show what the run actually used.
     const extraSystemPrompt = resolveExtraSystemPrompt(input.systemPrompt, config.systemPrompt);
@@ -5678,8 +5914,38 @@ export class RunManager {
       // the same reason a pool does, and leaving the record naming the limited account the user
       // originally picked would make the thread header, the resume and "which account spent this"
       // all answer with an account that ran nothing.
-      ...(chosen ? { agentProfile: chosen.accountId } : {}),
+      //
+      // D6a's half of the same rule: with no `chosen`, the record must still stop naming an
+      // account the lock made meaningless. `createRun` stamped `input.agentProfile` verbatim, so
+      // without this a codex id survives on a claude-locked run and `agentEnvForStep` hands it to
+      // `resolveProfileEnvForRoot(root, 'claude', '<codex id>')` — which finds nothing and
+      // degrades to claude's DEFAULT login, skipping the pool ranking entirely.
+      ...(chosen
+        ? { agentProfile: chosen.accountId }
+        : dispatchProfile !== input.agentProfile
+          ? { agentProfile: dispatchProfile }
+          : {}),
     });
+    if (lockDecision.locked) {
+      // Say so, always. A screen-pinned control saying "Codex" over a run quietly executing on
+      // Claude is the one state this feature must not have, and the inverse — overriding the
+      // composer's pill in silence — is the failure the whole toggle is a decision about.
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: taskBackend === lockDecision.runner
+          ? `this workspace is locked to ${lockDecision.runner}, so this task runs there instead of ${lockDecision.wouldHaveBeen}`
+          : `this workspace is locked to ${lockDecision.runner}, but no ${lockDecision.runner} account is available, so this task runs on ${taskBackend}`,
+      });
+      this.store.appendEvent(runId, {
+        type: 'metric',
+        name: 'run.runner_locked',
+        runId,
+        workflow: workflow.name,
+        lockedRunner: lockDecision.runner,
+        wouldHaveBeen: lockDecision.wouldHaveBeen,
+        actualRunner: taskBackend,
+      });
+    }
     emit({ type: 'lifecycle', message: `run started — workflow "${workflow.name}" (runner: ${taskBackend})` });
 
     // Worktree per task (spec 006): the agent works on its own branch in
@@ -5856,7 +6122,7 @@ export class RunManager {
       // is a spawn, and hand the run back to the queue if the account closed meanwhile. This
       // check also covers the explicit lock-bypass path, where the account may close while the
       // run is preparing its first step.
-      if (this.requeueWhileHeld(runId, workflow, input, taskBackend, state, chosen)) return;
+      if (this.requeueWhileHeld(runId, workflow, input, taskBackend, state, chosen, lockedTarget)) return;
     }
 
     // Handoff journal (spec 007) — seeded after the worktree exists so the
@@ -5924,6 +6190,9 @@ export class RunManager {
         target,
         targetRecord,
         taskBackend,
+        // Site g (D4): the predicate asks where the target WOULD run now, and under a lock that
+        // is the lock — including over the target's own `runner` pin.
+        runnerLock: this.runnerLock(),
       });
       const resumeReason = decision.reason;
       if (decision.resume) {
@@ -7317,16 +7586,35 @@ export class RunManager {
     // available and say so. So the quality pin is now a preference with a fallback, not a
     // guarantee — a real reduction in what the workflow promises, mitigated by announcement rather
     // than prevention, which is why the note below is asserted by a test rather than decorative.
-    const pinned = step.runner ?? undefined;
-    const downgrade = pinned ? await this.downgradePinnedRunner(runId, step, pinned) : undefined;
+    //
+    // SITES c+d (`.ai/specs/2026-08-29-global-provider-toggle.md`, D4). Under a lock EVERY agent
+    // step is effectively pinned, to the lock, which is the widening D3 states in as many words:
+    // ten `downgradePinnedRunner` evaluations per `spec-to-deploy` run instead of three, each two
+    // `readFile`s. That cost is what buys the property the toggle exists for — a workflow step
+    // pin, including all ten of `spec-to-deploy-codex`, no longer escapes it.
+    const stepLock = this.runnerLock();
+    const stepDecision = applyRunnerLock(stepLock, step.runner ?? taskBackend);
+    const pinned: RunnerId | undefined = stepLock ?? step.runner ?? undefined;
+    const downgrade = pinned
+      ? await this.downgradePinnedRunner(runId, step, pinned, stepLock)
+      : undefined;
     if (downgrade?.tier === 'waitable') {
       // Every account of the pinned provider is unavailable, and the best fallback found is only
       // out of quota, not logged in and healthy — no session has been minted for THIS attempt yet
       // and nothing may spawn. Mark the run failed with a real appointment and let the ordinary
       // auto-resume machinery bring it back, exactly like a provider-reported usage limit would.
-      return this.holdStepOnWaitableAccount(runId, step, pinned as RunnerId, downgrade.runner, downgrade.profileId);
+      return this.holdStepOnWaitableAccount(
+        runId,
+        step,
+        pinned as RunnerId,
+        downgrade.runner,
+        downgrade.profileId,
+        stepLock,
+      );
     }
-    const backend = downgrade?.runner ?? step.runner ?? taskBackend;
+    // `downgrade` still wins over the lock: availability outranks it (D3), and it has already
+    // resolved a concrete account on the provider it moved to.
+    const backend = downgrade?.runner ?? stepDecision.runner;
     this.store.updateStep(runId, step.id, { sessionId, backend });
 
     // Loaded once, closed over by `onEvent` below — the step budget (PLAN D27 Phase 1) is
@@ -8005,7 +8293,11 @@ export class RunManager {
         const skills = await discoverSkills(this.repoRoot).catch(() => [] as Skill[]);
         skillDescription = skills.find((s) => s.name === skillName)?.description;
       }
-      const result = await generateRunName(this.repoRoot, { task, skillName, skillDescription, ...live });
+      const result = await generateRunName(
+        this.repoRoot,
+        { task, skillName, skillDescription, ...live },
+        { ...(this.runnerLock() ? { runnerLock: this.runnerLock() as LockableRunner } : {}) },
+      );
       if (!result) return;
       const run = this.store.getRun(runId);
       // Marker-owned state outranks the namer (spec 2026-07-18-task-ref-markers):

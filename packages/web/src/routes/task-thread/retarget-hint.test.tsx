@@ -89,6 +89,10 @@ function serve(
   providerStatus: ProviderStatusResponse | { error: string } = providersForHealth(health),
   providerStatusCode = 200,
   modelsLocked = false,
+  /** The global engine lock on `GET /workspace/config`
+   *  (`.ai/specs/2026-08-29-global-provider-toggle.md`). `undefined` omits the key, which is the
+   *  shape this file served before the lock existed. */
+  runnerLock: 'claude' | 'codex' | null | undefined = undefined,
 ) {
   requests = []
   const json = (payload: unknown, status = 200) =>
@@ -113,6 +117,8 @@ function serve(
           maxParallel: 1,
           memoryLimitMb: null,
         })
+      if (url === '/api/v1/workspace/config' && method === 'GET')
+        return json(runnerLock === undefined ? {} : { runnerLock })
       if (url === '/api/v1/runs' && method === 'GET') return json([])
       if (url.endsWith('/agent') && method === 'POST') return json({ run: {} })
       return json({}, 200)
@@ -353,5 +359,49 @@ describe('RetargetMenuButton — the header shortcut', () => {
     const items = await screen.findAllByRole('menuitem')
     fireEvent.click(items.find((i) => i.getAttribute('data-runner') === 'codex') as HTMLElement)
     expect(await screen.findByText(/cannot retarget a running run/)).toBeTruthy()
+  })
+})
+
+/**
+ * The global engine lock at "Run on…" (`.ai/specs/2026-08-29-global-provider-toggle.md`, D2
+ * rank 4).
+ *
+ * This menu is the one surface whose entire content is a list of providers, so a lock that did not
+ * reach it would leave the clearest possible contradiction on screen: an item reading "Run on
+ * claude" that posts `{runner:'claude'}` and produces a codex run. It is a second renderer of the
+ * same `useRetargetAction` the pills use, which is why the narrowing lives in the hook.
+ */
+describe('RetargetMenuButton under a global engine lock', () => {
+  it('offers only the locked provider, and says why', async () => {
+    serve(HEALTH_MULTI, {}, providersForHealth(HEALTH_MULTI), 200, false, 'codex')
+    renderMenu(QUEUED) // runner: 'claude'
+    await openMenu()
+    const items = await screen.findAllByRole('menuitem')
+    expect(items.map((i) => i.getAttribute('data-runner')).filter(Boolean)).toEqual(['codex'])
+    expect(
+      document.querySelector('[data-slot="retarget-menu-lock-note"]')?.textContent,
+    ).toContain('Locked to codex')
+  })
+
+  it('offers both on Auto, with no note — the control', async () => {
+    serve(HEALTH_MULTI, {}, providersForHealth(HEALTH_MULTI), 200, false, null)
+    renderMenu(QUEUED)
+    await openMenu()
+    const items = await screen.findAllByRole('menuitem')
+    expect(items.map((i) => i.getAttribute('data-runner')).filter(Boolean)).toEqual(['claude', 'codex'])
+    expect(document.querySelector('[data-slot="retarget-menu-lock-note"]')).toBeNull()
+  })
+
+  it('leaves the task nowhere to go when it is already on the locked provider', async () => {
+    // Honest rather than tidy: the single row is the disabled "(current)" one, and the note is what
+    // separates that from a menu that looks broken. Hiding the button instead would take away the
+    // only place this state is explained.
+    serve(HEALTH_MULTI, {}, providersForHealth(HEALTH_MULTI), 200, false, 'claude')
+    renderMenu(QUEUED) // runner: 'claude'
+    await openMenu()
+    const items = await screen.findAllByRole('menuitem')
+    const rows = items.filter((i) => i.getAttribute('data-runner') !== null)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.getAttribute('data-disabled')).not.toBeNull()
   })
 })

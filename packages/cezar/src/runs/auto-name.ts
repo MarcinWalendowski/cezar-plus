@@ -1,5 +1,7 @@
 import { z } from 'zod';
+import type { LockableRunner } from '@loki-labs/better-cezar-contract';
 import { loadConfig } from '../config.ts';
+import type { AgentRunner, RunnerId } from '../core/agent-runner.ts';
 import { createRunner } from '../core/runner-factory.ts';
 import { parseStructured } from '../planner.ts';
 import { resolveProfileEnvForRoot } from '../workspace/agent-profiles.ts';
@@ -150,15 +152,35 @@ export function postValidateTitle(title: string, refNumber?: number): string {
  * the heuristic title. `namerModel` is a Claude alias, so it is passed only
  * when the namer runs on Claude (the `plannerModel` precedent).
  */
-export async function generateRunName(repoRoot: string, ctx: NamerContext): Promise<NameResult | null> {
+export async function generateRunName(
+  repoRoot: string,
+  ctx: NamerContext,
+  opts: {
+    /** The workspace provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D4c).
+     *  Prefers the lock over `config.defaultRunner`, because a lock that visibly fails to move
+     *  task naming is a lock with holes in it. A plain optional: absent is byte-for-byte the
+     *  behaviour this had before the lock existed. */
+    runnerLock?: LockableRunner;
+    /** Injected by tests, on `classifyTask`/`NoteProcessor`'s precedent — the namer's whole
+     *  contract is what it does with a runner's answer, and WHICH runner it asks is not
+     *  observable from the outside without this seam. */
+    runnerFactory?: (backend: RunnerId) => AgentRunner;
+  } = {},
+): Promise<NameResult | null> {
   try {
     const config = await loadConfig(repoRoot);
-    const runner = createRunner(config.defaultRunner);
-    const model = config.defaultRunner === 'claude' ? config.namerModel : undefined;
+    // The lock is a SETTING-level override, so it beats the project default here exactly as it
+    // does at dispatch. No account ladder is grown for it: naming is a best-effort pass whose
+    // failure is already non-fatal, and a lock must not convert that into a blocking call.
+    const namerRunner = opts.runnerLock ?? config.defaultRunner;
+    const runner = (opts.runnerFactory ?? createRunner)(namerRunner);
+    // Claude-only alias: under a Codex lock this is simply false and codex picks its own default,
+    // which is what this line already does for a codex `defaultRunner`.
+    const model = namerRunner === 'claude' ? config.namerModel : undefined;
     // Name under the project's own agent account (spec 2026-07-29-agent-profiles) — naming is
     // a model call like any other, and billing it to the personal subscription for a work
     // project is the exact confusion accounts exist to remove.
-    const { env: profileEnv } = await resolveProfileEnvForRoot(repoRoot, config.defaultRunner);
+    const { env: profileEnv } = await resolveProfileEnvForRoot(repoRoot, namerRunner);
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = await runner.run({
         systemPrompt: NAMER_SYSTEM_PROMPT,

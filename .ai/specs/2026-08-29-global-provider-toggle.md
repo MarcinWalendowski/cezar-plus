@@ -1,6 +1,56 @@
 # Global provider toggle
 
-**Status:** Partially implemented. Committed as `58f5ede5`, merged into `origin/main` as
+**Status: Implemented (dispatch), QA Needed. CORRECTED 2026-08-30** — the gap this header
+described is closed. D4's eight dispatch sites, D5's pool narrowing, D3b's two spawn gates and
+admission branch, D3c's ladder rule, D4a's lock-aware fallback notes, D6/D6a's account
+re-resolution and D4c's three remaining model-call paths (auto-naming, the task classifier, the
+note triage pass) are wired and covered by `workflows/runner-lock-dispatch.test.ts` plus lock
+cases in `task-classifier.test.ts`, `runs/auto-name.test.ts` and `notes/processor.test.ts`. Every
+one of those was mutation-checked: unwrapping a site turns a named test red. Gates green
+(`typecheck` 0 errors, `test` 12300 passed / 0 failed, `test:package` 25/25, `check:pack` ok).
+**QA Needed, not Done**: the runtime E2E on `prod-host` (V8) has not been run.
+
+**AMENDED 2026-08-30, later the same day — Phase 3 shipped too, and the D3c line above was
+wrong.** The paragraph below said D3c's Settings note was outstanding; it is not, and never was —
+it landed with the original feature commit and is covered by two paired cases in
+`packages/web/src/routes/settings/resources-section.test.tsx`. The error came from reading Phase
+3's own "also not shipped" bullet as a list of everything missing, when it was a list of what the
+*commit's diff* did not contain. Its original text is struck through below.
+
+**~~Still not shipped from this spec:~~** ~~Phase 2a (the cluster link — single-node installs are
+unaffected), Phase 3's picker-fixed-rendering across the six composer/retarget surfaces and
+`picker-pill.tsx`'s lock-conditional advisory copy, and D3c's Settings note beside the
+"Account fallback" control. Those are UI honesty, not mechanism: the lock now governs what runs,
+but the pickers still render as though they were free.~~
+
+**Still not shipped: Phase 2a alone** (the cluster link — single-node installs are unaffected).
+
+**Phase 3 is now wired.** Every engine picker renders the locked provider as fixed rather than
+free: the menu narrows to it, the provider-spanning `balance · everything` row goes away, the
+`ADVISORY_NOTE` footer is replaced by `lockDisclosure(runner)`, and **model and same-provider
+account selection are untouched** (D6a). The resolution happens at three points — `RunnerPill`
+(the menu and the label, for all six surfaces at once), `useResolvedEngine`, `new-task.tsx` and
+`useContinuationProvider` — through one pure `effectiveLock(lock, available)` that returns `null`
+for a lock this host cannot honour, which is D3 restated where a picker can read it.
+
+**One surface the Phase 3 file table missed: `retarget-menu.tsx`.** The header's and the mobile
+menu's "Run on…" is a second renderer of `useRetargetAction`, and its entire content is a list of
+providers — so it was the clearest possible place for the contradiction to survive ("Run on
+claude" posting `{runner:'claude'}` and producing a codex run). `useRetargetAction` now narrows
+its `runners` to the lock and the menu names the reason. Cases in
+`packages/web/src/routes/task-thread/retarget-hint.test.tsx`.
+
+Verification: V5d's cases, each paired with the unlocked control, in
+`agent-pool-rows.test.tsx` (10), `engine-pills.test.ts` (6), `new-task.test.tsx` (6),
+`follow-up-engine.test.tsx` (3), `retarget-hint.test.tsx` (3) and `new-task-form.test.ts` (4).
+**Fourteen mutations, fourteen named reds** — one per lock-aware branch, including the two that
+only the request-body assertions catch (`runnerExplicit` under a lock that equals the project
+default, and a `pool:*` draft under a lock).
+
+The original text follows unchanged, as the record of what was true until 2026-08-30.
+
+**SUPERSEDED 2026-08-30 by the correction above:** ~~Partially implemented. Committed as
+`58f5ede5`, merged into `origin/main` as
 `b3a7c153`. Gates (`test:package`) were green and the merge landed, but **the mechanism this spec
 exists for — D4's dispatch-time enforcement — was not wired**, so a lock set today does not change
 what provider a run or step actually executes on. See "Known implementation gap" immediately
@@ -10,7 +60,7 @@ gates-passed-so-it-works sense** — V8 would fail on acceptance criterion 3 as 
 genuinely landed: the storage/contract layer (D7), the pre-flight 409 entry gates (D4b, in
 `provider-action-gate.ts`), the `onRunnerLockChanged` queue-clear hook (D7a), the shell UI (D9,
 `EngineLockBar` + the onboarding narrowing), the Settings mirror, and the pure, unit-tested
-`applyRunnerLock` helper that nothing calls yet.
+`applyRunnerLock` helper that nothing calls yet.~~
 **Date:** 2026-08-29
 **Repo:** `cezar`
 **Read at:** `95b93175` (worktree `41f30bd7-8553-4f88-9b96-04d6aaf64714`, clean, branch `cez/41f30bd7`)
@@ -44,9 +94,47 @@ correction of this one."* This spec is that new decision and that new setting. I
 `81ab4ebd`; it supersedes the scope of its answer for the case where a lock is set, and leaves the
 unlocked behaviour exactly as `81ab4ebd` left it.
 
-## Known implementation gap (written 2026-08-29, this document step)
+## Known implementation gap — CLOSED 2026-08-30
 
-**The dispatch-time mechanism (D4) — the entire reason this spec exists — is not wired.**
+**The heading said "Known implementation gap (written 2026-08-29, this document step)" and the
+gap is now closed.** Amended in the heading, not only in the body, because a reader scanning
+headings must not carry away a falsehood.
+
+**What closed it, and what the gap cost in the meantime.** The gap was found in production on
+2026-08-30 by the owner, from the symptom rather than the code: a task created in the composer
+with **Codex** checked, on a workspace whose shell-bar lock was **Codex**, ran on
+`anthropic/sonnet`. Run `2ac77920-d5e5-4695-97da-70bba72c87a4` in project `cezar`, and its own
+event stream is the whole diagnosis:
+
+```
+run.workflow.selected   requestedRunner: "codex"
+run.account_fallback    site: "pool", requestedRoute: "pool:*",
+                        selectedProvider: "claude", selectedAccount: "claude:secondary"
+lifecycle               run started — workflow "quick-task" (runner: claude)
+note                    model: anthropic/sonnet
+```
+
+**Two mechanisms, and the lock was only one of them.** `/var/lib/cezar/.cezar/agent-accounts.json`
+on that box has `defaults: { claude: "pool:*", codex: "pool:*" }`, so a request naming `codex`
+with no explicit account looked up **codex's own default account setting** and got a route that
+spans every provider — which then re-picked the provider and discarded the pick that had produced
+the lookup. `runnerLock: "codex"` was set in `~/.cezar/config.json` and, per this section, reached
+nothing. Neither control could win, and the failure was silent in the direction that matters: the
+cockpit rendered `codex` on the bar and `codex` on the pill while the run executed on Claude.
+
+That `pool:*` behaviour was already known and already written down —
+`workflows/step-runner-account.test.ts`'s fixture comment says *"a wildcard pool picks the
+PROVIDER as well as the login ... That is a real bug, but it is a different one"* — which is why
+the negative control in `runner-lock-dispatch.test.ts` asserts it still happens **unlocked**. D5
+narrows the pool under a lock; it deliberately does not redefine `pool:*` (todo `81ab4ebd`
+decided that separately, in favour of the wildcard). **A user who wants their composer pill to
+beat a wildcard pool with no lock set is still not served, and that is a live open question, not
+an oversight of this change.**
+
+The original finding follows unchanged.
+
+**CORRECTED 2026-08-30 — wired. The paragraph below was true from 2026-08-29 to 2026-08-30.**
+~~The dispatch-time mechanism (D4) — the entire reason this spec exists — is not wired.~~
 Measured directly against `b3a7c153` (`origin/main`), by grepping every file the feature commit
 (`58f5ede5`) touched or should have touched:
 
@@ -79,13 +167,15 @@ Measured directly against `b3a7c153` (`origin/main`), by grepping every file the
   step on claude … including a project whose settings and `pool:*` account selection would
   otherwise have chosen codex") is false as shipped. A locked project whose `defaultRunner` is
   codex still dispatches on codex.
-- **Also not shipped:** Phase 3's picker-fixed-rendering across the six surfaces D2 rank 5 / D6
+- **CLOSED 2026-08-30 — ~~Also not shipped:~~** the picker rendering below shipped later the same
+  day; see the amendment at the top of this file for what landed and where it is verified. The
+  original bullet, unchanged: ~~Phase 3's picker-fixed-rendering across the six surfaces D2 rank 5 / D6
   name (`engine-pills.tsx:168`, `new-task.tsx`, `follow-up-engine.tsx`, `retarget-engine.tsx`,
   `inbox.tsx:347`, `github/hand-to-agent.tsx:265`) and P6's lock-conditional `ADVISORY_NOTE` string
   in `picker-pill.tsx`. None of those five component files, nor `picker-pill.tsx`, appear in the
   feature commit's diff. What *did* ship of Phase 3: the `AppShell` `globalBar` slot, the
   `EngineLockBar`/`EngineLockBarContainer` pair, the Settings → Providers mirror, and the D3c
-  `resources-section.tsx` copy.
+  `resources-section.tsx` copy.~~
 
 **What is genuinely true and durable regardless of this gap:** the *decision* — D2's precedence
 table and D3's "overrides settings, not availability" ruling — was made, reviewed thirteen times,
@@ -614,6 +704,10 @@ memo when the lock is set, each asserting that the run reaches dispatch, not tha
 spawns.
 
 ### D4. One pure function, one named decision, eight call sites
+
+**WIRED 2026-08-30.** All eight are live in `packages/cezar/src/workflows/run.ts`; the line
+numbers in the table below are as-read at `95b93175` and have moved. Grep `applyRunnerLock(` for
+the call sites and `runner-lock-dispatch.test.ts` for the coverage.
 
 A lock that is spelled `lock ?? x` inline at eight expressions is a lock that drifts at the ninth.
 New module `packages/cezar/src/workflows/runner-lock.ts`:

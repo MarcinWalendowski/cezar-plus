@@ -140,6 +140,7 @@ import type {
   CreateAgentProfileInput,
   CreateNoteInput,
   HealthResponse,
+  LockableRunner,
   MessageInput,
   NotificationLogStatus,
   Runner,
@@ -1559,6 +1560,26 @@ export function useWorkspaceConfig() {
 export function useEngineAdvisory(): boolean {
   const config = useWorkspaceConfig()
   return config.data?.resources?.fallbackAcrossAccountsWhenLimited === true
+}
+
+/**
+ * The global engine lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D9), or `null` for
+ * Auto — the workspace-scoped setting that overrides every other provider SETTING at dispatch.
+ *
+ * Reads the same cached `GET /workspace/config` the lock bar itself writes, so the bar, the
+ * Settings mirror and every engine picker answer from one record and cannot disagree about
+ * whether a lock is set.
+ *
+ * `?? null` rather than `=== 'codex'`-style narrowing because the key is `nullable()` in the
+ * contract and simply ABSENT from a stub — an older server, or any test stubbing this endpoint
+ * with `{}` — and the pickers' whole contract here is "unset is byte-for-byte the old behaviour".
+ * Pending resolves to `null` for the same reason `useEngineAdvisory` resolves to `false`: a
+ * picker that renders as locked before the answer arrives would state a policy nobody has
+ * confirmed, and it un-locks a frame later, which reads as a flicker of a control being taken away.
+ */
+export function useRunnerLock(): LockableRunner | null {
+  const config = useWorkspaceConfig()
+  return config.data?.runnerLock ?? null
 }
 
 /**

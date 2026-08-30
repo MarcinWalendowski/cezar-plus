@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { LockableRunner } from '@loki-labs/better-cezar-contract';
 import { loadConfig } from '../config.ts';
 import type { AgentRunner, RunnerId } from '../core/agent-runner.ts';
 import { createRunner } from '../core/runner-factory.ts';
@@ -74,6 +75,15 @@ export interface NoteProcessorDeps {
    *  answer instead of spawning an agent CLI — the pass has no tools, so a fake here is a
    *  faithful stand-in for the whole of what the real runner does: text in, text out. */
   runnerFactory?: (backend: RunnerId) => AgentRunner;
+  /**
+   * The workspace provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D4c),
+   * preferred over `config.defaultRunner`.
+   *
+   * An ACCESSOR, not a value, and the difference is read timing rather than taste: this processor
+   * is constructed once at boot and asks repeatedly, so a value captured at construction would
+   * pin every future pass to whatever the lock was when the server started.
+   */
+  runnerLock?: () => LockableRunner | undefined;
   now?: () => Date;
   warn?: (message: string) => void;
 }
@@ -184,7 +194,7 @@ export class NoteProcessor {
     | { ok: false; error: string; runner: 'claude' | 'codex' | 'opencode' | 'pi' }
   > {
     const config = await loadConfig(this.deps.bootRoot);
-    const runnerId = config.defaultRunner;
+    const runnerId = this.deps.runnerLock?.() ?? config.defaultRunner;
     const runner = (this.deps.runnerFactory ?? createRunner)(runnerId);
     // Claude-only alias, same reason as `planChain`: Codex/OpenCode pick their own default model.
     const model = runnerId === 'claude' ? config.plannerModel : undefined;

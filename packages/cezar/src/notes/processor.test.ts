@@ -490,3 +490,78 @@ describe('buildNotePassPrompt', () => {
     expect(prompt).toContain('overrule it');
   });
 });
+
+/**
+ * D4c of `.ai/specs/2026-08-29-global-provider-toggle.md`. The triage pass is the fourth model
+ * call that never touches `RunManager`, and the only one taking the lock as an ACCESSOR rather
+ * than a value: this processor is constructed once at boot and asks repeatedly, so a value
+ * captured at construction would pin every future pass to whatever the lock was when the server
+ * started. The third case below is what makes that difference observable.
+ */
+describe('NoteProcessor under a workspace provider lock', () => {
+  const savedHome = process.env.CEZ_HOME;
+  let home: string;
+  let bootRoot: string;
+  let store: NoteStore;
+
+  const makeProcessor = (runnerLock: () => 'claude' | 'codex' | undefined) => {
+    const { runner } = scriptedRunner([
+      JSON.stringify({
+        summary: 'One piece of work.',
+        proposals: [{ projectId: 'api', title: 'CSV exporter', task: 'Spec the exporter.', rationale: 'new' }],
+        unassigned: [],
+      }),
+    ]);
+    return new NoteProcessor({
+      store,
+      coordinator: new NoteCoordinator({ listProjects: async () => CATALOG_PROJECTS }),
+      runIndex: new WorkspaceRunIndex({
+        listProjects: async () =>
+          CATALOG_PROJECTS.map((p) => ({ id: p.id, root: p.root, status: p.status, name: p.name })),
+      }),
+      bootRoot,
+      runnerFactory: () => runner,
+      runnerLock,
+    });
+  };
+
+  beforeEach(() => {
+    home = mkdtempSync(join(realpathSync(tmpdir()), 'cez-pass-lock-home-'));
+    bootRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-pass-lock-boot-'));
+    process.env.CEZ_HOME = home;
+    store = new NoteStore({ paths: { notes: join(home, 'notes.json'), log: join(home, 'notes-log.ndjson') } });
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(bootRoot, { recursive: true, force: true });
+    if (savedHome === undefined) delete process.env.CEZ_HOME;
+    else process.env.CEZ_HOME = savedHome;
+  });
+
+  it('CONTROL: with no lock the pass runs on the boot project default', async () => {
+    const note = await store.capture({ body: 'Add the CSV exporter to the API', source: 'cockpit' });
+    await makeProcessor(() => undefined).runPass(note);
+    expect(store.get(note.id)?.pass?.runner).toBe('claude');
+  });
+
+  it('runs the pass on the locked provider', async () => {
+    const note = await store.capture({ body: 'Add the CSV exporter to the API', source: 'cockpit' });
+    await makeProcessor(() => 'codex').runPass(note);
+    expect(store.get(note.id)?.pass?.runner).toBe('codex');
+  });
+
+  it('re-reads the lock every pass, so a flip after boot reaches the next one', async () => {
+    // The accessor's whole reason for being. A value captured in the constructor passes both
+    // cases above and fails only this one.
+    let lock: 'claude' | 'codex' | undefined;
+    const processor = makeProcessor(() => lock);
+    const first = await store.capture({ body: 'Add the CSV exporter to the API', source: 'cockpit' });
+    await processor.runPass(first);
+    expect(store.get(first.id)?.pass?.runner).toBe('claude');
+    lock = 'codex';
+    const second = await store.capture({ body: 'Add the CSV exporter to the API again', source: 'cockpit' });
+    await processor.runPass(second);
+    expect(store.get(second.id)?.pass?.runner).toBe('codex');
+  });
+});

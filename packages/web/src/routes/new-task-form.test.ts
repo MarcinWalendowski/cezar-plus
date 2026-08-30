@@ -7,6 +7,7 @@ import {
   availableRunners,
   buildCreateRunBody,
   buildWorkspaceRunBody,
+  effectiveLock,
   workflowsForScope,
   WORKSPACE_WORKFLOW,
   MODELS_BY_RUNNER,
@@ -56,6 +57,37 @@ describe('resolveRunner (legacy preselection order)', () => {
 
   it('falls back to the first available when even the default is missing', () => {
     expect(resolveRunner(null, ['codex', 'opencode'], 'claude')).toBe('codex')
+  })
+})
+
+/**
+ * `.ai/specs/2026-08-29-global-provider-toggle.md`, D3, as a table.
+ *
+ * The `else` branch is the whole reason this is a function: **the toggle overrides every SETTING
+ * and never AVAILABILITY**, so a lock naming a provider this host cannot run has to answer `null`
+ * and let the pickers render free. Four call sites depend on that, and the wrong answer is one
+ * that looks right — a fixed pill offering the single provider that cannot start anything.
+ */
+describe('effectiveLock (the global engine lock, reduced to what this host can honour)', () => {
+  it('is the lock when the locked provider is connected', () => {
+    expect(effectiveLock('codex', ['claude', 'codex'])).toBe('codex')
+  })
+
+  it('is null when it is not', () => {
+    expect(effectiveLock('codex', ['claude'])).toBeNull()
+  })
+
+  it('is null on Auto, and on a server that has never heard of the key', () => {
+    // `null` and `undefined` are the same answer here on purpose: an older server omits the field
+    // entirely, and "no lock" is the only honest reading of an absent one.
+    expect(effectiveLock(null, ['claude', 'codex'])).toBeNull()
+    expect(effectiveLock(undefined, ['claude', 'codex'])).toBeNull()
+  })
+
+  it('is null while provider status is still empty', () => {
+    // The cold-load frame. Answering the lock here would render every picker fixed for a moment
+    // and then free, which reads as a control being taken away and handed back.
+    expect(effectiveLock('claude', [])).toBeNull()
   })
 })
 

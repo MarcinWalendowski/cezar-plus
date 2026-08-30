@@ -7475,6 +7475,9 @@ export function createApp(deps: ServerDeps) {
     // project's `runs.json` rather than two.
     runIndex: contexts.runIndex,
     bootRoot: deps.repoRoot,
+    // D4c: the triage pass is one of the four model calls that never touch `RunManager`, so the
+    // lock has to reach it explicitly. An accessor — this processor outlives any one snapshot.
+    runnerLock: () => deps.semaphore?.runnerLock(),
   });
   const noteApprover = new NoteApprover({
     store: noteStore,

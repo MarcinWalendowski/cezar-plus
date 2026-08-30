@@ -727,6 +727,20 @@ const FIELD_CLASSIFICATION: Record<string, Verdict> = {
     verdict: 'safe',
     why: 'a provider name (RunnerId) a step ran on instead, from the same `run.step.runner_downgraded` event as `plannedRunner`',
   },
+  lockedRunner: {
+    verdict: 'safe',
+    why:
+      'a provider name (LockableRunner, "claude" | "codex") naming the workspace engine lock, on ' +
+      '`run.runner_locked` and on the two fallback metrics ' +
+      '(`.ai/specs/2026-08-29-global-provider-toggle.md`, D3/D4a) — a closed two-value enum ' +
+      'carrying no path, no account credential and no session id.',
+  },
+  wouldHaveBeen: {
+    verdict: 'safe',
+    why:
+      'a provider name (RunnerId) naming what the lock overrode, from `run.runner_locked` — the ' +
+      'same shape and same reasoning as `plannedRunner`.',
+  },
   attempt: { verdict: 'safe', why: 'a retry counter number' },
   target: {
     verdict: 'safe',

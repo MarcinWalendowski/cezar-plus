@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react'
 
 import { retargetRun } from '@/api/client'
 import { queryKeys, useConfig, useEngineAdvisory, useRunnerModels } from '@/api/queries'
-import type { ApiRun, Runner } from '@loki-labs/better-cezar-api-client'
+import type { ApiRun, LockableRunner, Runner } from '@loki-labs/better-cezar-api-client'
 import { PickerPill, RunnerPill } from '@/components/picker-pill'
 import { modelsForRunner, modelCatalogStatus, resolveModel } from '@/routes/new-task-form'
 import { useContinuationProvider } from './continuation-provider'
@@ -20,10 +20,21 @@ export interface RetargetAction {
   providerPending: boolean
   /** The runner + model pills — which engine the task moves to. */
   pills: ReactNode
-  /** Every runner this host can start, and the one the task is on now — for a caller that offers
-   *  the choice as a menu instead of as pills (the header's "Run on…"). */
+  /**
+   * Every runner this host can start, and the one the task is on now — for a caller that offers
+   * the choice as a menu instead of as pills (the header's "Run on…").
+   *
+   * **Already narrowed to the global engine lock** when one is set
+   * (`.ai/specs/2026-08-29-global-provider-toggle.md`, D2 rank 4). The menu is the same act as the
+   * pills, so it has to make the same promise: an item reading "Run on claude" under a codex lock
+   * posts `{runner:'claude'}`, the server applies the lock, and the task runs on codex — the exact
+   * contradiction this spec exists to remove, in the one surface whose whole content is a list of
+   * providers. `lock` is handed over with it so the menu can say why it is short.
+   */
   runners: readonly Runner[]
   currentRunner: Runner
+  /** The global engine lock this host can honour, or `null`. */
+  lock: LockableRunner | null
   /** True while the move is in flight. */
   pending: boolean
   /**
@@ -64,7 +75,7 @@ export function useRetargetAction(run: ApiRun): RetargetAction {
   const [pickedModel, setPickedModel] = useState<string | null>(null)
 
   const continuation = useContinuationProvider(run, pickedRunner)
-  const { runners, canContinue, currentRunner, runner } = continuation
+  const { runners, canContinue, currentRunner, runner, lock } = continuation
   const catalog = useRunnerModels(runner, available)
   const modelsLocked = config.data?.modelsLocked === true
   const runnerChanged = runner !== currentRunner
@@ -103,6 +114,7 @@ export function useRetargetAction(run: ApiRun): RetargetAction {
             runners={runners}
             value={runner}
             advisory={advisory}
+            lockedTo={lock}
             onPick={(next) => {
               setPickedRunner(next)
               setPickedModel(null) // a runner switch invalidates the previous model pick
@@ -122,8 +134,9 @@ export function useRetargetAction(run: ApiRun): RetargetAction {
         />
       </div>
     ),
-    runners,
+    runners: lock ? runners.filter((id) => id === lock) : runners,
     currentRunner,
+    lock,
     retarget: (override?: Runner) => mutation.mutateAsync(override),
   }
 }

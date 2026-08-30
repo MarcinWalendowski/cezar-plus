@@ -4,12 +4,14 @@ import {
   useEngineAdvisory,
   useProviderStatus,
   useRepo,
+  useRunnerLock,
   useRunnerModels,
 } from '@/api/queries'
-import type { CreateRunInput, Runner } from '@loki-labs/better-cezar-api-client'
+import type { CreateRunInput, LockableRunner, Runner } from '@loki-labs/better-cezar-api-client'
 import { PickerPill, RunnerPill, type RunnerAccountChoice } from '@/components/picker-pill'
 import { usableRunners } from '@/lib/provider-status'
 import {
+  effectiveLock,
   modelsForRunner,
   modelCatalogStatus,
   resolveModel,
@@ -69,6 +71,9 @@ export interface ResolvedEngine {
   account: string | null
   /** What the project's setting resolves to per runner, i.e. the row selected until overridden. */
   repoAccount?: Partial<Record<Runner, string>>
+  /** The global engine lock, already reduced to one this host can honour (`effectiveLock`). Non-null
+   *  means `runner` IS the lock, whatever the pick said. */
+  lock: LockableRunner | null
 }
 
 export function useResolvedEngine(pick: EnginePick): ResolvedEngine {
@@ -78,7 +83,13 @@ export function useResolvedEngine(pick: EnginePick): ResolvedEngine {
   // `/api/health` is deliberately boot-project-only. Runner policy is per project, so every
   // scoped start surface must read the active project's `/api/config` instead (#699).
   const defaultRunner = config.data?.defaultRunner
-  const runner = resolveRunner(pick.runner, runners, defaultRunner ?? runners[0] ?? 'claude')
+  // The global engine lock overrides the pick outright (`.ai/specs/2026-08-29-global-provider-toggle.md`,
+  // D2 rank 5 / D6) — it is not another candidate handed to `resolveRunner`, because that function's
+  // whole job is to prefer the pick, and a lock that loses to the pill is not a lock. `effectiveLock`
+  // has already dropped a lock this host cannot honour, so the result is always a connected runner.
+  const runnerLock = useRunnerLock()
+  const lock = effectiveLock(runnerLock, runners)
+  const runner = lock ?? resolveRunner(pick.runner, runners, defaultRunner ?? runners[0] ?? 'claude')
   // Resolved first: each runner has its own host catalog (#794), so the fetch follows the pick.
   const catalog = useRunnerModels(runner)
   const modelsLocked = config.data?.modelsLocked === true
@@ -105,7 +116,12 @@ export function useResolvedEngine(pick: EnginePick): ResolvedEngine {
     | undefined
   return {
     runner,
-    runnerExplicit: pick.runner !== null,
+    // A locked runner rides the request even when the user touched nothing, so what the pill shows
+    // and what the body carries cannot disagree. Omitting it would leave the server to resolve the
+    // field from `defaultRunner` — it reaches the same answer via its own lock, but only because
+    // of a second mechanism, and a UI that is right only because something else is also right is
+    // the shape this whole spec exists to remove.
+    runnerExplicit: pick.runner !== null || lock !== null,
     model: resolveModel(modelsLocked ? null : pick.model, runner, config.data?.defaultModels, catalog.data),
     runners,
     defaultRunner,
@@ -116,6 +132,7 @@ export function useResolvedEngine(pick: EnginePick): ResolvedEngine {
     accounts,
     account,
     repoAccount,
+    lock,
   }
 }
 
@@ -193,6 +210,11 @@ export function EnginePills({
   const accountChoices = accounts ? resolved.accounts : []
   // Shown when there is a choice to make: more than one runner, or — where accounts are offered —
   // more than one login for one of them. A host with neither sees no pill, exactly as before.
+  //
+  // Deliberately counted on the UNLOCKED list. Under a lock the menu holds one provider row, so a
+  // lock-aware count would hide the pill — and D6 is explicit that the provider is "displayed and
+  // fixed, not hidden, so the user can see why they cannot change it". A vanished control answers
+  // no question; it just moves the surprise to the point the task runs.
   const showRunnerPill =
     runners.length > 1
     || runners.some((id) => accountChoices.filter((c) => c.provider === id).length > 1)
@@ -207,6 +229,7 @@ export function EnginePills({
           account={accounts ? resolved.account : null}
           repoAccount={accounts ? resolved.repoAccount : undefined}
           advisory={advisory}
+          lockedTo={resolved.lock}
           disabled={unavailable}
           // Changing the AGENT drops the model pick: the presets are per-runner, so a kept model
           // would be a preset the new runner does not have (composer rule). Changing only the

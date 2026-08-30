@@ -5,6 +5,7 @@ import {
   AGENT_POOL_ALL,
   DEFAULT_AGENT_ACCOUNT_ID,
   agentPoolId,
+  type LockableRunner,
   type Runner,
 } from '@loki-labs/better-cezar-api-client'
 import {
@@ -15,7 +16,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { RUNNERS } from '@/routes/new-task-form'
+import { RUNNERS, effectiveLock } from '@/routes/new-task-form'
 
 /**
  * The composer's single-choice pill, factored out of new-task.tsx (#401) so the follow-up
@@ -157,6 +158,14 @@ export function parseChoiceValue(value: string): { runner: Runner; account: stri
 /**
  * The picker is a PREFERENCE, not a pin, and the menu has to say so.
  *
+ * **CORRECTED 2026-08-30 (`.ai/specs/2026-08-29-global-provider-toggle.md`, P6): this is now the
+ * UNLOCKED half of a pair.** While a global engine lock is set the provider half of this pick is
+ * not advisory at all — it is overridden — so the menu renders {@link lockDisclosure} instead and
+ * `RunnerPill` offers only the locked provider's rows. Saying "preference, not a pin" under a lock
+ * would describe the model and account halves correctly and the provider half backwards, which is
+ * the same mis-read todo `81ab4ebd` was filed about, one layer up. The original text follows
+ * unchanged; it is what is true whenever `runnerLock` is null, which is the default.
+ *
  * Two separate mechanisms make it advisory, and a person reading the pill can see neither:
  * a wildcard pool (`pool:*`) lets the balancer choose the PROVIDER at dispatch, over
  * `input.runner`; and `fallbackAcrossAccountsWhenLimited` — ON by default since spec
@@ -168,6 +177,21 @@ export function parseChoiceValue(value: string): { runner: Runner; account: stri
  */
 export const ADVISORY_NOTE =
   'Preference, not a pin — a rate-limited or logged-out agent is skipped for the next available one.'
+
+/**
+ * What the menu says INSTEAD of {@link ADVISORY_NOTE} while a global engine lock is set
+ * (`.ai/specs/2026-08-29-global-provider-toggle.md`, D6/P6).
+ *
+ * It names all three halves on purpose, because only one of them is taken away: the provider is
+ * fixed, the model is untouched, and the account is still the user's pick among THAT provider's
+ * logins (D6a). A bare "locked to codex" would read as though the whole pill had gone read-only,
+ * which is the reading that makes a person stop looking for the model row that is still there.
+ *
+ * A function rather than a constant because the provider is the useful half of the sentence — a
+ * disclosure that does not say WHICH provider sends the reader back to the shell bar to find out.
+ */
+export const lockDisclosure = (runner: LockableRunner): string =>
+  `Locked to ${runner} by the global engine setting — model and account stay yours to pick.`
 
 /**
  * Which agent — and, when there is more than one login for it, which account — in ONE flat list:
@@ -202,6 +226,7 @@ export function RunnerPill({
   repoAccount,
   pools = false,
   advisory = false,
+  lockedTo = null,
 }: {
   runners: readonly Runner[]
   value: Runner
@@ -225,8 +250,27 @@ export function RunnerPill({
    * only a rate-limited one.
    */
   advisory?: boolean
+  /**
+   * The global engine lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D6). `null` — Auto —
+   * is byte-for-byte the menu that existed before the lock did.
+   *
+   * Set, the pill is **displayed and fixed**: the provider rows narrow to this one, the
+   * provider-spanning `balance · everything` row goes away, and the footer says why. Deliberately
+   * NOT `disabled`: a disabled pill hides the reason behind a tooltip and takes the model and
+   * account rows away with it, and those two are still the user's to pick (D6a).
+   */
+  lockedTo?: LockableRunner | null
 }) {
-  const available = RUNNERS.filter((r) => runners.includes(r.id))
+  // A lock this host cannot honour is not a lock. `.ai/specs/2026-08-29-global-provider-toggle.md`
+  // D3: the toggle overrides every SETTING, never AVAILABILITY — so when the locked provider is
+  // not among the connected runners, the menu renders free, which is what will actually happen.
+  // Rendering one unpickable row for a provider that cannot run would be a dead end with no exit.
+  const lock = effectiveLock(lockedTo, runners)
+  // Every read of the pill's own `value` below goes through this instead, so a caller that has not
+  // yet resolved the lock still cannot render a label naming a provider the menu does not offer.
+  // The caller's own resolution is what governs the REQUEST; this governs what is on the screen.
+  const shown = lock ?? value
+  const available = RUNNERS.filter((r) => (lock ? r.id === lock : runners.includes(r.id)))
   const options = available.flatMap((runner) => {
     const logins = accounts.filter((entry) => entry.provider === runner.id)
     // One login is not a choice, so it does not become a row of its own — the agent is the row.
@@ -253,9 +297,12 @@ export function RunnerPill({
   // `runner:account` pair and there is no runner-less spelling. Harmless because `pool:*` picks the
   // provider at dispatch — `taskBackend` takes the balancer's answer over `input.runner`. Needs two
   // accounts to spread over, counted across providers, so one claude + one codex qualifies.
-  if (pools && accounts.length > 1) {
+  // Dropped under a lock: it is the one row that spans providers, and D5 narrows it to the locked
+  // provider's own accounts at dispatch — so offering it would put a control on the screen whose
+  // stated meaning ("all N accounts") the server has already overridden.
+  if (pools && accounts.length > 1 && !lock) {
     options.push({
-      value: choiceValue(value, AGENT_POOL_ALL),
+      value: choiceValue(shown, AGENT_POOL_ALL),
       label: 'balance · everything',
       desc: `spread over all ${accounts.length} accounts, skipping rate-limited ones`,
     })
@@ -265,16 +312,16 @@ export function RunnerPill({
   // to, else the discovered account. Falls back to the plain runner row for an agent with one login
   // — and for an override naming an account that has since been deleted, which must not leave the
   // pill pointing at nothing.
-  const selected = account ?? repoAccount?.[value] ?? DEFAULT_AGENT_ACCOUNT_ID
-  const value_ = options.some((option) => option.value === choiceValue(value, selected))
-    ? choiceValue(value, selected)
-    : choiceValue(value, null)
+  const selected = account ?? repoAccount?.[shown] ?? DEFAULT_AGENT_ACCOUNT_ID
+  const value_ = options.some((option) => option.value === choiceValue(shown, selected))
+    ? choiceValue(shown, selected)
+    : choiceValue(shown, null)
 
   return (
     <PickerPill
       slot="runner-pill"
       ariaLabel="Runner"
-      label={options.find((option) => option.value === value_)?.label ?? value}
+      label={options.find((option) => option.value === value_)?.label ?? shown}
       value={value_}
       disabled={disabled}
       onPick={(next) => {
@@ -282,7 +329,10 @@ export function RunnerPill({
         onPick(runner, picked)
       }}
       options={options}
-      status={advisory ? ADVISORY_NOTE : undefined}
+      // The lock beats the advisory line rather than joining it: under a lock the provider half is
+      // not a preference at all, and two notes in one footer would leave the reader to work out
+      // which sentence governs which half of the pick.
+      status={lock ? lockDisclosure(lock) : advisory ? ADVISORY_NOTE : undefined}
     />
   )
 }

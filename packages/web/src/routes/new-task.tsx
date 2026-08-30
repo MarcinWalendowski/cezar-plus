@@ -18,7 +18,7 @@ import {
   Link as WorkspaceLink,
 } from 'react-router'
 
-import { isAgentPoolId } from '@loki-labs/better-cezar-api-client'
+import { agentPoolId, isAgentPoolId } from '@loki-labs/better-cezar-api-client'
 import { Link, scopeTo, useNavigate } from '@/lib/project-router'
 
 import { createRun, createTodo, getLaunchKey, postPlan, putConfig, putUiState } from '@/api/client'
@@ -29,6 +29,7 @@ import {
   useStartWorkspaceRun,
   useConfig,
   useEngineAdvisory,
+  useRunnerLock,
   useHealth,
   useProviderStatus,
   useProjects,
@@ -113,6 +114,7 @@ import {
   modelCatalogStatus,
   pushRecentSource,
   resolveModel,
+  effectiveLock,
   resolveRunner,
   resolveSource,
   startedRunPath,
@@ -280,7 +282,16 @@ export function NewTaskRoute() {
   const runners = usableRunners(providers.data)
   const defaultRunner = config.data?.defaultRunner
   const preferredRunner = defaultRunner ?? 'claude'
-  const runner = runners.length > 0 ? resolveRunner(draft.runner, runners, preferredRunner) : null
+  // The global engine lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D2 rank 5) — the
+  // composer pill is the rank this spec is named after, and the surface the production report came
+  // from: Codex checked here, Codex on the shell bar, `anthropic/sonnet` in the run. It overrides
+  // the draft outright rather than joining `resolveRunner`'s candidate list, whose entire job is to
+  // prefer the draft. `effectiveLock` has already dropped a lock this host cannot honour, so a
+  // non-null answer is always in `runners` and the `runners.length > 0` guard still governs.
+  const runnerLock = useRunnerLock()
+  const lock = effectiveLock(runnerLock, runners)
+  const runner =
+    runners.length > 0 ? (lock ?? resolveRunner(draft.runner, runners, preferredRunner)) : null
   const displayRunner = runner ?? preferredRunner
   const providersReady = providers.isSuccess && runners.length > 0
   const catalog = useRunnerModels(displayRunner)
@@ -310,8 +321,17 @@ export function NewTaskRoute() {
   // not silently carry a foreign account along. A POOL is exempt — it names no runner's login, so
   // there is no foreign account to carry, and dropping it here would silently downgrade every
   // pooled task to a single login the moment the runner pill re-rendered.
+  //
+  // Under a lock the pool exemption NARROWS to the locked provider's own pool (D6a): `pool:*` spans
+  // providers and `pool:codex` names a foreign one, so both are exactly the "carry a foreign account
+  // along" case the exemption was written to exclude, not an instance of the case it protects. It
+  // also has to match the menu — `RunnerPill` drops the `balance · everything` row under a lock —
+  // because a draft holding a value the menu no longer offers renders as the plain runner row while
+  // the request still carries the pool, which is the pill and the body disagreeing again.
+  const poolExempt = poolsOffered && isAgentPoolId(draft.agentProfile)
+    && (lock === null || draft.agentProfile === agentPoolId(lock))
   const agentProfile =
-    (poolsOffered && isAgentPoolId(draft.agentProfile)) ||
+    poolExempt ||
     accountChoices.some((choice) => choice.provider === displayRunner && choice.id === draft.agentProfile)
       ? draft.agentProfile
       : null
@@ -532,7 +552,7 @@ export function NewTaskRoute() {
           model,
           modelsLocked,
           runner,
-          runnerExplicit: draft.runner !== null,
+          runnerExplicit: draft.runner !== null || lock !== null,
           agentProfile,
           defaultRunner,
           images,
@@ -592,7 +612,7 @@ export function NewTaskRoute() {
         model,
         modelsLocked,
         runner,
-        runnerExplicit: draft.runner !== null,
+        runnerExplicit: draft.runner !== null || lock !== null,
         agentProfile,
         defaultRunner,
         variants,
@@ -650,7 +670,7 @@ export function NewTaskRoute() {
           model,
           modelsLocked,
           runner,
-          runnerExplicit: draft.runner !== null,
+          runnerExplicit: draft.runner !== null || lock !== null,
           defaultRunner,
           variants,
           images: plan.images,
@@ -812,6 +832,7 @@ export function NewTaskRoute() {
                   repoAccount={repoAccount}
                   pools={poolsOffered}
                   advisory={engineAdvisory}
+                  lockedTo={lock}
                   // Changing the AGENT clears the model pin: presets are per-runner, so a kept
                   // model would be one the new runner does not have. Changing only the account
                   // keeps it — the model catalog is the same either way.

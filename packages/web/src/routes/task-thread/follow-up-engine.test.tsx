@@ -7,10 +7,11 @@ import { createQueryClient } from '@/api/query-client'
 import type {
   ApiRun,
   HealthResponse,
+  LockableRunner,
   ProviderStatusResponse,
   StepState,
 } from '@loki-labs/better-cezar-api-client'
-import { ADVISORY_NOTE } from '@/components/picker-pill'
+import { ADVISORY_NOTE, lockDisclosure } from '@/components/picker-pill'
 import { resetToasts, Toaster } from '@/components/ui/toaster'
 import { Link } from '@/lib/project-router'
 
@@ -88,6 +89,10 @@ function serve(
    *  picker advisory (`2026-08-23-never-block-a-task.md`). Defaults to absent, i.e. the shape this
    *  file served before the setting existed. */
   accountFallback: boolean | undefined = undefined,
+  /** `runnerLock` on the WORKSPACE config — the global engine lock
+   *  (`.ai/specs/2026-08-29-global-provider-toggle.md`). `undefined` omits the key entirely, which
+   *  is the older-server shape; `null` is Auto, served explicitly. */
+  runnerLock: LockableRunner | null | undefined = undefined,
 ) {
   requests = []
   const json = (payload: unknown, status = 200) =>
@@ -116,11 +121,12 @@ function serve(
         // `resources` OMITTED in the default case, not served empty. That is the shape an older
         // server sends and the shape most of this repo's fetch stubs return, and it is what broke:
         // `data?.resources.x` throws from inside the hook and takes the whole React tree with it.
-        return json(
-          accountFallback === undefined
+        return json({
+          ...(accountFallback === undefined
             ? {}
-            : { resources: { fallbackAcrossAccountsWhenLimited: accountFallback } },
-        )
+            : { resources: { fallbackAcrossAccountsWhenLimited: accountFallback } }),
+          ...(runnerLock === undefined ? {} : { runnerLock }),
+        })
       if (url === '/api/v1/runs' && method === 'GET') return json([])
       if (url.endsWith('/continue') && method === 'POST') return json({ continued: true })
       return json({}, 200)
@@ -443,5 +449,52 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
     fireEvent.pointerDown(await screen.findByRole('button', { name: 'Runner' }))
     await screen.findAllByRole('menuitemradio')
     expect(screen.queryByText(ADVISORY_NOTE)).toBeNull()
+  })
+
+  /**
+   * The global engine lock, at this surface (`.ai/specs/2026-08-29-global-provider-toggle.md`,
+   * D2 rank 4 / D6, V5d).
+   *
+   * `lockedTo` is an OPTIONAL prop, exactly like `advisory` above, so a call site that forgets it
+   * is silently wrong while `RunnerPill`'s own unit tests stay green. These cases exist because
+   * the follow-up is also the path where the lock has to reach a run that is ALREADY on the other
+   * provider: `useContinuationProvider` defaults to `run.runner`, and that default is precisely
+   * what a lock overrides.
+   */
+  it('fixes the runner menu to the locked provider, and says why', async () => {
+    serve(HEALTH_MULTI, {}, providersForHealth(HEALTH_MULTI), 200, false, true, 'codex')
+    renderAction(makeRun({ runner: 'claude' }))
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Runner' }))
+    const rows = await screen.findAllByRole('menuitemradio')
+    expect(rows.map((row) => row.textContent)).toEqual([expect.stringContaining('codex')])
+    expect(await screen.findByText(lockDisclosure('codex'))).not.toBeNull()
+    // The advisory sentence would contradict it: under a lock the provider half is not a
+    // preference at all.
+    expect(screen.queryByText(ADVISORY_NOTE)).toBeNull()
+  })
+
+  it('leaves the menu free on Auto — the control', async () => {
+    // `runnerLock: null` served EXPLICITLY, not omitted: the assertion has to survive a server
+    // that answers the key rather than one that has never heard of it.
+    serve(HEALTH_MULTI, {}, providersForHealth(HEALTH_MULTI), 200, false, true, null)
+    renderAction(makeRun({ runner: 'claude' }))
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Runner' }))
+    expect(await screen.findAllByRole('menuitemradio')).toHaveLength(2)
+    expect(await screen.findByText(ADVISORY_NOTE)).not.toBeNull()
+  })
+
+  it('sends the locked runner even when the pills were never touched', async () => {
+    // The half that changes what RUNS. An untouched Continue omits `runner`, which means "keep
+    // `run.runner`" — claude — so without this the pill would read codex and the request would ask
+    // for the run's existing provider. The server's own lock would still catch it; a UI that is
+    // right only because something else is also right is the shape this spec exists to remove.
+    serve(HEALTH_MULTI, {}, providersForHealth(HEALTH_MULTI), 200, false, undefined, 'codex')
+    renderAction(makeRun({ runner: 'claude' }))
+
+    fireEvent.click(await screen.findByRole('button', { name: /continue/i }))
+    await waitFor(() => expect(continueBody()).toBeDefined())
+    expect(continueBody()).toEqual({ runner: 'codex' })
   })
 })

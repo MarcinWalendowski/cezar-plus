@@ -1,6 +1,7 @@
 import { runnerDiscoversModels } from '@loki-labs/better-cezar-api-client'
 import type {
   BackendCheck,
+  LockableRunner,
   CreateRunInput,
   CreateRunResponse,
   WorkspaceRunStartInput,
@@ -179,6 +180,29 @@ export function resolveRunner(
   if (picked !== null && available.includes(picked)) return picked
   if (available.includes(preferred)) return preferred
   return available[0] ?? 'claude'
+}
+
+/**
+ * The global engine lock (`.ai/specs/2026-08-29-global-provider-toggle.md`, D6), reduced to what
+ * this host can actually honour: the locked provider when it is connected, else `null`.
+ *
+ * One function rather than the same `&& available.includes(...)` at four call sites, because the
+ * `else` branch is the subtle half and it is D3's ruling, not a convenience: **the toggle overrides
+ * every SETTING and never AVAILABILITY.** A lock naming a provider that is not connected therefore
+ * changes nothing on the screen — the pickers render free, which is exactly what dispatch will do
+ * with it, because `downgradePinnedRunner` still outranks the lock server-side. The alternative,
+ * showing one locked row for a provider that cannot run, is a picker with no working choice in it
+ * and no way to see that.
+ *
+ * Takes `available` rather than reading provider status itself so it stays pure: every caller
+ * already holds the list, and three of the four hold a DIFFERENT one (the composer's connected
+ * runners, a continuation's usable ones, the pill's own prop).
+ */
+export function effectiveLock(
+  lock: LockableRunner | null | undefined,
+  available: readonly Runner[],
+): LockableRunner | null {
+  return lock != null && available.includes(lock) ? lock : null
 }
 
 /** The runner field shared by every NEW-run surface. Explicit/sticky intent always rides the
