@@ -93,6 +93,21 @@ export interface TodoAutostartDispatch {
     repoRoot: string;
     dataDir: string;
   }): Promise<TodoDispatchOutcome>;
+
+  /**
+   * What kind of CLAIM is a start that happens on THIS node, for this project?
+   *
+   * {@link TodoAutostartDispatch.place} answers *where the work runs*, and already computes this
+   * for both of its local outcomes. This asks the same question on its own, for a caller that has
+   * no placement to make because the decision is already taken — a person pressed the Run button
+   * on this host (D15a row 1).
+   *
+   * **Split out rather than "just call `place()`".** `place()` can answer `remote`, and a caller
+   * that asked it only for the options would have to ignore that answer — dispatching the work to
+   * another node AND starting it here, which is the exact double start this seam exists to
+   * prevent.
+   */
+  localStartOptions(input: { repoRoot: string }): Promise<TodoStartOptions>;
 }
 
 /** The subset of a project context this module needs — matches (a slice of)
@@ -336,6 +351,33 @@ const pendingStamp = new Map<string, string>();
 
 const refusalKey = (dataDir: string, todoId: string) => `${dataDir} ${todoId}`;
 
+/**
+ * **The pending-stamp map, readable by the OTHER path that can strand a run: `POST
+ * /todos/:id/start`** (`.ai/specs/2026-08-30-run-button-claim-options.md`, S3/S4).
+ *
+ * A person's Run press reaches `markStarted` from the route rather than from a reconcile pass, so
+ * it hits D43 the same way and has no next pass to recover on — its recovery is the next PRESS.
+ * These three accessors are what let the route participate in this map instead of keeping a second
+ * one: one map means an autostart-stranded run is also seen by a press, and a press-stranded run by
+ * the next pass.
+ *
+ * Deliberately not a general store, and the key stays private — nothing outside this module can
+ * disagree about how a `(dataDir, todoId)` pair is spelled.
+ */
+export function pendingRunForTodo(dataDir: string, todoId: string): string | undefined {
+  return pendingStamp.get(refusalKey(dataDir, todoId));
+}
+
+/** Remember a run that exists while its record does not know it (D43). */
+export function rememberPendingRun(dataDir: string, todoId: string, runId: string): void {
+  pendingStamp.set(refusalKey(dataDir, todoId), runId);
+}
+
+/** Settled — the record now names the run. */
+export function forgetPendingRun(dataDir: string, todoId: string): void {
+  pendingStamp.delete(refusalKey(dataDir, todoId));
+}
+
 function reportRefusal(project: TodoAutostartProject, todo: TodoItem, reason: string): void {
   const refusal: AutostartRefusal = {
     dataDir: project.dataDir,
@@ -424,10 +466,10 @@ async function startAutostartTodo(project: TodoAutostartProject, todo: TodoItem)
   // the claim: both are work, and the second claim in particular would ask the hub to grant
   // something this node was already granted.
   const key = refusalKey(project.dataDir, todo.id);
-  const already = pendingStamp.get(key);
+  const already = pendingRunForTodo(project.dataDir, todo.id);
   if (already !== undefined) {
     if (await markStarted(project.dataDir, todo.id, already)) {
-      pendingStamp.delete(key);
+      forgetPendingRun(project.dataDir, todo.id);
       lastRefusalReason.delete(key);
       return;
     }
@@ -520,7 +562,7 @@ async function startAutostartTodo(project: TodoAutostartProject, todo: TodoItem)
     // the failure mode this refusal exists to prevent is a second run"*) — but the stamp it
     // withholds is the very thing `reconcileAutostartTodosOnce` keys on, so the absence that was
     // meant to prevent a second run is what causes one.
-    pendingStamp.set(refusalKey(project.dataDir, todo.id), run.id);
+    rememberPendingRun(project.dataDir, todo.id, run.id);
     reportRefusal(project, todo, `run ${run.id} started but the record could not be stamped`);
     return;
   }

@@ -116,6 +116,14 @@ export type AppShellProps = {
    *  default, so a cockpit that never set the flag — and every older caller — renders the sidebar
    *  it always had, with no request made for usage it will not show. */
   accountUsage?: boolean
+  /** The global engine-lock bar (`.ai/specs/2026-08-29-global-provider-toggle.md`, D9), rendered
+   *  in its own row ABOVE the banner. Unlike every other chrome slot here, this one is NOT gated
+   *  on `chromeless`: it renders whenever `globalBar` is truthy, full stop. `AppShell` itself
+   *  knows nothing about locks, providers, or queries — it is a plain `ReactNode` slot, exactly
+   *  like `banner` below, and the container decides (from the onboarding probe) whether to pass
+   *  one at all. See the three-state ruling in D9: absent for `signed-out`, present for
+   *  `needs-org` and `ready && !hasProjects`. */
+  globalBar?: ReactNode
   /** Global chrome banner, rendered in its own row above the scroller. Absent renders nothing —
    *  the slot is generic and currently unused (the #391 skills promo it once held is gone,
    *  replaced by the opt-in Import panel on the Skills page). */
@@ -159,8 +167,15 @@ export function routeOwnsScrollArrival(pathname: string): boolean {
  *
  * Layout contract (spec, "App shell & navigation"):
  *  - `h-dvh` (never `100vh` — that ignores mobile browser chrome and clips the composer).
- *  - The main column is a `auto auto 1fr auto` grid — top bar / banner / scroller / composer
- *    dock. Rows are placed explicitly (`row-start-*`) so hiding the mobile bar at `md`, or
+ *  - **CORRECTED 2026-08-29 (`.ai/specs/2026-08-29-global-provider-toggle.md`, D9):** the main
+ *    column is now a `auto auto auto 1fr auto` grid — top bar / global bar / banner / scroller /
+ *    composer dock. The global bar row (`data-slot="global-bar"`) is new, sits between the top bar
+ *    and the banner, and is rendered whenever `globalBar` is passed, independently of `chromeless`
+ *    (the one place this shell deviates from "chromeless hides chrome" — see the `globalBar` prop
+ *    doc and D9's three-state onboarding ruling). Original text follows, describing the
+ *    four-row grid this replaces:
+ *  - ~~The main column is a `auto auto 1fr auto` grid — top bar / banner / scroller / composer
+ *    dock.~~ Rows are placed explicitly (`row-start-*`) so hiding the mobile bar at `md`, or
  *    passing no `banner`, leaves that row empty instead of promoting the scroller into the
  *    `auto` row and collapsing it.
  *  - The banner is a peer row of the scroller, never a child of it: routed views own
@@ -192,6 +207,7 @@ export function AppShell({
   automationsAvailable = true,
   singleProject = false,
   accountUsage = false,
+  globalBar,
   banner,
   projectGroups,
   chromeless = false,
@@ -296,11 +312,21 @@ export function AppShell({
             there is no second column to trade width with and no pointer to drag a border. */}
         {chromeless ? null : <MobileNavDrawer {...nav} onNavigate={() => setMenuOpen(false)} />}
 
-        <div className="grid min-w-0 flex-1 grid-rows-[auto_auto_1fr_auto] overflow-hidden">
+        <div className="grid min-w-0 flex-1 grid-rows-[auto_auto_auto_1fr_auto] overflow-hidden">
           {chromeless ? null : <MobileTopBar title={current?.label ?? 'cezar'} />}
 
+          {/* Row 2: the global engine-lock bar. Deliberately NOT gated on `chromeless` — that is
+              the one place this shell deviates from "chromeless hides chrome" (D9). The container
+              decides whether to pass `globalBar` at all, so the shell's own rule is simply
+              "render whenever the slot is filled". */}
+          {globalBar ? (
+            <div data-slot="global-bar" className="row-start-2">
+              {globalBar}
+            </div>
+          ) : null}
+
           {!chromeless && banner ? (
-            <div data-slot="banner-slot" className="row-start-2">
+            <div data-slot="banner-slot" className="row-start-3">
               {banner}
             </div>
           ) : null}
@@ -308,16 +334,16 @@ export function AppShell({
           <main
             ref={mainRef}
             data-slot="main"
-            className="row-start-3 min-h-0 overflow-y-auto overscroll-contain"
+            className="row-start-4 min-h-0 overflow-y-auto overscroll-contain"
           >
             {children}
           </main>
 
-          {/* Row 4: the composer dock (thread reply, Step R3). Empty today, but it still carries
+          {/* Row 5: the composer dock (thread reply, Step R3). Empty today, but it still carries
               the bottom safe-area gutter so the scroller never runs under the home indicator. */}
           <div
             data-slot="composer"
-            className="row-start-4 pb-[env(safe-area-inset-bottom)]"
+            className="row-start-5 pb-[env(safe-area-inset-bottom)]"
           />
         </div>
       </div>

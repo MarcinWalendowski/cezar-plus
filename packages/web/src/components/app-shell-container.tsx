@@ -11,6 +11,7 @@ import {
 import type { HealthResponse } from '@loki-labs/better-cezar-api-client'
 import { AppShell, type RepoChip } from '@/components/app-shell'
 import { CommandPalette } from '@/components/command-palette'
+import { EngineLockBarContainer } from '@/components/engine-lock-bar'
 import { ListViewProvider } from '@/components/list-view'
 import { ProviderBannerContainer } from '@/components/provider-banner-container'
 import { ProjectGroups } from '@/components/project-groups'
@@ -21,7 +22,7 @@ import { useActiveProjectId } from '@/lib/project-router'
 import { unreadDoneCount } from '@/lib/read-state'
 import { runTitle } from '@/lib/task-groups'
 import { pageTitleContext } from '@/routes'
-import { needsOnboardingGate, useOnboardingEntryProbe } from '@/routes/onboarding/onboarding-gate'
+import { allowsGlobalBar, needsOnboardingGate, useOnboardingEntryProbe } from '@/routes/onboarding/onboarding-gate'
 
 /**
  * Derive the sidebar's repo chip from `/api/health`.
@@ -71,11 +72,25 @@ export function repoChipOf(health: HealthResponse | undefined): RepoChip | null 
  * on the org-naming step mid-wizard instead of the next one. Keeping `<AppShell>` mounted and only
  * varying its `chromeless` prop (which itself preserves `<main>{children}</main>`'s position, see
  * that component's own doc comment) avoids the remount entirely.
+ *
+ * **The global engine lock bar (`globalBar`, D9 of
+ * `.ai/specs/2026-08-29-global-provider-toggle.md`) does NOT follow `chromeless` — it follows
+ * `allowsGlobalBar(onboardingProbe.data)`, a finer three-state read of the SAME probe.** It is a
+ * machine-wide setting, not dashboard chrome, so it renders through `needs-org` and
+ * `ready && !hasProjects` (where `chromeless` is `true`) and sits out only `signed-out`, where
+ * there is no session to read or write `workspace/config` with. See `onboarding-gate.ts`'s own
+ * doc comment on `allowsGlobalBar` for the full table.
  */
 export function AppShellContainer({ children }: { children: ReactNode }) {
   const { pathname } = useLocation()
   const onboardingProbe = useOnboardingEntryProbe()
   const chromeless = needsOnboardingGate(onboardingProbe.data)
+  // D9's three-state ruling (`.ai/specs/2026-08-29-global-provider-toggle.md`): the global lock
+  // bar is a machine-wide SETTING, not dashboard chrome, so it renders on two of `chromeless`'s
+  // three states (`needs-org`, `ready && !hasProjects`) and only sits out `signed-out`, where
+  // there is no session to read or write `workspace/config` with. See `allowsGlobalBar`'s own
+  // doc comment for the full table.
+  const showGlobalBar = allowsGlobalBar(onboardingProbe.data)
   const projectId = useActiveProjectId()
   const health = useHealth()
   // The global inbox is opt-in (#471). With the capability off there is no Inbox nav item to
@@ -175,6 +190,7 @@ export function AppShellContainer({ children }: { children: ReactNode }) {
         skillsAvailable={health.data?.capabilities.skills !== false}
         // Hidden unless health reports the opt-in automations capability (#801).
         automationsAvailable={automationsAvailable}
+        globalBar={showGlobalBar ? <EngineLockBarContainer /> : undefined}
         banner={<ProviderBannerContainer />}
         singleProject={health.data?.capabilities.singleProject === true}
         accountUsage={health.data?.capabilities.accountUsage === true}

@@ -6,7 +6,7 @@ import { z } from 'zod';
 // Contract VALUES, like `workspaceUiStateSchema` in workspace/migrations.ts: the tag bounds this
 // file must not `.catch` away are the same constants the PATCH route validates against, so they
 // are imported rather than repeated.
-import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH } from '@loki-labs/better-cezar-contract';
+import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH, lockableRunnerSchema } from '@loki-labs/better-cezar-contract';
 import { PROVIDER_IDS, type ProviderId } from '../core/provider-auth.ts';
 import { assertCezarHomeWriteIsSandboxed, workspaceConfigPath } from '../paths.ts';
 
@@ -315,6 +315,13 @@ const workspaceConfigSchema = z
     agentDefaults: agentDefaultsSchema.default(() => ({})).catch(() => ({})),
     /** Machine-wide answers for the per-repo run knobs — see `projectDefaultsSchema`. */
     projectDefaults: projectDefaultsSchema.default(() => ({})).catch(() => ({})),
+    /** The global provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`): overrides
+     *  every other runner setting (project/machine default, the composer pill, `pool:*`, a
+     *  workflow step pin) but not availability — `downgradePinnedRunner` still crosses it when
+     *  every account of the locked provider is unusable. `null`/absent = Auto, byte-for-byte
+     *  today's behaviour. A bad value degrades to no opinion, never to a silent platform-wide pin
+     *  nobody set. */
+    runnerLock: lockableRunnerSchema.nullable().optional().catch(undefined),
     /** Per-entry salvage: a corrupt entry is dropped, the rest of the registry
      *  survives (a whole-array `.catch([])` would evict every project over one
      *  bad row). */

@@ -1,5 +1,7 @@
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 
 /**
  * P2 of `.ai/specs/2026-08-19-non-disruptive-cezar-self-deploy.md` — a deployer that survives the
@@ -26,8 +28,42 @@ export const DETACHED_ENV = 'CEZ_DEPLOY_DETACHED';
 
 /** Where a transient deploy streams its log, so a cockpit that was itself restarted mid-deploy
  *  can still read what happened. */
-export function deployLogPath(releaseId: string): string {
-  return `/var/log/cezar/deploy-${releaseId}.log`;
+/**
+ * Where a detached deploy appends its output, most-preferred first.
+ *
+ * `/var/log/cezar` is right for a root deployer and IMPOSSIBLE for a rootless one: on a blue-green
+ * box the service account cannot create a directory under `/var/log` (`mkdir: Permission denied`,
+ * measured on prod-host 2026-08-29). systemd refuses to START a unit whose `append:` target
+ * is unwritable, so an unresolvable log path is not a cosmetic problem — it fails the whole deploy,
+ * silently, because the unit never runs to report anything.
+ */
+export const DEPLOY_LOG_DIRS = ['/var/log/cezar', join(homedir(), '.cezar', 'deploy-logs')];
+
+/** First candidate that can be created. Exported for test; `mkdir` is injected so the decision can
+ *  be driven without touching the real filesystem. */
+export function pickDeployLogDir(candidates: readonly string[], mkdir: (dir: string) => void): string {
+  for (const dir of candidates) {
+    try {
+      mkdir(dir);
+      return dir;
+    } catch {
+      // Not usable by this uid — try the next. A deployer that can use none of them falls through
+      // to the temp dir below, which is always writable, rather than failing the deploy over a log.
+    }
+  }
+  return tmpdir();
+}
+
+let resolvedLogDir: string | undefined;
+
+/** Memoized per process — the answer depends only on the uid, which does not change. */
+export function deployLogDir(): string {
+  resolvedLogDir ??= pickDeployLogDir(DEPLOY_LOG_DIRS, (dir) => mkdirSync(dir, { recursive: true }));
+  return resolvedLogDir;
+}
+
+export function deployLogPath(releaseId: string, dir = deployLogDir()): string {
+  return join(dir, `deploy-${releaseId}.log`);
 }
 
 export function transientUnitName(releaseId: string): string {
@@ -175,9 +211,22 @@ export interface SystemdRunOptions {
  *
  * `--collect` reaps the transient unit once it exits, so a box does not accumulate failed
  * `cezar-deploy-*` units. `KillMode=process` means that even if something later stops THIS unit,
- * it signals only the main process rather than the tree. `Type=oneshot` with
- * `RemainAfterExit=no` keeps `systemctl` semantics honest: the unit is active exactly while the
- * deploy runs.
+ * it signals only the main process rather than the tree. `Type=exec` with `RemainAfterExit=no`
+ * keeps `systemctl` semantics honest: the unit is active exactly while the deploy runs.
+ *
+ * **CORRECTED 2026-08-30: this was `Type=oneshot`, and it made every caller block for the whole
+ * deploy.** A oneshot start job is not complete until the command EXITS, so `systemd-run` does not
+ * return until the deploy is over — which turned `manual-activation.ts`'s deliberately synchronous
+ * `registerUnit` into a ~62 s freeze of the server's event loop, and with it a 30 s
+ * `TimeoutStopSec` SIGKILL on every Resolve-driven restart. Measured on `prod-host` against
+ * one `/bin/sleep 6`: `Type=oneshot` returned after **6049 ms**, `Type=exec` after **24 ms**.
+ *
+ * `Type=exec` is the fix and `--no-block` is NOT. `exec` completes the start job once the binary
+ * has been execed, so it returns at once AND still fails loudly when the unit cannot start — an
+ * unwritable `append:` target gives rc=1 under both `exec` and `oneshot`, and rc=0 under
+ * `--no-block`. That rc=0 is precisely the silent launch failure
+ * `.ai/specs/2026-08-29-resolve-runs-the-deployment.md` S3a exists to close.
+ * Spec: `.ai/specs/2026-08-30-activation-blocks-the-event-loop.md`.
  */
 export function buildSystemdRunArgv(opts: SystemdRunOptions): string[] {
   const argv = [
@@ -186,7 +235,7 @@ export function buildSystemdRunArgv(opts: SystemdRunOptions): string[] {
     ...(opts.user ? ['--user'] : []),
     `--unit=${transientUnitName(opts.releaseId)}`,
     '--collect',
-    '--property=Type=oneshot',
+    '--property=Type=exec',
     '--property=RemainAfterExit=no',
     '--property=KillMode=process',
     `--property=StandardOutput=append:${opts.logPath ?? deployLogPath(opts.releaseId)}`,

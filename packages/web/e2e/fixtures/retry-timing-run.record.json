@@ -1,0 +1,83 @@
+{
+  "id": "8f2b6b8e-9b64-4f6a-9c1e-7a2f6a0b5f7c",
+  "title": "per-retry timing fixture",
+  "workflow": "retry-timing-fixture",
+  "task": "per-retry timing fixture",
+  "status": "done",
+  "createdAt": "2026-08-29T00:00:00.000Z",
+  "tokensUsed": 0,
+  "archived": false,
+  "steps": [
+    {
+      "id": "work",
+      "name": "Work",
+      "kind": "check",
+      "status": "done",
+      "iterations": 3,
+      "tokensUsed": 0,
+      "startedAt": "2026-08-29T00:00:07.000Z",
+      "finishedAt": "2026-08-29T00:00:09.000Z",
+      "attempts": [
+        {
+          "startedAt": "2026-08-29T00:00:00.000Z",
+          "finishedAt": "2026-08-29T00:00:02.000Z"
+        },
+        {
+          "startedAt": "2026-08-29T00:00:03.000Z",
+          "finishedAt": "2026-08-29T00:00:05.000Z"
+        },
+        {
+          "startedAt": "2026-08-29T00:00:07.000Z",
+          "finishedAt": "2026-08-29T00:00:09.000Z"
+        }
+      ]
+    },
+    {
+      "id": "gate",
+      "name": "Gate",
+      "kind": "check",
+      "status": "done",
+      "iterations": 3,
+      "tokensUsed": 0,
+      "startedAt": "2026-08-29T00:00:09.000Z",
+      "finishedAt": "2026-08-29T00:00:12.000Z",
+      "attempts": [
+        {
+          "startedAt": "2026-08-29T00:00:02.000Z",
+          "finishedAt": "2026-08-29T00:00:03.000Z"
+        },
+        {
+          "startedAt": "2026-08-29T00:00:05.000Z",
+          "finishedAt": "2026-08-29T00:00:07.000Z"
+        },
+        {
+          "startedAt": "2026-08-29T00:00:09.000Z",
+          "finishedAt": "2026-08-29T00:00:12.000Z"
+        }
+      ]
+    }
+  ],
+  "workflowDef": {
+    "name": "retry-timing-fixture",
+    "description": "per-retry timing fixture (spec 2026-08-29-per-retry-step-timing, \u00a7Verification V5)",
+    "source": "file",
+    "steps": [
+      {
+        "id": "work",
+        "name": "Work",
+        "command": "sleep 2; echo \"work ran\""
+      },
+      {
+        "id": "gate",
+        "name": "Gate",
+        "command": "n=$(cat .cez-gate-count 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > .cez-gate-count\necho \"gate invocation $n\"; sleep \"$n\"; test \"$n\" -ge 3\n",
+        "onFail": {
+          "retry": "work",
+          "max": 2
+        }
+      }
+    ]
+  },
+  "startedAt": "2026-08-29T00:00:00.000Z",
+  "finishedAt": "2026-08-29T00:00:12.000Z"
+}

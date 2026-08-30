@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  DEPLOY_LOG_DIRS,
   DETACHED_ENV,
   buildSystemdRunArgv,
   decideReExec,
@@ -195,7 +196,15 @@ export interface ReleaseDeployHost {
   waitReady(port: number, timeoutMs: number): Promise<ProbeResult>;
   freeBytes(path: string): number;
   now(): string;
-  spawnDetached(argv: string[], env: NodeJS.ProcessEnv): void;
+  /**
+   * Hand the deploy to a transient unit, and REPORT whether the handoff took.
+   *
+   * Returned a `void` until 2026-08-29, which meant `runReleaseDeploy` answered `ok: true` with a
+   * `detachedUnit` whether or not any unit existed. `systemd-run` fails for ordinary, recoverable
+   * reasons — no session bus, an unwritable `append:` target — and every one of them read as a
+   * started deploy that simply never produced a release.
+   */
+  spawnDetached(argv: string[], env: NodeJS.ProcessEnv): { ok: boolean; error?: string };
   systemdRunAvailable(): boolean;
   cgroup(): string;
   /** The unit's effective KillMode, read not assumed. */
@@ -260,8 +269,25 @@ export function defaultHost(log: (line: string) => void): ReleaseDeployHost {
     now: () => new Date().toISOString(),
     spawnDetached(argv, env) {
       const [bin, ...rest] = argv;
+      // `systemd-run` returns as soon as the unit's binary has been execed — it does not wait for
+      // the command to FINISH — so this can be synchronous and still hand control straight back.
+      // That is the only way to learn that the launch failed; a detached spawn with
+      // `stdio: 'ignore'` cannot tell anyone.
+      //
+      // CORRECTED 2026-08-30: this said "as soon as the unit is REGISTERED", which is true of a
+      // `Type=simple` unit and was false of the `Type=oneshot` one `buildSystemdRunArgv` actually
+      // built — that start job waits for the command to EXIT, so this handed control back only
+      // once the deploy was already over. Fixed at the source, where the type is now `Type=exec`;
+      // see `.ai/specs/2026-08-30-activation-blocks-the-event-loop.md`.
+      if (bin === 'systemd-run') {
+        const done = spawnSync(bin, rest, { env, encoding: 'utf8' });
+        if (done.status === 0) return { ok: true };
+        const detail = (done.stderr || done.stdout || '').trim().split('\n').slice(0, 3).join(' ');
+        return { ok: false, error: detail || done.error?.message || `systemd-run exited ${done.status ?? 'unknown'}` };
+      }
       const child = spawn(bin as string, rest, { detached: true, stdio: 'ignore', env });
       child.unref();
+      return { ok: true };
     },
     systemdRunAvailable: () => commandExists('systemd-run'),
     cgroup: () => readSelfCgroup(),
@@ -536,7 +562,15 @@ export async function runReleaseDeploy(
     // A `--user` systemd-run needs the bus coordinates a service context does not have
     // (XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS are unset inside the unit, though set over ssh —
     // which is exactly why this gap was invisible until a deploy ran from inside a task).
-    fx.spawnDetached(argv, { ...env, ...(asUser ? userBusEnv() : {}), [DETACHED_ENV]: '1' });
+    const handoff = fx.spawnDetached(argv, { ...env, ...(asUser ? userBusEnv() : {}), [DETACHED_ENV]: '1' });
+    if (!handoff.ok) {
+      // Nothing has been staged or flipped at this point, so failing here is safe and honest.
+      // Reporting `ok: true` instead is what turned "the unit never started" into "the deploy ran
+      // and produced no release", which is indistinguishable from a hung deploy.
+      const error = `deploy: the transient unit did not start — ${handoff.error ?? 'unknown reason'}`;
+      log(error);
+      return { ok: false, error };
+    }
     log(`deploy: handed off to a transient unit — follow it at ${deployLogPath(releaseId)}`);
     return { ok: true, detachedUnit: releaseId };
   }
@@ -653,9 +687,15 @@ export function releaseSize(dir: string): number {
 
 /** Read the deploy log for `--follow`, returning what exists so far. */
 export function readDeployLog(releaseId: string): string {
-  try {
-    return readFileSync(deployLogPath(releaseId), 'utf8');
-  } catch {
-    return '';
+  // Every candidate, not just today's resolution: a log written by a differently-privileged
+  // deployer (root vs the service account) lands in a different directory, and `--follow` on the
+  // wrong one silently reports an empty deploy.
+  for (const dir of [...DEPLOY_LOG_DIRS, tmpdir()]) {
+    try {
+      return readFileSync(deployLogPath(releaseId, dir), 'utf8');
+    } catch {
+      // try the next
+    }
   }
+  return '';
 }

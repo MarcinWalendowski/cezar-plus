@@ -1,3 +1,5 @@
+import { promisify } from 'node:util';
+import { execFile } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +18,7 @@ import {
   activationLogPath,
   markActivationLaunched,
   readActivationCommands,
+  readActivationCommandsFromRef,
   type ActivationHost,
 } from './manual-activation.ts';
 
@@ -90,6 +93,51 @@ describe('readActivationCommands — which manual deployments a click may run', 
   });
 });
 
+/**
+ * The fallback has to read a REF, not the project root's working tree.
+ *
+ * MEASURED 2026-08-29: on prod-host the project root IS the shared checkout task worktrees
+ * fork from, and nothing brings it forward — `activate-main.sh` refuses to `reset --hard` there by
+ * design, and agents fetch without pulling. It sat 22 commits behind `origin/main` with 4 dirty
+ * files. Its working tree is the LEAST current of the three copies, so a fallback that reads it is
+ * a fallback onto a snapshot from whenever someone last touched the box.
+ */
+describe('readActivationCommandsFromRef — the declaration as origin has it', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = mkdtempSync(join(tmpdir(), 'cez-activate-ref-'));
+    const git = async (args: string[]): Promise<void> => {
+      await promisify(execFile)('git', ['-c', 'user.name=t', '-c', 'user.email=t@l', ...args], { cwd: repo });
+    };
+    await git(['init', '-q', '-b', 'main']);
+    targetsFile(repo, [{ name: 'backend', probe: 'true', manual: true, activate: 'scripts/activate-main.sh' }]);
+    await git(['add', '-A']);
+    await git(['commit', '-q', '-m', 'declare the activation']);
+    // A remote-tracking ref pointing at that commit, exactly as a fetched checkout has.
+    await git(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    // …and then the WORKING TREE goes stale and dirty, which is the production state.
+    targetsFile(repo, [{ name: 'backend', probe: 'true', manual: true }]);
+  });
+
+  afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+  it('reads the ref even when the working tree has drifted away from it', () => {
+    // The working-tree read is the control: it finds nothing, which is precisely the production
+    // failure this replaces. If both returned the same thing the test would prove nothing.
+    expect(readActivationCommands(repo, ['backend'])).toEqual([]);
+    expect(readActivationCommandsFromRef(repo, 'origin/main', ['backend'])).toEqual([
+      { name: 'backend', command: 'scripts/activate-main.sh' },
+    ]);
+  });
+
+  it('answers "nothing declared" for a ref that does not resolve, rather than throwing', () => {
+    // A repo with no remote at all — the caller then falls through to the working tree.
+    expect(readActivationCommandsFromRef(repo, 'origin/nonexistent', ['backend'])).toEqual([]);
+    expect(readActivationCommandsFromRef(join(tmpdir(), 'cez-not-a-repo'), 'origin/main', ['backend'])).toEqual([]);
+  });
+});
+
 describe('activationArgv — the command has to outlive the restart it causes', () => {
   const base = {
     unitId: 'activate-abc12345-backend',
@@ -113,6 +161,19 @@ describe('activationArgv — the command has to outlive the restart it causes', 
     // target is unwritable — so the default log path alone is enough to make every launch fail.
     expect(argv).toContain(`--property=StandardOutput=append:${base.logPath}`);
     expect(argv.join(' ')).not.toContain('/var/log/cezar');
+  });
+
+  it('does not block the click: the transient unit is Type=exec, never Type=oneshot', () => {
+    // THE 2026-08-30 REGRESSION, at the call site that paid for it. `registerUnit` runs this argv
+    // through `spawnSync` on the POST /handoff/resolve path deliberately, so that a launch which
+    // fails is reported rather than silently locked. With `Type=oneshot` the start job completes
+    // only when the command EXITS, so that spawnSync blocked node's event loop for the entire
+    // ~62 s activation — 4 of 4 Resolve-driven restarts hit TimeoutStopSec and were SIGKILLed,
+    // against 0 of 5 restarts driven from an ssh `cez server-deploy`.
+    const argv = activationArgv({ ...base, user: true, systemdRun: true });
+    expect(argv).toContain('--property=Type=exec');
+    expect(argv).not.toContain('--property=Type=oneshot');
+    expect(argv).not.toContain('--no-block');
   });
 
   it('carries the user bus coordinates, which cezar.service does not have', () => {
@@ -281,6 +342,46 @@ describe('a Resolve press runs the manual deployment', () => {
     expect(spawned).toHaveLength(1);
     // It runs in the RUN's worktree, not the root — the command is about this run's revision.
     expect(spawned[0]?.cwd).toBe(stale);
+    rmSync(stale, { recursive: true, force: true });
+  });
+
+  it('finds the declaration on origin/main when BOTH working trees are stale', async () => {
+    // Production's actual shape on prod-host: the run's worktree predates the feature, and
+    // the project root is the shared checkout nothing pulls (22 behind, 4 dirty when measured). The
+    // only current copy is the fetched ref. Both working-tree reads below are controls — each finds
+    // nothing, so a pass here can only have come from the ref.
+    const git = async (args: string[]): Promise<void> => {
+      await promisify(execFile)('git', ['-c', 'user.name=t', '-c', 'user.email=t@l', ...args], { cwd: repoRoot });
+    };
+    await git(['init', '-q', '-b', 'main']);
+    targetsFile(repoRoot, [{ name: 'backend', probe: 'false', manual: true, activate: 'scripts/activate-main.sh' }]);
+    await git(['add', '-A']);
+    await git(['commit', '-q', '-m', 'declare it']);
+    await git(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
+    targetsFile(repoRoot, [{ name: 'backend', probe: 'false', manual: true }]); // root goes stale
+
+    const stale = mkdtempSync(join(tmpdir(), 'cez-activate-stale-ref-'));
+    targetsFile(stale, [{ name: 'backend', probe: 'false', manual: true }]); // worktree is stale too
+
+    const run = store.createRun({
+      author: localCliAuthor(),
+      title: 'stale both',
+      workflow: 'spec-to-deploy',
+      task: 'ship it',
+      steps: [{ id: 'deploy', name: 'Deploy', kind: 'check' }],
+    });
+    store.updateRun(run.id, { status: 'running', currentStepId: 'deploy', baseBranch: 'main' });
+    store.updateStep(run.id, 'deploy', { status: 'running' });
+    const state = { cancelled: false, interrupt: () => undefined, cwd: stale };
+    (manager as unknown as Gate).active.set(run.id, state);
+    void (manager as unknown as Gate).awaitHandoff(run.id, state, { id: 'deploy' }, () => undefined, RED, async () => RED);
+    await new Promise<void>((r) => setImmediate(r));
+
+    const result = await manager.resolveHandoff(run.id, 'ada');
+
+    expect(result).toMatchObject({ activating: true });
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]?.argv).toEqual(['bash', '-lc', 'scripts/activate-main.sh']);
     rmSync(stale, { recursive: true, force: true });
   });
 

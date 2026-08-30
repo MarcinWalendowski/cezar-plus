@@ -4,6 +4,16 @@ import { z } from 'zod';
 export const runnerSchema = z.enum(['claude', 'codex', 'opencode', 'pi']);
 export type Runner = z.infer<typeof runnerSchema>;
 
+/** The providers a global `runnerLock` may name: exactly the profile-capable ones
+ *  (`.ai/specs/2026-08-29-global-provider-toggle.md`). Narrower than {@link runnerSchema} on
+ *  purpose — `opencode` and `pi` cannot carry a profile (`PROFILE_ENV_VAR` maps both to `null`),
+ *  so a lock naming either is a value the pool, the downgrade ladder and the bar could none of
+ *  them honour. `packages/cezar/src/workspace/runner-lock-list.test.ts` asserts this list stays
+ *  exactly `PROFILE_CAPABLE_PROVIDERS`. */
+export const LOCKABLE_RUNNERS = ['claude', 'codex'] as const;
+export const lockableRunnerSchema = z.enum(LOCKABLE_RUNNERS);
+export type LockableRunner = z.infer<typeof lockableRunnerSchema>;
+
 /** Git facts about the project root, or `null` when it is not a repository. */
 export const repoInfoSchema = z.object({
   root: z.string(),

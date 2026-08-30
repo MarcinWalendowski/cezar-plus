@@ -86,6 +86,8 @@ import {
   openProjectInSchema,
   updateProjectInputSchema,
   updateTodoInputSchema,
+  lockableRunnerSchema,
+  type LockableRunner,
 } from '@loki-labs/better-cezar-contract';
 import { detectEnvironment } from '../core/backend-detect.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
@@ -104,6 +106,7 @@ import { currentUsage, onUsage } from '../core/process-usage.ts';
 import { currentHostMetrics } from '../core/host-metrics.ts';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.ts';
 import {
+  applyReviewStepToggles,
   DEFAULT_WORKFLOW,
   DEFAULT_WORKFLOW_NAME,
   normalizeWorkflowDoc,
@@ -122,6 +125,7 @@ import {
   clearStartedTaskId,
   createTodo,
   markStarted,
+  markStartedWithClaim,
   onTodosChanged,
   readTodos,
   removeTodo,
@@ -129,8 +133,18 @@ import {
   updateTodo,
   type TodoItem,
 } from '../todos.ts';
-import { watchTodoAutostart, type TodoAutostartProject } from '../todo-autostart.ts';
-import { currentAutostartDispatch, currentClusterAutostart } from '../cluster/autostart-seam.ts';
+import {
+  forgetPendingRun,
+  pendingRunForTodo,
+  rememberPendingRun,
+  watchTodoAutostart,
+  type TodoAutostartProject,
+} from '../todo-autostart.ts';
+import {
+  currentAutostartDispatch,
+  currentClusterAutostart,
+  startOptionsForHumanStart,
+} from '../cluster/autostart-seam.ts';
 import { watchReopenRequests, type ReopenWatchProject } from '../reopen-watch.ts';
 import type { RunEvent, RunRecord, RunStatus, RunStore } from '../runs/store.ts';
 import {
@@ -179,6 +193,7 @@ import {
   type WorkspaceConfig,
   type WorkspaceProject,
 } from '../workspace/config.ts';
+import { appendAnalyticsEvent } from '../workspace/analytics-log.ts';
 import {
   CONTROL_CHARS_RE,
   DEFAULT_AGENT_ACCOUNT_ID,
@@ -869,6 +884,8 @@ export interface WorkspaceConfigResponse {
     reviewGate: boolean | null;
     stepBudget: number | null;
   };
+  /** The global provider lock (`.ai/specs/2026-08-29-global-provider-toggle.md`). `null` = Auto. */
+  runnerLock: LockableRunner | null;
 }
 
 // ---- workspace SSE (multi-project spec, step 2.8) --------------------------
@@ -948,6 +965,12 @@ const startRunSchema = z
     // Autonomous mode (#autonomous): the run never parks at `waiting` — it
     // auto-continues until the agent signals done. No "needs you" is raised.
     autonomous: z.boolean().optional(),
+    // Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`).
+    // Default true (absent = today's behaviour) — an explicit `false` drops the matching step
+    // (`review-spec-local` / `review-spec`) from the resolved workflow. No-op on a workflow
+    // without that step id.
+    reviewSameModel: z.boolean().optional(),
+    reviewCrossModel: z.boolean().optional(),
     // Generate follow-up inbox entries (spec 007, #444). Honoured only while
     // the `followups` capability is on (#471) — off, the server pins it to
     // false whatever the client asked for. Omitted still means "enabled" for
@@ -1740,22 +1763,31 @@ export function createApp(deps: ServerDeps) {
   const planAccountGate = async (
     repoRoot: string,
     defaultRunner: ProviderId,
-  ): Promise<{ error: string; runnable?: undefined } | { error: null; runnable: readonly ResolvedAgentProfile[] }> => {
-    const known = await providerStatus();
-    const cheapMessage = unavailableProviderMessage([defaultRunner], known);
-    if (cheapMessage !== null) {
-      const disabled = known.providers.find((row) => row.provider === defaultRunner)?.enabled === false;
-      if (disabled) return { error: cheapMessage };
-    }
-    const [accounts, workspace] = await Promise.all([
+  ): Promise<
+    | { error: string; runnable?: undefined; runnerLock?: undefined }
+    | { error: null; runnable: readonly ResolvedAgentProfile[]; runnerLock: LockableRunner | undefined }
+  > => {
+    const [known, accounts, workspace] = await Promise.all([
+      providerStatus(),
       loadAgentAccounts().catch(() => defaultAgentAccountStore()),
       workspaceConfig.load(),
     ]);
+    // D4b(2): the cheap disabled-provider short-circuit sits OUTSIDE `requirementForPlanner` and
+    // must be handed the lock too — otherwise a workspace locked to a viable provider is refused
+    // at the door because the OVERRIDDEN `defaultRunner` happens to be disabled.
+    const lock = workspace.runnerLock ?? undefined;
+    const effectiveRunner = lock ?? defaultRunner;
+    const cheapMessage = unavailableProviderMessage([effectiveRunner], known);
+    if (cheapMessage !== null) {
+      const disabled = known.providers.find((row) => row.provider === effectiveRunner)?.enabled === false;
+      if (disabled) return { error: cheapMessage };
+    }
     const requirement = requirementForPlanner(
       defaultRunner,
       accounts,
       repoRoot,
       workspace.resources.fallbackAcrossAccountsWhenLimited,
+      lock,
     );
     const evaluate = async (rows: ProviderStatusResponse) => {
       const input = await loadViabilityInput(repoRoot, providerAuth, {
@@ -1773,7 +1805,9 @@ export function createApp(deps: ServerDeps) {
       viability = await evaluate(fresh);
       runnable = viability.requirements[0]?.runnable ?? [];
     }
-    return runnable.length > 0 ? { error: null, runnable } : { error: plannerRefusalMessage(viability) };
+    return runnable.length > 0
+      ? { error: null, runnable, runnerLock: lock }
+      : { error: plannerRefusalMessage(viability) };
   };
   const openTerminal = deps.openTerminal ?? openInTerminal;
   const openFile = deps.openFile ?? openFileInDefaultApp;
@@ -2764,21 +2798,40 @@ export function createApp(deps: ServerDeps) {
    */
   const resolveRunWorkflow = async (
     root: string,
-    body: { workflow?: string; steps?: WorkflowDef['steps'] },
+    body: {
+      workflow?: string;
+      steps?: WorkflowDef['steps'];
+      // Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`).
+      // Default true (absent = today's behaviour); applied below regardless of which branch
+      // resolved the workflow, so a named/default/inline chain all answer the same way.
+      reviewSameModel?: boolean;
+      reviewCrossModel?: boolean;
+    },
   ): Promise<{ workflow: WorkflowDef } | { error: string; status: 400 | 404 }> => {
+    const toggles = { reviewSameModel: body.reviewSameModel, reviewCrossModel: body.reviewCrossModel };
     if (body.steps) {
       const issue = stepsIssue(body.steps);
       if (issue) return { error: issue, status: 400 };
-      return { workflow: { name: '(planned)', source: 'built-in', steps: body.steps } };
+      return {
+        workflow: applyReviewStepToggles(
+          { name: '(planned)', source: 'built-in', steps: body.steps },
+          toggles,
+        ),
+      };
     }
     const { workflows } = await loadWorkflows(root);
     if (body.workflow) {
       const named = workflows.find((w) => w.name === body.workflow);
       return named
-        ? { workflow: named }
+        ? { workflow: applyReviewStepToggles(named, toggles) }
         : { error: `unknown workflow: ${body.workflow}`, status: 404 };
     }
-    return { workflow: workflows.find((w) => w.name === DEFAULT_WORKFLOW_NAME) ?? DEFAULT_WORKFLOW };
+    return {
+      workflow: applyReviewStepToggles(
+        workflows.find((w) => w.name === DEFAULT_WORKFLOW_NAME) ?? DEFAULT_WORKFLOW,
+        toggles,
+      ),
+    };
   };
 
   /**
@@ -2807,6 +2860,7 @@ export function createApp(deps: ServerDeps) {
       fallback,
       overrideAgentProfile: body.agentProfile,
       fallbackAcrossAccountsWhenLimited: workspace.resources.fallbackAcrossAccountsWhenLimited,
+      runnerLock: workspace.runnerLock ?? undefined,
     });
     const blocked = await providerActionError(requirements, root);
     if (blocked) return { error: blocked, status: 409 };
@@ -2883,15 +2937,32 @@ export function createApp(deps: ServerDeps) {
         const provider = { data: c.req.valid('param').provider };
         const body = { data: c.req.valid('json') };
         let workspace: WorkspaceConfig;
+        // D10 (`.ai/specs/2026-08-29-global-provider-toggle.md`): disabling the currently-locked
+        // provider clears the lock to Auto in the SAME write, so the two never disagree.
+        let lockCleared = false;
         try {
           workspace = await workspaceConfig.mergeWrite((config) => {
             const disabled = new Set(config.disabledProviders);
             if (body.data.enabled) disabled.delete(provider.data);
             else disabled.add(provider.data);
             config.disabledProviders = PROVIDER_IDS.filter((id) => disabled.has(id));
+            if (!body.data.enabled && config.runnerLock === provider.data) {
+              delete config.runnerLock;
+              lockCleared = true;
+            }
           });
         } catch {
           return c.json({ error: 'Provider preference could not be saved.' }, 500);
+        }
+        // D7 #3: this route previously called no `refresh()` at all, so a cleared lock left the
+        // run loop pinning a now-disabled provider from a stale in-memory snapshot until something
+        // unrelated happened to call `refresh()`.
+        if (lockCleared) {
+          await deps.semaphore?.refresh();
+          void appendAnalyticsEvent({
+            name: 'settings.runner_lock_set',
+            props: { runner: 'auto', previous: provider.data, source: 'provider-disabled' },
+          });
         }
         const result = await withPoolConnected(
           applyProviderEnablement(await providerAuth.status(), workspace.disabledProviders),
@@ -4553,6 +4624,9 @@ export function createApp(deps: ServerDeps) {
       reviewGate: config.projectDefaults.reviewGate ?? null,
       stepBudget: config.projectDefaults.stepBudget ?? null,
     },
+    // `null`-for-absent like `projectDefaults`, not the spread convention above: the tri-state
+    // (Auto/claude/codex) lives in the value, and the UI always renders one of the three.
+    runnerLock: config.runnerLock ?? null,
   });
   // ---- chained family: workspace settings + GUI prefs (workspace-level) ----
   const workspaceConfigRoutes = new Hono<ProjectApiEnv>()
@@ -4560,8 +4634,18 @@ export function createApp(deps: ServerDeps) {
 
     .put('/workspace/config', jsonZodValidator(() => workspaceConfigUpdateSchema), async (c) => {
       const parsed = { data: c.req.valid('json') };
-      const { browseRoot, projectsDir, composerDefaults, resources, agentDefaults, projectDefaults } =
+      const { browseRoot, projectsDir, composerDefaults, resources, agentDefaults, projectDefaults, runnerLock } =
         parsed.data;
+      // D10 (`.ai/specs/2026-08-29-global-provider-toggle.md`): locking to a disabled provider is
+      // refused before anything is persisted, the same shape as the rejected-root probes below.
+      let previousRunnerLock: LockableRunner | null = null;
+      if (runnerLock !== undefined) {
+        const beforeConfig = await loadWorkspaceConfig();
+        previousRunnerLock = beforeConfig.runnerLock ?? null;
+        if (runnerLock !== null && beforeConfig.disabledProviders.includes(runnerLock)) {
+          return c.json({ error: `cannot lock to ${runnerLock}: it is disabled` }, 400);
+        }
+      }
       for (const [configuredRoot, create] of [
         [browseRoot, false],
         [projectsDir, true],
@@ -4651,14 +4735,28 @@ export function createApp(deps: ServerDeps) {
               else tier[key] = value;
             }
           }
+          // `null` CLEARS the lock back to Auto (D7/D10 above already refused a disabled target).
+          if (runnerLock === null) delete config.runnerLock;
+          else if (runnerLock !== undefined) config.runnerLock = runnerLock;
         });
       } catch (err) {
         // e.g. a read-only home — nothing was persisted (atomic tmp+rename).
         return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
       }
-      // A resource change takes effect WITHOUT a restart: refresh the shared
-      // semaphore's in-memory snapshot and pump every manager (step 2.5's hook).
-      if (resources !== undefined) await deps.semaphore?.refresh();
+      // A resource OR lock change takes effect WITHOUT a restart: refresh the shared semaphore's
+      // in-memory snapshot and pump every manager (step 2.5's hook, widened by D7 #2 — a lock-only
+      // body must not be a silent no-op on the running loop).
+      if (resources !== undefined || runnerLock !== undefined) await deps.semaphore?.refresh();
+      if (runnerLock !== undefined) {
+        void appendAnalyticsEvent({
+          name: 'settings.runner_lock_set',
+          props: {
+            runner: runnerLock ?? 'auto',
+            previous: previousRunnerLock ?? 'auto',
+            source: 'workspace-config-put',
+          },
+        });
+      }
       return c.json(workspaceConfigBody(written));
     })
 
@@ -4735,6 +4833,9 @@ export function createApp(deps: ServerDeps) {
           .optional(),
       })
       .optional(),
+    // `null` CLEARS the lock back to Auto — see setWorkspaceConfigInputSchema for the full
+    // rationale (`.ai/specs/2026-08-29-global-provider-toggle.md`).
+    runnerLock: lockableRunnerSchema.nullable().optional(),
   });
   // ---- chained family: filesystem browse (workspace-level) ----
   const fsBrowseRoutes = new Hono<ProjectApiEnv>()
@@ -4940,7 +5041,7 @@ export function createApp(deps: ServerDeps) {
         const { env } = await resolveProfileEnvForRoot(root, chosen.provider, chosen.isDefault ? undefined : chosen.id);
         return { provider: chosen.provider, profileId: chosen.isDefault ? undefined : chosen.id, env };
       };
-      return c.json(await planChain(repoRoot, parsed.data.task, chooseAccount));
+      return c.json(await planChain(repoRoot, parsed.data.task, chooseAccount, gate.runnerLock));
     });
 
   // ---- GitHub automations --------------------------------------------------
@@ -5306,6 +5407,12 @@ export function createApp(deps: ServerDeps) {
       const resolvedWorkflow = await resolveRunWorkflow(repoRoot, {
         ...(parsed.data.workflow === undefined ? {} : { workflow: parsed.data.workflow }),
         ...(parsed.data.steps === undefined ? {} : { steps: parsed.data.steps }),
+        ...(parsed.data.reviewSameModel === undefined
+          ? {}
+          : { reviewSameModel: parsed.data.reviewSameModel }),
+        ...(parsed.data.reviewCrossModel === undefined
+          ? {}
+          : { reviewCrossModel: parsed.data.reviewCrossModel }),
       });
       if ('error' in resolvedWorkflow) {
         return c.json({ error: resolvedWorkflow.error }, resolvedWorkflow.status);
@@ -5557,6 +5664,7 @@ export function createApp(deps: ServerDeps) {
           currentRun,
           undefined,
           workspace.resources.fallbackAcrossAccountsWhenLimited,
+          workspace.runnerLock ?? undefined,
         );
         const blocked = await providerActionError([requirement], repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
@@ -5688,6 +5796,7 @@ export function createApp(deps: ServerDeps) {
         run,
         parsed.data.runner,
         workspace.resources.fallbackAcrossAccountsWhenLimited,
+        workspace.runnerLock ?? undefined,
       );
       const blocked = await providerActionError([requirement], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
@@ -5736,7 +5845,12 @@ export function createApp(deps: ServerDeps) {
       // onto the record before dispatch, so the record is stale for this one site
       // (`requirementForRetarget`'s own doc comment).
       const workspace = await workspaceConfig.load();
-      const requirement = requirementForRetarget(run, target, workspace.resources.fallbackAcrossAccountsWhenLimited);
+      const requirement = requirementForRetarget(
+        run,
+        target,
+        workspace.resources.fallbackAcrossAccountsWhenLimited,
+        workspace.runnerLock ?? undefined,
+      );
       const blocked = await providerActionError([requirement], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
 
@@ -6505,6 +6619,24 @@ export function createApp(deps: ServerDeps) {
         }
         if (todo.startedTaskId) return c.json({ error: 'already started' }, 409);
 
+        // **The guard `startedTaskId` cannot be** (D43;
+        // `.ai/specs/2026-08-30-run-button-claim-options.md` S4). A previous press — or an
+        // autostart pass — may have started a run whose claim could not be recorded, and the
+        // record therefore still reads unstarted. Pressing again would spend the subscription
+        // twice on one todo, which is what this route did in production for five days.
+        //
+        // 409 either way: a run for this todo EXISTS, and that is true whether or not the record
+        // can be made to say so. The retry is what turns the orphan into an ordinary started entry
+        // when the claim can finally land, so the board recovers on the next press with no reconcile
+        // pass involved.
+        const orphan = pendingRunForTodo(dataDir, id);
+        if (orphan !== undefined) {
+          if (await markStarted(dataDir, id, orphan, await startOptionsForHumanStart(repoRoot))) {
+            forgetPendingRun(dataDir, id);
+          }
+          return c.json({ error: 'already started' }, 409);
+        }
+
         let task = todoTaskText(todo);
         if (parsed.data?.prompt) task += `\n\n${parsed.data.prompt}`;
 
@@ -6524,9 +6656,21 @@ export function createApp(deps: ServerDeps) {
           fallback,
           overrideAgentProfile: undefined,
           fallbackAcrossAccountsWhenLimited: workspace.resources.fallbackAcrossAccountsWhenLimited,
+          runnerLock: workspace.runnerLock ?? undefined,
         });
         const blocked = await providerActionError(requirements, repoRoot);
         if (blocked) return c.json({ error: blocked }, 409);
+
+        // **Resolved BEFORE the start, so nothing but `startRun` sits between the run and its
+        // stamp** — the window `todo-autostart.ts` keeps deliberately small, for the same reason: a
+        // crash inside it leaves a run the record does not know about.
+        //
+        // Without this the options were absent, so `markStarted` decided from the environment —
+        // and on a node with `CEZ_CLUSTER=1` that means asking a hub that has nobody to ask,
+        // refusing `hub-unconfirmed`, and writing NOTHING. Measured on `prod-host`: 0 of 13
+        // Run presses stamped since the cluster flip, against 8 of 8 autostarts, which is the
+        // control that says the environment was never the problem — this call site was.
+        const startOptions = await startOptionsForHumanStart(repoRoot);
 
         const run = manager.startRun(workflow, {
           task,
@@ -6538,7 +6682,38 @@ export function createApp(deps: ServerDeps) {
           // autostart path (`todo-autostart.ts`) is the opposite case and inherits instead.
           author: authorOf(c, 'todo-start'),
         });
-        await markStarted(dataDir, id, run.id);
+        // The answer is READ. Discarding it is what made the failure silent: the refusal is
+        // deliberate and correct in `markStartedWithClaim` ("the absence is the point"), but the
+        // stamp it withholds is the only thing joining this run to its todo, so the absence that
+        // was meant to prevent a second run is what caused one.
+        // The answer is READ, and its REASON decides what to do with the run that already exists.
+        // Discarding it is what made the failure silent: the refusal is deliberate and correct in
+        // `markStartedWithClaim` ("the absence is the point"), but the stamp it withholds is the
+        // only thing joining this run to its todo — so the absence meant to prevent a second run is
+        // what caused one.
+        //
+        // **A refusal that names a WINNER means this run is the duplicate; one that means "nobody
+        // could confirm" leaves it standing.** That split is the whole decision:
+        //  - `already-started` — two presses raced past the guard above (both read the todo before
+        //    either stamped, which no re-read narrows to zero), or an autostart pass claimed it in
+        //    between. Someone else's run holds the todo, so the loser cancels ITSELF rather than
+        //    leaving two agents on one task.
+        //  - `hub-refused` — another NODE holds the claim. Same thing across machines, which is the
+        //    more expensive version: two worktrees, neither able to see the other.
+        //  - `hub-unconfirmed` / `not-found` — nobody won; this run is the only one, and it is real.
+        //    Remember it (D43) so the next press settles it instead of starting a second.
+        const claim = await markStartedWithClaim(dataDir, id, run.id, startOptions);
+        if (!claim.started) {
+          if (claim.reason === 'already-started' || claim.reason === 'hub-refused') {
+            manager.cancel(run.id);
+            return c.json({ error: claim.message ?? 'already started' }, 409);
+          }
+          rememberPendingRun(dataDir, id, run.id);
+          console.warn(
+            `[cezar] run ${run.id} started for todo ${id} but the record could not be stamped ` +
+              `(${claim.reason ?? 'unknown'}) — the next press will settle it rather than starting a second run`,
+          );
+        }
         return c.json({ run }, 201);
       },
     );

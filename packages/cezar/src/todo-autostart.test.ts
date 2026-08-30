@@ -830,6 +830,9 @@ describe('cluster autostart guard — hub-confirmed claims (spec 2026-08-22-mult
           calls.push(input.todo);
           return Promise.resolve(outcome);
         },
+        localStartOptions: () => {
+          throw new Error('autostart must not ask for HUMAN start options (D15a row 3)');
+        },
       };
     }
 
@@ -1014,7 +1017,10 @@ describe('todo autostart — a refused stamp must not restart the run (D43)', ()
     // What `createHubAutostartDispatch` returns for a project with no confirmed pairing: being
     // clustered is a property of the PROJECT, and this one has no peer that could hold a rival
     // claim. This is the owner's ordinary case — most projects on a hub are unpaired.
-    const dispatch = { place: async () => ({ start: 'local' as const, startOptions: { clustered: false } }) };
+    const dispatch = {
+      localStartOptions: () => { throw new Error('autostart must not ask for HUMAN start options (D15a row 3)'); },
+      place: async () => ({ start: 'local' as const, startOptions: { clustered: false } }),
+    };
 
     await reconcileAutostartTodos({ ...project, dispatch: () => dispatch });
     await reconcileAutostartTodos({ ...project, dispatch: () => dispatch });
@@ -1029,6 +1035,7 @@ describe('todo autostart — a refused stamp must not restart the run (D43)', ()
     process.env.CEZ_CLUSTER = '1';
     const allocated: number[] = [];
     const dispatch = {
+      localStartOptions: () => { throw new Error('autostart must not ask for HUMAN start options (D15a row 3)'); },
       place: async () => ({
         start: 'local' as const,
         startOptions: {
@@ -1056,7 +1063,10 @@ describe('todo autostart — a refused stamp must not restart the run (D43)', ()
 
   it('NEGATIVE CONTROL — a local outcome carrying NO startOptions is still unstamped, so the two above are not passing for some unrelated reason', async () => {
     process.env.CEZ_CLUSTER = '1';
-    const dispatch = { place: async () => ({ start: 'local' as const }) };
+    const dispatch = {
+      localStartOptions: () => { throw new Error('autostart must not ask for HUMAN start options (D15a row 3)'); },
+      place: async () => ({ start: 'local' as const }),
+    };
 
     await reconcileAutostartTodos({ ...project, dispatch: () => dispatch });
 

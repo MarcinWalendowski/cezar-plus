@@ -173,15 +173,63 @@ Executed 2026-08-29.
    unit: cez-fix-….service"*, and the unit executed, writing `PROBE_OK from
    /var/lib/cezar/loki-labs/cezar` to a project-owned log. The control is what makes this evidence
    rather than a hopeful re-run. ✅
-9. **Production E2E, round 2 — pending.** Acceptance unchanged: one press, the card reading
-   "deploying … now", a new release under `/opt/cezar-releases/`, every park clearing on the restart
-   with no second press.
+9. **S7**: a re-exec whose `systemd-run` fails reports `ok: false` naming the reason and hands back
+   **no** `detachedUnit`, having staged and restarted nothing; the log directory prefers
+   `/var/log/cezar` when creatable (the negative control), falls through when not, and never fails a
+   deploy over a log. **Mutation-checked**: ignoring the handoff result → red; never falling through
+   → 3 red; ignoring the resolved directory → red.
+10. **S8**: with the ref declaring `activate` and **both** working trees stale, the launch still
+    happens — and each working-tree read is asserted empty in the same test, so the pass can only
+    have come from the ref. **Mutation-checked**: dropping the ref read → red.
+11. **Production E2E, round 2 — PASSED 2026-08-29T17:25Z.** The owner pressed Resolve on a parked
+    run and the button ran the deployment itself. Evidence is the activation log the feature
+    writes, `\.ai/cezar/activations/activate-c0a1b7d1-….log` (27 KB, `cezar:cezar`), which ends:
 
-### Known gap, recorded not fixed
+    ```
+      Deploy complete.
+      link:     /opt/cezar → /opt/cezar-releases/20260829T172513Z-0a46010b
+    ==> waiting for readiness
+    ==> live: 0a46010b… == origin/main. Done.
+    ```
 
-`server-deploy`'s OWN re-exec path (`release-deploy.ts`) still defaults to `/var/log/cezar` and does
-not add the bus env, so `cezar server-deploy` run from **inside a task** on this box would hit
-defect 2 the same way. It is not hit today because every activation so far has been run from ssh,
-where `decideReExec` reports *"not inside cezar.service's cgroup"* and never detaches. Left alone
-deliberately: fixing it means changing the shared deploy path, which deserves its own change rather
-than riding along with this one.
+    So the whole chain works from a click: lock taken, unit registered under `systemd-run` with a
+    writable log, build, blue-green cutover, readiness wait. The two defects that made the first
+    attempt launch nothing silently — the missing user bus and the unwritable `/var/log/cezar`
+    append target — are gone from the path a press actually takes.
+
+    One honest caveat on the same press: the commit it shipped, `0a46010b`, was itself broken (see
+    below). That is not this feature's doing — Resolve deploys `origin/main`, and `origin/main` was
+    red. It is, though, the reason the run did not clear: a deploy can only make the probe green if
+    the run's own HEAD is in what was deployed.
+
+## Two things this deploy round found, recorded because neither is about this feature
+
+**A clean merge of two correct trees shipped a file that cannot run.** `origin/main` at `0a46010b`
+threw `ReferenceError: FiledDetailDialog is not defined` on every Filed board render.
+`d15e26f9` had replaced the detail DIALOG with a detail PAGE, removing the component and its only
+use; the composer-dispatch branch was cut before that and still carried both. The two edits sat far
+apart in the file, so `33ea5803` merged them independently and without conflict — keeping main's
+**deletion of the definition** and the branch's **use of it**. Neither parent is broken. That is the
+shape worth remembering: a merge can produce a defect that exists in no commit being merged, so a
+gate on either branch is structurally incapable of catching it. Only gating the merged tree can.
+
+It was pushed with a red gate: the full suite on `0a46010b` fails **109** tests, six of them naming
+the missing symbol directly. Fixed in `dc0b5dde` by restoring `FiledBoardBody` to its `d66a25ee`
+shape — the entire 98-line difference was the resurrected dialog and one comment reword, so nothing
+legitimate was lost. Verified on the box with a control: the exact bundle the browser's stack trace
+named, `index-Ca0jfg1H.js`, contains `FiledDetailDialog`; the now-served `index-Bgn8T_Ac.js` contains
+zero occurrences.
+
+**A run can park on `deploy` with work that was never pushed, and no deploy can clear it.** Run
+`265c2695` sat `waiting` across three correct activations. Its steps read `commit-push: failed`,
+`merge: done` — so its code landed, and then `document` committed two more (`.ai/specs/…`,
+`CHANGELOG.md`) that the failed `commit-push` never pushed. Its worktree HEAD `413cadb0` was
+therefore genuinely absent from `origin/main`, and the probe was right every time it said so.
+Activating harder was never going to help. Resolved by pushing the branch and merging those two
+doc commits.
+
+This is the base-drift failure of `.ai/specs/2026-08-29-base-drift-rewinds-to-retest.md` seen from
+its far end: the fix there stops the run dying at `commit-push`, which stops this park from being
+created. The residue is that runs parked *before* that fix shipped still need their unpushed tail
+landed by hand — the fix cannot reach a run that already failed, the same way
+`2026-08-29-resolve-button-red-recheck.md` records for the probe.

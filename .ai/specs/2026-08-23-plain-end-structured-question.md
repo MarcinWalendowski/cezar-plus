@@ -1,5 +1,25 @@
 # A plain turn end must carry its question
 
+**Status (current, 2026-08-29):** Implemented in `d811d34c` (2026-08-24) and **Done**, not QA
+Needed. All three defects the 2026-08-24 review found below (the mid-chain decision-table row,
+`pendingAsk` widening `reenterChain` on restart, and the clearing choke point missing five call
+sites) are verified **closed** at `HEAD` `0a46010b`, by direct read this session
+(`.ai/specs/2026-08-29-plain-end-question-verification.md`'s table has the full file:line
+evidence): `run.ts:2571`'s wide `pendingAttention` no longer gates `reenterChain` (R10 below is
+stale the same way), and `store.ts:961-968` is the single transition-keyed choke point, not an
+enumeration. **V8, the runtime E2E, is closed** by `packages/web/e2e/plain-end-question.e2e.ts`
+(task `eba6cb05-f995-4fc3-9cf1-0852977296d1`): `npm run test:e2e`'s focused run reported
+`TEST_E2E_STATUS=passed` for all three cases (question fallback, nudge-to-chips, report park),
+and the discriminating-mutation check (V5 of that spec — gut `task-thread.tsx`'s
+`hasWaitingQuestion` to `false`, rebuild, rerun) reproduced exactly the failure it predicts: case
+A red, case C still green. Full detail, including the record of what was NOT run (a full
+`npm run typecheck && npm test` pass in this same session), is in that spec.
+
+**SUPERSEDED 2026-08-29 by the status block above.** The block below was written on 2026-08-24 and
+is preserved verbatim as the record of what was true and believed then — including its own
+embedded "V8 ... has never run" line, which is stale in the same way as the rest of this file's
+2026-08-24 layer. Do not read anything below this line as current.
+
 **Status:** Implemented and pushed to `origin/main` in `d811d34c` on 2026-08-24,
 **verification incomplete**, QA Needed, not Done. The final feature commit includes P1-P5, the
 reviewed store-transition, restart-predicate, report-markup and run-index projection corrections,
@@ -10,6 +30,12 @@ no `lint` script. The required root `npm test` gate is not green: 10,774 passed,
 skipped. The sole failure is the C18 knowledge-catalog host-speed budget, reproduced on clean
 detached baseline `116c3ee1`, so it is not evidence against this feature but still prevents a
 green-gate claim. **V8, the runtime/browser E2E, has never run**, so the feature remains QA Needed.
+
+**RESOLVED 2026-08-29:** all three items this nested stack tracks were verified closed by direct
+read at `HEAD` `0a46010b`, this session — see the current status block at the top of this file and
+`.ai/specs/2026-08-29-plain-end-question-verification.md`'s table for the file:line evidence. The
+stack below (what was open, what a corrective patch fixed, and a 2026-08-24 re-confirmation) is
+left in place as the record of that day's back-and-forth; none of it is current.
 
 **CORRECTED 2026-08-24:** the three defects below were open against autosave `116c3ee1`, then were
 implemented in the following implement step. The original review finding remains below as the
@@ -749,7 +775,7 @@ session does not read the P5 test as covering it.
 | **R7** | **Interaction with todo `751e69fb`** — a malformed `CEZ:ASK` leaves raw JSON in the turn text, which the detector might read as question-shaped (the payload contains `"question":"…?"`). **Narrower than it first looks:** the contract requires the payload on ONE line, and the detector's pipeline step 2 strips every line matching `^\s*CEZ:[A-Z_]+`, so a single-line rejected marker is stripped before step 4 ever sees it. The premise only holds for a **multi-line** malformed payload, where the continuation lines survive the strip. | Where it does fire, it is welcome rather than merely tolerated: nudging the agent to re-send the marker is the right response to a rejected payload, and `askMarkerRejection` already logs a `note` beside it. But it is an **incidental** benefit on a narrow input shape, not a mitigation this spec relies on, and it does **not** fix the parser bug — `751e69fb` stays separate work. |
 | **R8** | **Prompt bloat** — P1 lengthens a string prepended to every agent step. | Net change is a rewrite of one sentence plus a clause, not a new paragraph. Keep it under the current paragraph's length; V1 asserts on the text. |
 | **R9** | **Every existing dry-run park gains a turn.** The mock's default first-turn reply ends `"Anything to adjust?"` (`mock-claude.mjs:514`), which the detector reads as a question — so `run.test.ts:1459`, `:1486`, `:1595`, `:1602`, `:1619`, `:2350`, `:2437`, `:2466`, `:2545` and the `workspace-semaphore.test.ts` parks (`:230`, `:260`, `:436`, `:461`, `:471`) would each spend a nudge turn before reaching `waiting`. **The browser E2Es drive the same live mock and wait on the same status** — `packages/web/e2e/new-task.e2e.ts:198`, `ios-sweep.e2e.ts:93-95`, `review-gate.e2e.ts:130`, `task-thread.e2e.ts:197`, `composer.e2e.ts:106`/`:179`, `plan-mode.e2e.ts:256` — so they are exposed identically. Their `waitFor(status === 'waiting')` would still pass, but slower and for the wrong reason, and the semaphore tests time slot handoff. | **Chosen mitigation: change the fixture, not the tests.** Drop `Anything to adjust?` from `:514` so the default reply is a report, and move the question behind the explicit `mock:question` verb (Architecture → "The mock has to change first"). Nothing asserts on that sentence — one grep hit, the mock itself — so no test is rewritten and no park gains a turn — the browser E2Es above are covered by the same change, unchanged (I checked the one that reads reply text: `task-thread.e2e.ts:197` asserts on `prHref`, which survives dropping the sentence, and the golden fixture `__fixtures__/claude/bash-and-screenshot.expected.json:129` already carries the sentence-free text). The rejected alternative was widening every affected `waitFor`, which would have left the extra turn in place and made the slot-timing tests quietly less meaningful. |
-| **R10** | **A heuristic verdict stalls a real chain.** `waitingReason: 'question'` is a guess. If it also gates chain re-entry on restart, one `let me know` in a mid-chain continuation (reachable — see the decision table's twin-B row) leaves a multi-step run in `review` that today would have resumed. **The landed code has exactly this shape** (`run.ts:1841` widens the single `pendingAsk`, and `:1854` gates `reenterChain` on it). | P5's split predicate: `pendingAsk` (narrow, an explicit unanswered `CEZ:ASK`) keeps the chain gate; `pendingAttention` (wide) only decides `review`-vs-`done`. The rule generalises past this site, and is stated as D7: **a detector verdict may raise attention, never withhold work.** V7's second case is the executable form of it and is red against the landed code. |
+| **R10** | **CORRECTED 2026-08-29: no longer the landed shape — `run.ts:2571`'s `pendingAttention` does not gate `reenterChain` at `HEAD` `0a46010b`; verified by direct read, see `.ai/specs/2026-08-29-plain-end-question-verification.md`.** The original 2026-08-24 finding follows unchanged: **A heuristic verdict stalls a real chain.** `waitingReason: 'question'` is a guess. If it also gates chain re-entry on restart, one `let me know` in a mid-chain continuation (reachable — see the decision table's twin-B row) leaves a multi-step run in `review` that today would have resumed. **The landed code has exactly this shape** (`run.ts:1841` widens the single `pendingAsk`, and `:1854` gates `reenterChain` on it). | P5's split predicate: `pendingAsk` (narrow, an explicit unanswered `CEZ:ASK`) keeps the chain gate; `pendingAttention` (wide) only decides `review`-vs-`done`. The rule generalises past this site, and is stated as D7: **a detector verdict may raise attention, never withhold work.** V7's second case is the executable form of it and is red against the landed code. |
 | **R11** | **The clearing choke point over-clears.** A single rule in `updateRun` is only safe if no legitimate caller writes a `status` while intending to keep the park. | Checked every `updateRun` call that writes a live status (`running`/`waiting`/`queued`) — `run.ts:2430`, `:3310`, `:3649`, `:3809`, `:3823`, `:4084`, `:4916`, `:4986`, `:5347`, `:5361`, `:5681`, `:6365`. **Three** want the park kept, not one. The park itself (`parkPlainEnd`, `:6365`) is exempt by construction, because it is the patch that sets `waitingReason`. The other two are the idle parks (`:4084`, `:4916`), which write `waiting` over an existing `waiting` and are exempt only because of the `!== run.status` clause in P2 step 2b — an early draft of this rule omitted that clause and would have erased a live question after fifteen minutes of the user not answering it. Patches with no `status` key are untouched, so the "clear on reply" behaviour does not depend on this rule alone. V3a pins all three directions — and note the idle park is a **keep**, asserted as one: it is `waiting → waiting`, so a V that asserted it clears would be asserting against the clause this row exists to defend. |
 
 ## Verification
@@ -777,10 +803,15 @@ runs-index regression are green. Per V:
 | V7 restart | **yes, exercised**: single-step attention and multi-step chain re-entry cases cover the split recovery predicates |
 | V2a mock verbs | **yes, exercised**: report, question and sticky ask-on-nudge shapes are explicit |
 | V8 runtime E2E | **no**, never run |
+| V8 runtime E2E (2026-08-29) | **yes**: `packages/web/e2e/plain-end-question.e2e.ts`, `TEST_E2E_STATUS=passed`, all 3 cases; V5's discriminating mutation confirmed case A red / case C green — task `eba6cb05-f995-4fc3-9cf1-0852977296d1`, see `.ai/specs/2026-08-29-plain-end-question-verification.md` |
 
 The root suite is red: 10,774 passed, 1 failed and 4 skipped. The sole failure is the C18
 knowledge-catalog host-speed budget, reproduced on clean detached baseline `116c3ee1`. It is not
 evidence against this feature, but the required full gate is still not green.
+
+**CORRECTED 2026-08-29:** V8 ran and closed this gate — see the new table row above and the
+current status block at the top of this file (task `eba6cb05-f995-4fc3-9cf1-0852977296d1`). The
+sentence below is left as written on 2026-08-24, when it was true:
 
 Per repo doctrine, gates green is necessary and not sufficient: **V8 is what makes this Done rather
 than QA Needed, and V8 has never run.**
@@ -935,6 +966,12 @@ the body is still `askText` — the inversion must not swallow the legitimate ca
   it passes. Then the twin control: the same shape with a real unanswered `ask.requested` **does**
   stay parked and does not re-enter — an explicit ask still outranks the chain
   (`recover-pending-ask.test.ts` already covers the settle half of that).
+
+**SUPERSEDED 2026-08-29 by `packages/web/e2e/plain-end-question.e2e.ts`.** This manual runbook was
+never run — a manual gate in a spec is a gate that does not run — and is replaced by an automated
+E2E covering the same three cases plus the NDJSON `note` assertion below, executed under task
+`eba6cb05-f995-4fc3-9cf1-0852977296d1` (`TEST_E2E_STATUS=passed`). Do not follow the runbook below;
+it is left as the record of what V8 originally asked for.
 
 **V8 — runtime E2E on `prod-host`. Until this has actually run, this is QA Needed, not Done.**
 Start a real task whose agent is instructed to end a turn with a question in prose and no marker.

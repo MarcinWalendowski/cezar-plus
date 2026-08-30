@@ -71,3 +71,33 @@ untouched.
 To regenerate: build, boot `CEZ_DRY_RUN=1 node dist/index.js serve --repo <tmp-git-repo>`,
 start a task whose text is `mock:subagents`, wait for it to settle, then copy
 `<tmp>/.ai/cezar/runs/<id>.ndjson` here and normalize the timestamps.
+
+## Retry attempt timing (`.ai/specs/2026-08-29-step-retry-timing.md`)
+
+`retry-timing-run.record.json` is the `gate`/`work` run V5 step 1 produces — no transcript, only
+a `runs.json` entry, since `retry-step-timing.e2e.ts` asserts the step rail's tree and its
+aggregate clock, not a transcript. `gate` has `onFail: { retry: 'work', max: 2 }` and takes
+1s/2s/3s on its three attempts (told apart on sight); `work` sleeps a flat 2s on each of its
+three. Lifted out of that run's real `runs.json` with exactly two documented edits, the same
+discipline `thread-run.record.json` follows for its own two: a terminal `done` run status (the
+captured run really does finish this way; named here only because every fixture in this
+directory states its status edits explicitly), and the `attempts` stamps normalized to exact
+millisecond intervals — 1000/2000/3000ms on `gate`, 2000ms on each `work` attempt — so the
+rendered strings (`0:01`, `0:02`, `0:03`, and a `gate` total of `0:06`) are pinned by arithmetic
+instead of by how loaded the box was when the fixture run executed.
+
+**It is NOT a pure capture, and the distinction matters.** It was captured on branch
+`cez/6ed5bc42`, against that branch's own attempt-tracking implementation — a second,
+independent build of this feature that was dropped when `main`'s landed first. The record was
+then **rewritten field by field** to `main`'s stored shape: `endedAt` → `finishedAt`, and the
+per-attempt `n` removed (`stepAttempts` derives the index from array position). So the usual
+claim for a captured fixture — *"this proves `RunStore.updateStep` really writes this shape"* —
+**does not hold for this file**. What proves that is `packages/cezar/src/runs/store.test.ts`
+(twelve cases over `accumulateStepAttempts`); this fixture proves only that the RENDERER reads
+the shape those tests pin. Treat it as hand-written for the purposes of what it can attest.
+
+To regenerate honestly, capture it on `main`: boot `CEZ_DRY_RUN=1 node dist/index.js serve
+--repo <tmp-git-repo>`, run a workflow whose `gate` step carries `onFail: { retry: 'work',
+max: 2 }` and fails twice, then copy that run's entry out of `<repo>/.ai/cezar/runs.json` and
+normalize the `attempts` timestamps to the millisecond intervals above. Doing so would let this
+paragraph be deleted and the stronger claim restored.

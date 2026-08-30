@@ -276,4 +276,38 @@ describe('POST /api/v1/workspace/runs', () => {
       expect(started).toHaveLength(0);
     });
   });
+
+  /**
+   * Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`).
+   * `workspaceRunStartInputSchema` inherits `reviewSameModel`/`reviewCrossModel` from
+   * `createRunInputBaseSchema` by omission (no `.strict()` rejection), and this route must thread
+   * both into `deps.resolveWorkflow` exactly like `workflow`/`steps` — the filtering itself lives
+   * inside that injected function, so this only pins that the fields actually reach it.
+   */
+  it('threads reviewSameModel/reviewCrossModel into resolveWorkflow', async () => {
+    let received: unknown;
+    const { app, started } = harness({
+      resolveWorkflow: async (_root, body) => {
+        received = body;
+        return { workflow: WORKFLOW };
+      },
+    });
+    const res = await post(app, { task: 'x', reviewSameModel: false, reviewCrossModel: true });
+    expect(res.status).toBe(201);
+    expect(received).toMatchObject({ reviewSameModel: false, reviewCrossModel: true });
+    expect(started).toHaveLength(1);
+  });
+
+  it('omits both keys from resolveWorkflow when the body never named them', async () => {
+    let received: unknown;
+    const { app } = harness({
+      resolveWorkflow: async (_root, body) => {
+        received = body;
+        return { workflow: WORKFLOW };
+      },
+    });
+    expect((await post(app, { task: 'x' })).status).toBe(201);
+    expect(received).not.toHaveProperty('reviewSameModel');
+    expect(received).not.toHaveProperty('reviewCrossModel');
+  });
 });

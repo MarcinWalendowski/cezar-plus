@@ -452,6 +452,35 @@ export function inputToTasksPlan(def: WorkflowDef, autoStart: boolean): Workflow
   };
 }
 
+/** The two step ids the composer's review toggles target (`.ai/specs/2026-08-30-composer-review-
+ *  step-toggles.md`). Named so the toggle and the step that defines self/cross-model review can
+ *  never drift apart. */
+export const REVIEW_SAME_MODEL_STEP_ID = 'review-spec-local';
+export const REVIEW_CROSS_MODEL_STEP_ID = 'review-spec';
+
+/**
+ * Composer opt-out for `spec-to-deploy`'s two review stages. Both toggles default to `true`
+ * (today's unconditional behaviour) — only an EXPLICIT `false` drops the matching step. Generic
+ * over step id, not workflow name: applies to `spec-to-deploy`, its codex sibling, and any repo's
+ * own file override that happens to carry the same ids. A workflow with neither id (`quick-task`,
+ * `note-to-spec`, a skill's one-step inline chain, `input-to-tasks`) is returned unchanged.
+ *
+ * Safe to call unconditionally: `stepsIssue` is not re-run because neither id is ever an
+ * `onFail.retry` TARGET in any built-in (`review-spec-local`/`review-spec` only retry OUT, to
+ * `spec`) — removing one cannot leave a dangling backward reference.
+ */
+export function applyReviewStepToggles(
+  def: WorkflowDef,
+  opts: { reviewSameModel?: boolean; reviewCrossModel?: boolean },
+): WorkflowDef {
+  const drop = new Set<string>();
+  if (opts.reviewSameModel === false) drop.add(REVIEW_SAME_MODEL_STEP_ID);
+  if (opts.reviewCrossModel === false) drop.add(REVIEW_CROSS_MODEL_STEP_ID);
+  if (drop.size === 0) return def;
+  const steps = def.steps.filter((step) => !drop.has(step.id));
+  return steps.length === def.steps.length ? def : { ...def, steps };
+}
+
 /**
  * The ONLY workflow a workspace-scoped task runs
  * (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`).
@@ -913,6 +942,14 @@ const SPEC_AUTHORING_MODEL = 'opus';
  * pinned to Claude, one pinned to codex, and seven of nine carrying no runner at all. See
  * `pinWorkflowRunner`/`SPEC_TO_DEPLOY_CODEX_NAME` below for the opt-in sibling that pins all nine
  * to codex, `spec` included.
+ *
+ * **CORRECTED AGAIN 2026-08-29 (`.ai/specs/2026-08-29-global-provider-toggle.md`, found
+ * re-reading the chain for that spec's P3):** the correction above was itself already stale when
+ * written — the same D1 that moved `review-spec` to codex also added `review-spec-local`, which
+ * pins `runner: SPEC_AUTHORING_RUNNER` (Claude) too. The chain is TEN steps, not nine, and THREE
+ * are pinned, not two: `spec` and `review-spec-local` on Claude, `review-spec` on codex. Seven of
+ * ten carry no runner (the count of unpinned steps happens to still be seven; only the denominator
+ * and the Claude-pin count were wrong). The opt-in sibling pins all TEN, not nine.
  *
  * Original text follows, unedited:
  *

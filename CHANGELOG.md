@@ -140,7 +140,10 @@
   (`.ai/specs/2026-08-25-split-active-backlog-tables.md`'s Filed board Active/Backlog split) is the
   first spec run all the way through: composite `<project>:<todoId>` row keys, a real
   Resource-Timing request log proving the two-request-per-load design, exact-sequence sort waits
-  (not just `aria-sort`), and an assertion that analytics events reach disk.
+  (not just `aria-sort`), and an assertion that analytics events reach disk. **QA Needed, not
+  Done:** this closes the local half only — the deployed-bytes check against `/opt/cezar` and the
+  owner's own authenticated pass on `https://cockpit.example.com` (design spec §9/§10) have not
+  run, tracked as todo `7e35a93d-18ec-4afc-a5b3-eaaac14a1a0b`.
 
 - **Cold-project intent discovery is now verified on production, and its verification runbook
   no longer lies.** The runtime fix (`809c8220`) shipped on 2026-08-25 and reached production
