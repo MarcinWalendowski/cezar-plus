@@ -1,0 +1,49 @@
+# Brief: Deploy acceptance measurement
+
+**Gathered:** 2026-08-30  
+**Task:** `e2593272-f949-4e4f-83e4-e467ff251320`, step 1 of 10, Gather the record  
+**Status:** research only. No spec, code, or tests were written or run.
+
+## Problem in this repository's terms
+
+The non-disruptive deploy acceptance is not blocked on host provisioning or missing credentials. The production blue-green path is live, socket-activated, health-gated, and can isolate brokers in a user scope. What remains open is measured failure: a credentialed probe reported one refused connection and 94 SSE sequence gaps across a real cutover. Separately, a controlled blue-green re-measurement found the recovered run was re-launched rather than re-attached, which invalidates the historical criterion-1 conclusion.
+
+The next spec must treat these as observed facts, not as a claim that every gap is necessarily cutover loss. Current code explains the raw sequence holes: live-only ephemeral events consume sequence values but are deliberately not persisted, so replay cannot reproduce them. The design question is whether the wire contract must expose only durable sequence continuity or encode the distinction explicitly. It must also preserve the distinction between a run process surviving and the restarted service successfully adopting that same broker and spool.
+
+## What the record already decided
+
+- The canonical decision record is KB `specs-594acc539b36`, backed by [2026-08-19-non-disruptive-cezar-self-deploy.md](../2026-08-19-non-disruptive-cezar-self-deploy.md:3). Its current status is QA Needed and reopened. This acceptance work is a quality improvement, not a prerequisite for cezar self-deploy ([same spec](../2026-08-19-non-disruptive-cezar-self-deploy.md:3)).
+- Provisioning criteria are already met: `/opt/cezar` is an atomic release symlink, `cezar.socket` is active, the unit has `KillMode=process` and `Delegate=yes`, the health endpoint reports `scope` isolation, and `/api/v1/ready` returned 200 ([same spec](../2026-08-19-non-disruptive-cezar-self-deploy.md:60)). Do not repeat host provisioning.
+- The credentialed 2026-08-23 probe against release `20260823T194110Z-9c65f9e9` collected 544 successful HTTP samples, 2,164 SSE events through one reconnect, 55 running samples, no duplicate sequences, and no interrupted event. It nevertheless failed, correctly, on one refused connection and 94 sequence gaps ([same spec](../2026-08-19-non-disruptive-cezar-self-deploy.md:212)). This is no longer a credentials or zero-observation problem. Task `8dc8bf3a` is done.
+- The 94 gaps are not established as cutover loss: zero-reconnect controls in the same session recorded 73 gaps in 2,116 events and 82 in 2,147 ([same spec](../2026-08-19-non-disruptive-cezar-self-deploy.md:238)). Current code supplies a causal explanation for raw holes: `emitEphemeral` consumes a sequence number without persisting the event and explicitly permits the resulting gaps ([store.ts](../../packages/cezar/src/runs/store.ts:1426)). Open task `8206c158-508c-46e5-ac01-3bd70915072d` owns the protocol decision, not a presumed deploy-loss fix ([todos.json](/var/lib/cezar/loki-labs/cezar/.ai/cezar/todos.json:3028)).
+- Open task `6c89af7c-f5d3-41dd-8c8b-85ee672d3181` separately owns the keep-alive reset race and client latency. The prior acceptance run saw 3 resets in 4,864 keep-alive requests and about 1.1 seconds worst-case latency, while fresh TCP requests had zero failures ([self-deploy spec](../2026-08-19-non-disruptive-cezar-self-deploy.md:166)); its tracker requires zero keep-alive connect errors over ten cutovers ([todos.json](/var/lib/cezar/loki-labs/cezar/.ai/cezar/todos.json:1399)). Do not fold that work into sequence semantics.
+- The historical evidence for re-attachment, unchanged broker pid and byte-identical spool/transcript prefixes, exists ([self-deploy spec](../2026-08-19-non-disruptive-cezar-self-deploy.md:150)). But a later controlled blue-green observation recorded that the broker and Claude pids were gone, the spool prefix changed, and a newer broker was named in `meta.json`; recovery chose a new session instead of re-attaching ([same spec](../2026-08-19-non-disruptive-cezar-self-deploy.md:1251)). A bare stop/start surviving is not evidence for blue-green cutover behavior ([same spec](../2026-08-19-non-disruptive-cezar-self-deploy.md:1353)).
+- The bad-build smoke gate has been exercised fail-closed, without symlink flip or restart, but the candidate-that-boots-then-fails-readiness auto-rollback branch remains unexercised ([same spec](../2026-08-19-non-disruptive-cezar-self-deploy.md:102)). The deployer's `gapMs` log is not a client-visible availability measure ([same spec](../2026-08-19-non-disruptive-cezar-self-deploy.md:99)).
+
+## Code actually involved
+
+- [deploy-e2e-probe.mjs](../../packages/cezar/scripts/deploy-e2e-probe.mjs:105) is intentionally dependency-free and persists a report outside the service it measures. It polls `/api/v1/ready`, samples the target run, and reconnects to its SSE stream using `Last-Event-ID` ([lines 105, 129, 157](../../packages/cezar/scripts/deploy-e2e-probe.mjs:157)). Sequence continuity is checked for gaps and duplicates ([line 250](../../packages/cezar/scripts/deploy-e2e-probe.mjs:250)); no reconnect, auth failure, or no run id becomes `not-measured`, never PASS ([lines 265, 300](../../packages/cezar/scripts/deploy-e2e-probe.mjs:265)). The probe's `gapMs` is maximum client-observed ready-poll latency ([line 325](../../packages/cezar/scripts/deploy-e2e-probe.mjs:325)).
+- [deploy-e2e-probe.test.ts](../../packages/cezar/test/e2e/deploy-e2e-probe.test.ts:172) covers the probe's non-vacuity and synthetic reconnect behavior, but does not execute a real service cutover.
+- The SSE route combines `afterSeq` with `Last-Event-ID`, subscribes before replay, buffers live events while replaying, then flushes the buffer ([server.ts](../../packages/cezar/src/server/server.ts:6693)). This buffering and the route's `maxSeq` handling are focal points for investigation, but the record does not establish them as the cause of the measured gaps.
+- [store.ts](../../packages/cezar/src/runs/store.ts:1264) writes durable events before emitting them live and resumes the next sequence from persisted history after restart ([line 1571](../../packages/cezar/src/runs/store.ts:1571)). Its separate `emitEphemeral` path increments the same counter without writing an event ([line 1426](../../packages/cezar/src/runs/store.ts:1426)), which explains why a client comparing only received numeric sequence values sees holes. Any fix must not reset or reuse event sequence values.
+- Brokered recovery attempts re-attachment before its legacy continuation path ([run.ts](../../packages/cezar/src/workflows/run.ts:2619)); successful re-attachment requires a viable live spool and matching run and step, resumes from durable `consumedOffset`, and emits `this run kept going` ([same file](../../packages/cezar/src/workflows/run.ts:2918)). [brokered-session.ts](../../packages/cezar/src/core/brokered-session.ts:175) advances the durable offset only after complete spool lines reach the consumer.
+- The release mechanism smoke-boots before symlink flip and restarts, then rolls back and restarts the previous release if post-flip readiness fails ([deploy-strategy.ts](../../packages/cezar/src/server-install/deploy-strategy.ts:126)). Existing tests are host-behavior unit tests, not client-observed production acceptance.
+
+## Prior decisions a spec must not contradict
+
+- Do not reopen or duplicate `8dc8bf3a`'s completed harness work. Commit `587db317` made the probe's assertions non-vacuous and added the project-targeting route needed for the credentialed run.
+- Do not call the 94 gaps cutover loss: the raw holes are expected under the present durable-plus-ephemeral allocation model, while the sequence-semantics decision remains separately owned by `8206c158`.
+- Do not treat `6c89af7c` as SSE data loss. It owns refusal/reset and latency behavior.
+- Do not use process survival, a fresh continuation, or a bare stop/start as a substitute for blue-green re-attachment. The acceptance must observe retained broker identity, append-only spool continuity, persisted offset use, and the absence of a re-launch.
+- Do not use deployer timing as client-visible `gap_ms`. The probe is the source for client measurement.
+
+## Open questions for the next spec
+
+1. Should the run-event protocol preserve a globally continuous sequence for every wire event, or should the probe compare only the durable subset? The answer needs reconnect and no-reconnect controls with an agreed interpretation before changing assertions or protocol behavior.
+2. Which re-attachment precondition fails on the blue-green path: persisted `consumedOffset` or `spoolDir`, release-flip path resolution, broker isolation, or another recovery guard? The next measurement must collect before-and-after broker pid, `meta.json`, spool prefix/hash and offset evidence outside the replaced process.
+3. What exact production acceptance proves re-attachment, rather than continuation re-launch, while safely retaining per-run artifacts?
+4. How will the boot-then-readiness-fail rollback branch be exercised with the continuous probe recording client outcomes, and how will its result update the parent spec status without treating injected unit tests as E2E?
+
+## What was not found
+
+`cezar todo list` in this worktree returned no filed todos. The repository tracker nonetheless contains the parent acceptance task and the distinct open owners: `8206c158` for sequence semantics, `6c89af7c` for pooled-connection reset and latency, plus `45813876`, `4afa1b4b`, and `75fe00ab` for blue-green re-attachment, adoption, and orphan analysis. No corpus entry id for `cezar-prod-rootless-deploy-provisioning` was discoverable from the lexical KB search, though the parent spec cites that corpus record.
