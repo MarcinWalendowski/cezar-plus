@@ -721,6 +721,22 @@ describe('useGlobalEvents — reconcile doctrine', () => {
     expect(invalidate).not.toHaveBeenCalled()
   })
 
+  it('invalidates only the named project source cache on a source-sync event', () => {
+    client.setQueryData(['boot', 'sources'], { connections: [] })
+    client.setQueryData(['other-project', 'sources'], { connections: [] })
+    const { source } = mount()
+
+    source.emit('source-sync', JSON.stringify({
+      project: 'boot',
+      connectionId: 'source-1',
+      revision: 3,
+      syncState: 'ok',
+    }))
+
+    expect(client.getQueryState(['boot', 'sources'])?.isInvalidated).toBe(true)
+    expect(client.getQueryState(['other-project', 'sources'])?.isInvalidated).toBe(false)
+  })
+
   it('refetches the authoritative endpoints on reconnect', () => {
     const { source } = mount()
     source.open()

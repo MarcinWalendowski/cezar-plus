@@ -15,13 +15,16 @@ import { collectSecretValues, redactDeep } from '../core/secret-redaction.ts';
 import {
   sourceConnectionSchema,
   sourceConnectionsFileSchema,
+  sourceCommentRecordSchema,
   sourceLogRecordSchema,
   sourceStateFileSchema,
   sourceStateSchema,
+  type SourceCommentRecord,
   type SourceConnection,
   type SourceLogRecord,
   type SourceState,
 } from './types.ts';
+import type { SourceCommentEntry } from './provider-types.ts';
 
 /**
  * `sources.json` + `source-state.json` + `source-log.ndjson` + `sources-poll.lock` (W1.5). Storage
@@ -39,8 +42,11 @@ import {
 const CONNECTIONS = 'sources.json';
 const STATE = 'source-state.json';
 const LOG = 'source-log.ndjson';
+const COMMENTS = 'source-comments.ndjson';
 const POLL_LOCK = 'sources-poll.lock';
+const STORE_LOCK = 'sources-store.lock';
 const RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
+const STORE_LOCK_TIMEOUT_MS = 30_000;
 
 type ConnectionsFile = ReturnType<typeof sourceConnectionsFileSchema.parse>;
 type StateFile = ReturnType<typeof sourceStateFileSchema.parse>;
@@ -56,6 +62,8 @@ export class SourceStore {
   private connections = new Map<string, SourceConnection>();
   private warned = new Set<string>();
   private logSeq = 0;
+  private commentSeq = 0;
+  private storeLockDepth = 0;
   private readonly now: () => Date;
   private readonly secrets = collectSecretValues();
 
@@ -72,6 +80,11 @@ export class SourceStore {
     this.now = options.now ?? (() => new Date());
   }
 
+  /** Reload all durable source state after another process released the project lease. */
+  reload(): void {
+    this.load();
+  }
+
   // ---- connections (sources.json) --------------------------------------------------------
 
   list(): SourceConnection[] {
@@ -86,18 +99,20 @@ export class SourceStore {
     input: Omit<SourceConnection, 'id' | 'revision' | 'createdAt' | 'updatedAt'>,
     id: string = randomUUID(),
   ): SourceConnection {
-    if (this.connections.has(id) || this.isTombstoned(id)) throw new Error('source connection id unavailable');
-    const now = this.now().toISOString();
-    const connection = sourceConnectionSchema.parse({
-      ...input,
-      id,
-      revision: 1,
-      createdAt: now,
-      updatedAt: now,
+    return this.withStoreLock(() => {
+      if (this.connections.has(id) || this.isTombstoned(id)) throw new Error('source connection id unavailable');
+      const now = this.now().toISOString();
+      const connection = sourceConnectionSchema.parse({
+        ...input,
+        id,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      });
+      this.connections.set(id, connection);
+      this.persistConnections();
+      return connection;
     });
-    this.connections.set(id, connection);
-    this.persistConnections();
-    return connection;
   }
 
   update(
@@ -105,33 +120,37 @@ export class SourceStore {
     expectedRevision: number,
     input: Omit<SourceConnection, 'id' | 'revision' | 'createdAt' | 'updatedAt'>,
   ): SourceConnection {
-    const current = this.connections.get(id);
-    if (!current) throw new Error('source connection not found');
-    if (current.revision !== expectedRevision) throw new Error('source connection revision conflict');
-    const connection = sourceConnectionSchema.parse({
-      ...current,
-      ...input,
-      id,
-      revision: current.revision + 1,
-      createdAt: current.createdAt,
-      updatedAt: this.now().toISOString(),
+    return this.withStoreLock(() => {
+      const current = this.connections.get(id);
+      if (!current) throw new Error('source connection not found');
+      if (current.revision !== expectedRevision) throw new Error('source connection revision conflict');
+      const connection = sourceConnectionSchema.parse({
+        ...current,
+        ...input,
+        id,
+        revision: current.revision + 1,
+        createdAt: current.createdAt,
+        updatedAt: this.now().toISOString(),
+      });
+      this.connections.set(id, connection);
+      const state = this.state(id);
+      if (state) this.setStateInternal(id, { ...state, revision: connection.revision });
+      this.persistConnections();
+      return connection;
     });
-    this.connections.set(id, connection);
-    const state = this.state(id);
-    if (state) this.setState(id, { ...state, revision: connection.revision });
-    this.persistConnections();
-    return connection;
   }
 
   /** Tombstone, never a hard delete (Q10) — mirrors `automations/store.ts`'s own `delete`. */
   delete(id: string): boolean {
-    if (!this.connections.delete(id)) return false;
-    this.connectionsFile.tombstones = {
-      ...this.connectionsFile.tombstones,
-      [id]: this.now().toISOString(),
-    };
-    this.persistConnections();
-    return true;
+    return this.withStoreLock(() => {
+      if (!this.connections.delete(id)) return false;
+      this.connectionsFile.tombstones = {
+        ...this.connectionsFile.tombstones,
+        [id]: this.now().toISOString(),
+      };
+      this.persistConnections();
+      return true;
+    });
   }
 
   // ---- per-connection runtime state (source-state.json) --------------------------------
@@ -141,9 +160,7 @@ export class SourceStore {
   }
 
   setState(id: string, state: SourceState): void {
-    const parsed = sourceStateSchema.parse(state);
-    this.stateFile.states = { ...this.stateFile.states, [id]: parsed };
-    this.atomicJson(STATE, this.stateFile);
+    this.withStoreLock(() => this.setStateInternal(id, state));
   }
 
   /**
@@ -152,10 +169,12 @@ export class SourceStore {
    * something called this, never because a handler read the clock.
    */
   updateState(id: string, patch: Partial<SourceState>): SourceState {
-    const current = this.state(id) ?? sourceStateSchema.parse({});
-    const next = sourceStateSchema.parse({ ...current, ...patch });
-    this.setState(id, next);
-    return next;
+    return this.withStoreLock(() => {
+      const current = this.state(id) ?? sourceStateSchema.parse({});
+      const next = sourceStateSchema.parse({ ...current, ...patch });
+      this.setStateInternal(id, next);
+      return next;
+    });
   }
 
   isAdopted(connectionId: string, externalId: string): boolean {
@@ -168,9 +187,11 @@ export class SourceStore {
    * moves the file; this marks the connection's state. A route handler calls both.
    */
   adopt(connectionId: string, externalId: string): void {
-    const current = this.state(connectionId) ?? sourceStateSchema.parse({});
-    if (current.adoptedExternalIds.includes(externalId)) return;
-    this.updateState(connectionId, { adoptedExternalIds: [...current.adoptedExternalIds, externalId] });
+    this.withStoreLock(() => {
+      const current = this.state(connectionId) ?? sourceStateSchema.parse({});
+      if (current.adoptedExternalIds.includes(externalId)) return;
+      this.setStateInternal(connectionId, { ...current, adoptedExternalIds: [...current.adoptedExternalIds, externalId] });
+    });
   }
 
   isTombstonedExternal(connectionId: string, externalId: string): boolean {
@@ -178,10 +199,13 @@ export class SourceStore {
   }
 
   tombstoneExternal(connectionId: string, externalId: string): void {
-    const current = this.state(connectionId) ?? sourceStateSchema.parse({});
-    if (current.tombstonedExternalIds.includes(externalId)) return;
-    this.updateState(connectionId, {
-      tombstonedExternalIds: [...current.tombstonedExternalIds, externalId],
+    this.withStoreLock(() => {
+      const current = this.state(connectionId) ?? sourceStateSchema.parse({});
+      if (current.tombstonedExternalIds.includes(externalId)) return;
+      this.setStateInternal(connectionId, {
+        ...current,
+        tombstonedExternalIds: [...current.tombstonedExternalIds, externalId],
+      });
     });
   }
 
@@ -190,13 +214,59 @@ export class SourceStore {
   appendLog(
     record: Omit<SourceLogRecord, 'seq' | 'ts'> & Partial<Pick<SourceLogRecord, 'ts'>>,
   ): SourceLogRecord {
-    const parsed = sourceLogRecordSchema.parse({
-      ...record,
-      seq: ++this.logSeq,
-      ts: record.ts ?? this.now().toISOString(),
+    return this.withStoreLock(() => {
+      const parsed = sourceLogRecordSchema.parse({
+        ...record,
+        seq: ++this.logSeq,
+        ts: record.ts ?? this.now().toISOString(),
+      });
+      this.appendNdjson(LOG, redactDeep(parsed, this.secrets));
+      return parsed;
     });
-    this.appendNdjson(LOG, redactDeep(parsed, this.secrets));
-    return parsed;
+  }
+
+  /** Append new provider comments once per connection/comment id. */
+  appendComments(connectionId: string, docId: string, entries: readonly SourceCommentEntry[]): SourceCommentRecord[] {
+    return this.withStoreLock(() => {
+      const existing = this.readNdjson(COMMENTS, sourceCommentRecordSchema);
+      const seen = new Set(existing.filter((row) => row.connectionId === connectionId).map((row) => row.id));
+      const added: SourceCommentRecord[] = [];
+      for (const entry of entries) {
+        if (seen.has(entry.externalId)) continue;
+        const record = sourceCommentRecordSchema.parse({
+          seq: ++this.commentSeq,
+          connectionId,
+          id: entry.externalId,
+          docId,
+          externalId: entry.externalId,
+          ...(entry.author !== undefined ? { author: entry.author } : {}),
+          body: entry.body,
+          createdAt: entry.createdAt,
+          attachments: entry.attachments,
+        });
+        this.appendNdjson(COMMENTS, redactDeep(record, this.secrets));
+        seen.add(entry.externalId);
+        added.push(record);
+      }
+      return added;
+    });
+  }
+
+  listComments(connectionId: string): SourceCommentRecord[] {
+    return this.readNdjson(COMMENTS, sourceCommentRecordSchema)
+      .filter((row) => row.connectionId === connectionId)
+      .sort((a, b) => a.seq - b.seq);
+  }
+
+  compactComments(): void {
+    this.withStoreLock(() => {
+      const retained = new Map<string, SourceCommentRecord>();
+      for (const row of this.readNdjson(COMMENTS, sourceCommentRecordSchema)) {
+        const key = `${row.connectionId}\u0000${row.id}`;
+        if (!retained.has(key)) retained.set(key, row);
+      }
+      this.rewriteNdjson(COMMENTS, [...retained.values()].sort((a, b) => a.seq - b.seq));
+    });
   }
 
   logs(
@@ -219,12 +289,16 @@ export class SourceStore {
   }
 
   compact(): void {
-    const logs = this.readNdjson(LOG, sourceLogRecordSchema);
-    this.rewriteNdjson(LOG, logs.slice(-10_000));
+    this.withStoreLock(() => {
+      const logs = this.readNdjson(LOG, sourceLogRecordSchema);
+      this.rewriteNdjson(LOG, logs.slice(-10_000));
+    });
   }
 
   maybeCompact(): void {
     if (this.readNdjson(LOG, sourceLogRecordSchema).length > 10_500) this.compact();
+    const comments = this.readNdjson(COMMENTS, sourceCommentRecordSchema);
+    if (comments.length > 10_500) this.compactComments();
   }
 
   // ---- sources-poll.lock -------------------------------------------------------------------
@@ -253,10 +327,13 @@ export class SourceStore {
 
   private load(): void {
     mkdirSync(this.dataDir, { recursive: true });
+    this.connections.clear();
     this.loadConnections();
     this.stateFile = this.readJson(STATE, sourceStateFileSchema, { version: 1, states: {} });
     const logs = this.readNdjson(LOG, sourceLogRecordSchema);
     this.logSeq = logs.at(-1)?.seq ?? 0;
+    const comments = this.readNdjson(COMMENTS, sourceCommentRecordSchema);
+    this.commentSeq = comments.at(-1)?.seq ?? 0;
   }
 
   private loadConnections(): void {
@@ -269,6 +346,12 @@ export class SourceStore {
       if (parsed.success) this.connections.set(parsed.data.id, parsed.data);
       else this.warnOnce('connections', 'Ignored an invalid source connection definition.');
     }
+  }
+
+  private setStateInternal(id: string, state: SourceState): void {
+    const parsed = sourceStateSchema.parse(state);
+    this.stateFile.states = { ...this.stateFile.states, [id]: parsed };
+    this.atomicJson(STATE, this.stateFile);
   }
 
   private persistConnections(): void {
@@ -360,6 +443,48 @@ export class SourceStore {
     if (this.warned.has(key)) return;
     this.warned.add(key);
     this.options.warn?.(message);
+  }
+
+  /** Serialize all source-file read-modify-writes across cezar processes. */
+  private withStoreLock<T>(operation: () => T): T {
+    if (this.storeLockDepth > 0) return operation();
+    mkdirSync(this.dataDir, { recursive: true });
+    const path = join(this.dataDir, STORE_LOCK);
+    const waitCell = new Int32Array(new SharedArrayBuffer(4));
+    const deadline = Date.now() + STORE_LOCK_TIMEOUT_MS;
+    let fd: number | undefined;
+    while (fd === undefined) {
+      let opened: number | undefined;
+      try {
+        opened = openSync(path, 'wx', 0o600);
+        writeFileSync(opened, JSON.stringify({ pid: process.pid, startedAt: this.now().toISOString() }));
+        fd = opened;
+      } catch {
+        if (opened !== undefined) {
+          closeSync(opened);
+          try {
+            unlinkSync(path);
+          } catch {
+            // Another process may have reclaimed the lock while the marker write failed.
+          }
+        }
+        if (Date.now() >= deadline) throw new Error('timed out waiting for the source store lock');
+        Atomics.wait(waitCell, 0, 0, 5);
+      }
+    }
+    this.storeLockDepth = 1;
+    try {
+      this.load();
+      return operation();
+    } finally {
+      this.storeLockDepth = 0;
+      closeSync(fd!);
+      try {
+        unlinkSync(path);
+      } catch {
+        // Another owner may have reclaimed a stale lock during shutdown.
+      }
+    }
   }
 }
 

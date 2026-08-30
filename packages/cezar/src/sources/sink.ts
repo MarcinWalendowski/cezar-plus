@@ -119,6 +119,10 @@ export class FileSourceSink implements SourceSink {
     await atomicWrite(localPath, serialize(updated, localBody));
   }
 
+  async backupLocal(docId: string, localVersion: string, body: string): Promise<void> {
+    await atomicWrite(join(this.conflictsDir, `${docId}.local-${localVersion.slice(0, 8)}.md`), body);
+  }
+
   async tombstone(docId: string, _at: string): Promise<void> {
     const localPath = join(this.mirrorDir, `${docId}.md`);
     const raw = await tryRead(localPath);

@@ -9,7 +9,7 @@ import {
   type SourceState,
   type SourceSyncState,
 } from './types.ts';
-import type { SourceDocumentRef, SourceProvider } from './provider-types.ts';
+import type { SourceCommentEntry, SourceDocumentRef, SourceProvider } from './provider-types.ts';
 import type { SourceStore } from './store.ts';
 
 /**
@@ -34,12 +34,11 @@ import type { SourceStore } from './store.ts';
  * this package's file, to persist a pending-tombstone set across ticks). A document flagged this way
  * is picked up again whenever a LATER tick's own poll happens to re-report it.
  *
- * **Backoff is generic exponential, not 429-specific `Retry-After`.** `SourceChangePage` carries no
- * HTTP status or `Retry-After` value across the provider seam (that detail stays inside
- * `notion/client.ts`/`provider.ts`, W1.4/W2.2), so this file distinguishes "the call budget stopped
- * us" (`truncated: true`, no backoff, just resume) from "a request actually failed"
- * (`truncated: false`, exponential backoff with full jitter), per `SourceChangePage`'s own doc
- * comment on `truncated`.
+ * **Backoff is exponential with provider lower bounds.** `SourceChangePage` and
+ * `SourceCommentPage` carry an optional `retryAfterMs` lower bound across the provider seam. This
+ * file distinguishes "the call budget stopped us" (`truncated: true`, no backoff, just resume) from
+ * "a request actually failed" (`truncated: false`, exponential backoff with full jitter), while
+ * ensuring a provider's retry hint is never shortened.
  *
  * **`docId`'s "workspaceId" is `connection.id`.** The spec's Q12 formula is
  * `sha256(kind + ':' + workspaceId + ':' + externalId)`; `SourceConnection` (W1.5) carries no
@@ -61,17 +60,13 @@ export interface SourceSyncOptions {
    *  `<repoRoot>/.ai/cezar/sources` (D3), forwarded verbatim to `sink.notifyChanged` after every
    *  commit (D15/D25). Not derived from `sink`: the `SourceSink` port exposes no path accessor. */
   mirrorRoot: string;
-  /** HTTP call budget passed to each collection's `pollChanges` call this tick (spec step 4: "a
-   *  per-connection token bucket and a per-tick call budget"). Applied identically per collection:
-   *  `SourceChangePage` reports no `callsUsed`, so a single shared, decrementing budget across
-   *  multiple collections in one tick is not something this seam can track precisely. */
+  /** One shared HTTP call budget across all collections and comment pages in this tick. */
   callBudget?: number;
   now?: () => Date;
 }
 
 export interface SourceSyncResult {
-  /** `false` only when the lease was held by another process, or the connection was disabled,
-   *  archived, or still backed off: the tick did nothing at all. */
+  /** `false` when the lease was held, or the connection was disabled, archived, or backed off. */
   ran: boolean;
   syncState: SourceSyncState;
   reason?: string;
@@ -89,10 +84,15 @@ export async function runSourceSync(options: SourceSyncOptions): Promise<SourceS
   // Step 1: lease. Held means this tick returns immediately, copying `automations/store.ts`'s
   // `O_EXCL` lease idiom (W1.5's `store.ts` already implements `acquireLease`).
   const lease = store.acquireLease();
-  if (!lease) return notRunResult(store.state(connection.id));
+  if (!lease) return notRunResult(store.state(connection.id), 'lease-held');
 
   try {
-    return await sweep(options, now);
+    // A manual route and the background scheduler can be separate processes. The poll lease
+    // serializes them, and this reload makes the winner's sweep start from the newest definitions.
+    store.reload();
+    const currentConnection = store.get(connection.id);
+    if (!currentConnection) return notRunResult(store.state(connection.id), 'connection-removed');
+    return await sweep({ ...options, connection: currentConnection }, now);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const nowIso = now().toISOString();
@@ -118,10 +118,11 @@ export async function runSourceSync(options: SourceSyncOptions): Promise<SourceS
   }
 }
 
-function notRunResult(state: SourceState | undefined): SourceSyncResult {
+function notRunResult(state: SourceState | undefined, reason?: string): SourceSyncResult {
   return {
     ran: false,
     syncState: state?.syncState ?? 'never-synced',
+    ...(reason ? { reason } : {}),
     documentCount: state?.documentCount ?? 0,
     conflictCount: state?.conflictCount ?? 0,
     tombstoneCount: state?.tombstoneCount ?? 0,
@@ -136,9 +137,10 @@ async function sweep(options: SourceSyncOptions, now: () => Date): Promise<Sourc
 
   // Step 2: skip. `syncState` is left untouched, this tick never happened.
   const priorState = store.state(id) ?? sourceStateSchema.parse({});
-  if (!connection.enabled || connection.mode === 'archived') return notRunResult(priorState);
+  if (!connection.enabled) return notRunResult(priorState, 'disabled');
+  if (connection.mode === 'archived') return notRunResult(priorState, 'archived');
   if (priorState.backoffUntil && Date.parse(priorState.backoffUntil) > now().getTime()) {
-    return notRunResult(priorState);
+    return notRunResult(priorState, 'backoff');
   }
 
   store.updateState(id, { lastAttemptAt: nowIso() });
@@ -187,17 +189,26 @@ async function sweep(options: SourceSyncOptions, now: () => Date): Promise<Sourc
   let newPageCursor: SourcePageCursor | undefined;
   let errorOccurred = false;
   let errorMessage: string | undefined;
+  let retryAfterMs: number | undefined;
+  let remainingBudget = options.callBudget ?? DEFAULT_CALL_BUDGET;
   const changedDocIds: string[] = [];
   const tombstoneCandidates: Array<{ docId: string; externalId: string }> = [];
 
   for (let i = startIndex; i < collections.length; i++) {
     const collection = collections[i]!;
+    if (remainingBudget <= 0) {
+      allComplete = false;
+      newPageCursor = { collectionExternalId: collection.externalId, cursor: '' };
+      break;
+    }
     const resumeCursor = i === startIndex ? (priorState.pageCursor?.cursor ?? null) : null;
     const page = await provider.pollChanges(watermarks[collection.externalId] ?? null, {
       collectionExternalId: collection.externalId,
       cursor: resumeCursor,
-      callBudget: options.callBudget ?? DEFAULT_CALL_BUDGET,
+      callBudget: remainingBudget,
     });
+    remainingBudget -= page.callsUsed ?? remainingBudget;
+    retryAfterMs = Math.max(retryAfterMs ?? 0, page.retryAfterMs ?? 0) || undefined;
 
     for (const change of page.changes) {
       if (change.type === 'upsert') {
@@ -222,13 +233,25 @@ async function sweep(options: SourceSyncOptions, now: () => Date): Promise<Sourc
         };
       }
       if (!page.truncated) {
-        // A real request failure (401/403/429/5xx/network), not a budget cutoff. See this file's
-        // header on why this is generic exponential backoff rather than 429-specific `Retry-After`.
         errorOccurred = true;
         errorMessage = `enumeration failed for collection "${collection.externalId}"`;
       }
+      if (page.retryAfterMs !== undefined) {
+        errorOccurred = true;
+        errorMessage = `enumeration retry requested for collection "${collection.externalId}"`;
+      }
       break;
     }
+  }
+
+  const commentSweep = await sweepComments(options, priorState, now, remainingBudget);
+  remainingBudget = commentSweep.remainingBudget;
+  if (commentSweep.retryAfterMs !== undefined) {
+    retryAfterMs = Math.max(retryAfterMs ?? 0, commentSweep.retryAfterMs) || undefined;
+  }
+  if (commentSweep.errorMessage) {
+    errorOccurred = true;
+    errorMessage = commentSweep.errorMessage;
   }
 
   // Step 9: tombstone, gated on the WHOLE tick's walk (resume point to the end) having completed.
@@ -257,11 +280,15 @@ async function sweep(options: SourceSyncOptions, now: () => Date): Promise<Sourc
     tombstoneCount: (priorState.tombstoneCount ?? 0) + tombstonesThisTick,
     syncState: errorOccurred ? 'error' : 'ok',
     syncStateAt: commitIso,
+    commentWatermarks: commentSweep.commentWatermarks,
+    commentPageCursors: commentSweep.commentPageCursors,
+    commentSweepAt: commentSweep.commentSweepAt,
+    unresolvedComments: priorState.unresolvedComments + commentSweep.addedComments,
     backoffUntil: undefined,
     lastError: undefined,
   };
   if (errorOccurred) {
-    const backoffMs = nextBackoffMs(priorState);
+    const backoffMs = nextBackoffMs(priorState, retryAfterMs);
     patch.backoffUntil = new Date(now().getTime() + backoffMs).toISOString();
     patch.lastError = {
       at: commitIso,
@@ -290,6 +317,96 @@ async function sweep(options: SourceSyncOptions, now: () => Date): Promise<Sourc
 }
 
 type UpsertOutcome = { kind: 'written' | 'conflict'; docId: string } | { kind: 'skipped' };
+
+interface CommentSweepResult {
+  commentWatermarks: Record<string, string>;
+  commentPageCursors: Record<string, string>;
+  commentSweepAt: Record<string, string>;
+  addedComments: number;
+  remainingBudget: number;
+  retryAfterMs?: number;
+  errorMessage?: string;
+}
+
+async function sweepComments(
+  options: SourceSyncOptions,
+  priorState: SourceState,
+  now: () => Date,
+  budget: number,
+): Promise<CommentSweepResult> {
+  const { connection, store, sink, provider } = options;
+  const commentWatermarks = { ...priorState.commentWatermarks };
+  const commentPageCursors = { ...priorState.commentPageCursors };
+  const commentSweepAt = { ...priorState.commentSweepAt };
+  if (!connection.watchComments || !provider.capabilities.comments || !provider.listComments || budget <= 0) {
+    return {
+      commentWatermarks,
+      commentPageCursors,
+      commentSweepAt,
+      addedComments: 0,
+      remainingBudget: budget,
+    };
+  }
+
+  const metas = await sink.list(connection.id);
+  metas.sort((a, b) => {
+    const left = Date.parse(commentSweepAt[a.docId] ?? '') || 0;
+    const right = Date.parse(commentSweepAt[b.docId] ?? '') || 0;
+    return left - right || a.docId.localeCompare(b.docId);
+  });
+  let remainingBudget = budget;
+  let addedComments = 0;
+  let retryAfterMs: number | undefined;
+  let errorMessage: string | undefined;
+
+  for (const meta of metas) {
+    if (remainingBudget <= 0) break;
+    const ref: SourceDocumentRef = {
+      externalId: meta.source.externalId,
+      collectionExternalId: meta.collectionExternalId,
+      ...(meta.parentExternalId ? { parentExternalId: meta.parentExternalId } : {}),
+      title: meta.title,
+      url: meta.source.url,
+      remoteVersion: meta.remoteVersionSeen ?? meta.source.remoteVersion,
+      docType: meta.docType,
+      properties: meta.properties,
+    };
+    const page = await provider.listComments(ref, commentWatermarks[meta.docId], {
+      cursor: commentPageCursors[meta.docId] ?? null,
+      callBudget: remainingBudget,
+    });
+    remainingBudget -= page.callsUsed ?? remainingBudget;
+    retryAfterMs = Math.max(retryAfterMs ?? 0, page.retryAfterMs ?? 0) || undefined;
+    const added = store.appendComments(connection.id, meta.docId, page.comments as SourceCommentEntry[]);
+    addedComments += added.length;
+
+    if (page.complete) {
+      delete commentPageCursors[meta.docId];
+      const latest = page.comments.reduce<string | undefined>(
+        (current, comment) => (!current || comment.createdAt > current ? comment.createdAt : current),
+        commentWatermarks[meta.docId],
+      );
+      if (latest) commentWatermarks[meta.docId] = latest;
+      commentSweepAt[meta.docId] = now().toISOString();
+    } else {
+      if (page.nextPageCursor) commentPageCursors[meta.docId] = page.nextPageCursor;
+      if (!page.truncated || page.retryAfterMs !== undefined) {
+        errorMessage = `comment enumeration failed for document "${meta.docId}"`;
+      }
+      break;
+    }
+  }
+
+  return {
+    commentWatermarks,
+    commentPageCursors,
+    commentSweepAt,
+    addedComments,
+    remainingBudget,
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+    ...(errorMessage ? { errorMessage } : {}),
+  };
+}
 
 async function processUpsert(
   options: SourceSyncOptions,
@@ -371,11 +488,13 @@ export function computeDocId(connection: Pick<SourceConnection, 'kind' | 'id'>, 
  * the `lastError` that set it, zero when there was no prior backoff, which starts the sequence at
  * the 60s base.
  */
-function nextBackoffMs(state: SourceState): number {
+function nextBackoffMs(state: SourceState, retryAfterMs = 0): number {
   const previousCapMs =
     state.backoffUntil && state.lastError
       ? Math.max(0, Date.parse(state.backoffUntil) - Date.parse(state.lastError.at))
       : 0;
   const cap = Math.min(BACKOFF_CEILING_MS, previousCapMs > 0 ? previousCapMs * 2 : BACKOFF_BASE_MS);
-  return Math.floor(Math.random() * cap);
+  const lowerBound = Math.max(0, retryAfterMs);
+  if (lowerBound >= cap) return lowerBound;
+  return lowerBound + Math.floor(Math.random() * (cap - lowerBound));
 }

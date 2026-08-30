@@ -80,6 +80,8 @@ export function activateOptionalStores(opts: {
   projectId: string;
   root: string;
   dataDir: string;
+  /** Runtime-owned store, shared with the workspace source scheduler. */
+  sourceStore?: SourceStore;
   /** The host the server bound to, for the hosted-mode decision — same value
    *  `resolveCapabilities(env, bindHost)` reads. Omitted reads as loopback. */
   bindHost?: string;
@@ -118,7 +120,7 @@ export function activateOptionalStores(opts: {
   let sourceStore: SourceStore | undefined;
   if (env.CEZ_SOURCES === '1') {
     try {
-      sourceStore = SourceStore.open(dataDir);
+      sourceStore = opts.sourceStore ?? SourceStore.open(dataDir);
     } catch (err) {
       console.warn(
         `[cez] external sources store failed to open for project "${projectId}": ${describeError(err)}`,
@@ -191,6 +193,8 @@ export interface ProjectContextDeps {
    *  injects the workspace automation coordinator's cached store so API
    *  mutations and scheduler reads share the same in-memory state. */
   automationStore?: (projectId: string, root: string) => AutomationStore;
+  /** Runtime-owned source store shared by routes, lazy contexts and the scheduler. */
+  sourceStore?: (projectId: string, root: string) => SourceStore | undefined;
   /** Workspace-wide parallel-cap semaphore (spec 2026-07-20, step 2.5). Boot
    *  passes the ONE instance it already gave the boot manager, so every
    *  project's RunManager counts against the same `resources.maxParallel`.
@@ -462,6 +466,7 @@ export class ProjectContexts {
       root: project.root,
       dataDir,
       bindHost: this.deps.bindHost,
+      sourceStore: this.deps.sourceStore?.(project.id, project.root),
     });
 
     let sweepTimer: NodeJS.Timeout | undefined;

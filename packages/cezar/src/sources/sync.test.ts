@@ -47,6 +47,9 @@ function refFor(externalId: string, remoteVersion = `v-${externalId}`): SourceDo
 interface StubProviderOptions {
   detect?: () => Promise<SourceAvailability>;
   collections?: SourceCollection[];
+  comments?: boolean;
+  listDocuments?: SourceProvider['listDocuments'];
+  listComments?: SourceProvider['listComments'];
   pollChanges?: SourceProvider['pollChanges'];
   fetchDocument?: (ref: SourceDocumentRef) => Promise<SourceDocument | null>;
 }
@@ -59,17 +62,19 @@ function makeProvider(options: StubProviderOptions = {}): SourceProvider {
       fetch: true,
       poll: true,
       push: false,
-      comments: false,
+      comments: options.comments ?? false,
     },
     detect: options.detect ?? (async () => ({ available: true })),
     detectCached: () => ({ available: true }),
     listCollections: async () => options.collections ?? [{ externalId: 'db-1', collectionKind: 'database' }],
-    listDocuments: async () => ({
-      documents: [],
-      nextPageCursor: null,
-      complete: true,
-      truncated: false,
-    }),
+    listDocuments:
+      options.listDocuments ??
+      (async () => ({
+        documents: [],
+        nextPageCursor: null,
+        complete: true,
+        truncated: false,
+      })),
     fetchDocument:
       options.fetchDocument ??
       (async (ref) => ({
@@ -86,6 +91,7 @@ function makeProvider(options: StubProviderOptions = {}): SourceProvider {
         complete: true,
         truncated: false,
       })),
+    ...(options.listComments ? { listComments: options.listComments } : {}),
     viewUrl: (ref) => `https://notion.so/${ref.externalId}`,
   };
 }
@@ -537,6 +543,117 @@ describe('runSourceSync', () => {
     expect((await sink.read(docId))?.body).toBe('New body.');
   });
 
+  it('uses one shared document request budget across collections and resumes before the next collection', async () => {
+    const { store, connection, sink, mirrorRoot } = await setup({
+      collections: [
+        { externalId: 'db-1', collectionKind: 'database', maxDepth: 3, splitOnHeading: 'h2' },
+        { externalId: 'db-2', collectionKind: 'database', maxDepth: 3, splitOnHeading: 'h2' },
+      ],
+    });
+    const polled: string[] = [];
+    const provider = makeProvider({
+      collections: [
+        { externalId: 'db-1', collectionKind: 'database' },
+        { externalId: 'db-2', collectionKind: 'database' },
+      ],
+      pollChanges: async (_since, options) => {
+        polled.push(options.collectionExternalId);
+        return {
+          changes: [],
+          watermark: null,
+          nextPageCursor: null,
+          complete: true,
+          truncated: false,
+          callsUsed: 1,
+        };
+      },
+    });
+
+    const first = await runSourceSync({ store, connection, sink, provider, mirrorRoot, callBudget: 1 });
+    expect(first.complete).toBe(false);
+    expect(polled).toEqual(['db-1']);
+    expect(store.state(connection.id)?.pageCursor).toEqual({ collectionExternalId: 'db-2', cursor: '' });
+
+    const second = await runSourceSync({ store, connection, sink, provider, mirrorRoot, callBudget: 1 });
+    expect(second.complete).toBe(true);
+    expect(polled).toEqual(['db-1', 'db-2']);
+    expect(store.state(connection.id)?.pageCursor).toBeUndefined();
+  });
+
+  it('comment pagination advances only on completion and never changes the document body hash', async () => {
+    const { store, connection, sink, mirrorRoot } = await setup({ watchComments: true });
+    const docId = computeDocId(connection, 'commented');
+    await sink.upsert(makeMirroredDoc(docId, 'commented', 'v1'), 'Body stays byte-identical.');
+    const before = await sink.read(docId);
+    const provider = makeProvider({
+      comments: true,
+      pollChanges: async () => ({
+        changes: [],
+        watermark: null,
+        nextPageCursor: null,
+        complete: true,
+        truncated: false,
+        callsUsed: 1,
+      }),
+      listComments: async (_ref, _since, options) => {
+        if (options?.cursor === 'page-2') {
+          return {
+            comments: [{ externalId: 'comment-2', body: 'Reply', createdAt: '2026-08-30T00:01:00.000Z', attachments: [] }],
+            nextPageCursor: null,
+            complete: true,
+            truncated: false,
+            callsUsed: 1,
+          };
+        }
+        return {
+          comments: [{ externalId: 'comment-1', body: 'First', createdAt: '2026-08-30T00:00:00.000Z', attachments: [] }],
+          nextPageCursor: 'page-2',
+          complete: false,
+          truncated: true,
+          callsUsed: 1,
+        };
+      },
+    });
+
+    await runSourceSync({ connection, store, sink, provider, mirrorRoot, callBudget: 2 });
+    expect(store.state(connection.id)?.commentWatermarks[docId]).toBeUndefined();
+    expect(store.state(connection.id)?.commentPageCursors[docId]).toBe('page-2');
+    expect(store.listComments(connection.id).map((item) => item.id)).toEqual(['comment-1']);
+
+    await runSourceSync({ connection, store, sink, provider, mirrorRoot, callBudget: 2 });
+    expect(store.state(connection.id)?.commentWatermarks[docId]).toBe('2026-08-30T00:01:00.000Z');
+    expect(store.state(connection.id)?.commentPageCursors[docId]).toBeUndefined();
+    expect(store.listComments(connection.id).map((item) => item.id)).toEqual(['comment-1', 'comment-2']);
+    expect((await sink.read(docId))?.localVersion).toBe(before?.localVersion);
+  });
+
+  it('uses one shared comment request budget across documents', async () => {
+    const { store, connection, sink, mirrorRoot } = await setup({ watchComments: true });
+    for (const externalId of ['A', 'B', 'C']) {
+      await sink.upsert(makeMirroredDoc(computeDocId(connection, externalId), externalId, 'v1'), `Body ${externalId}.`);
+    }
+    const budgets: number[] = [];
+    const provider = makeProvider({
+      comments: true,
+      pollChanges: async () => ({
+        changes: [],
+        watermark: null,
+        nextPageCursor: null,
+        complete: true,
+        truncated: false,
+        callsUsed: 1,
+      }),
+      listComments: async (_ref, _since, options) => {
+        budgets.push(options?.callBudget ?? -1);
+        return { comments: [], nextPageCursor: null, complete: true, truncated: false, callsUsed: 1 };
+      },
+    });
+
+    await runSourceSync({ connection, store, sink, provider, mirrorRoot, callBudget: 4 });
+    expect(budgets).toEqual([3, 2, 1]);
+    expect(Object.keys(store.state(connection.id)?.commentSweepAt ?? {})).toHaveLength(3);
+  });
+
   it('a disabled connection does not run', async () => {
     const { store, connection, sink, mirrorRoot } = await setup({
       enabled: false,
@@ -618,6 +735,29 @@ describe('runSourceSync', () => {
     });
     expect(result.syncState).toBe('error');
     expect(store.state('conn-1')?.backoffUntil).toBeDefined();
+  });
+
+  it('never schedules a retry before a provider Retry-After lower bound', async () => {
+    const { store, connection, sink, mirrorRoot } = await setup();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    try {
+      const provider = makeProvider({
+        pollChanges: async () => ({
+          changes: [],
+          watermark: null,
+          nextPageCursor: null,
+          complete: false,
+          truncated: false,
+          callsUsed: 1,
+          retryAfterMs: 120_000,
+        }),
+      });
+      await runSourceSync({ connection, store, sink, provider, mirrorRoot });
+      const state = store.state(connection.id)!;
+      expect(Date.parse(state.backoffUntil!) - Date.parse(state.lastError!.at)).toBe(120_000);
+    } finally {
+      random.mockRestore();
+    }
   });
 
   it('a budget cutoff (truncated) sets no backoff', async () => {

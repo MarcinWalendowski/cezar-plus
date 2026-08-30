@@ -27,6 +27,7 @@ import { currentRelease, runtimeInfo, type RuntimeInfo } from './runtime-info.ts
 import { jsonZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { createKnowledgeRoutes } from './knowledge-routes.ts';
 import { createSourcesRoutes } from './sources-routes.ts';
+import { SourceRuntime } from '../sources/runtime.ts';
 import {
   createClusterRoutes,
   isCodeAuthenticatedClusterPath,
@@ -378,6 +379,8 @@ export interface ServerDeps {
    *  coordinator-owned instance so HTTP routes and the scheduler never cache
    *  separate views of the same project files. */
   automationStore?: AutomationStore;
+  /** Workspace source runtime, constructed only when CEZ_SOURCES is enabled. */
+  sourceRuntime?: SourceRuntime;
   /** Workspace-wide parallel-cap semaphore + cached resource config (spec
    *  2026-07-20, step 2.5): the ONE instance boot created, refreshed, and gave
    *  the boot manager — threaded into the default `ProjectContexts` so every
@@ -897,7 +900,8 @@ export type WorkspaceEventName =
   | 'project-removed'
   | 'checkout-progress'
   | 'provider-status'
-  | 'automation-change';
+  | 'automation-change'
+  | 'source-sync';
 
 /**
  * The in-process bus for workspace-level SSE events. The registry-mutating
@@ -1817,6 +1821,8 @@ export function createApp(deps: ServerDeps) {
   // degrades to the slug fallback, never an error.
   const projectAccess = deps.projectAccess ?? createProjectAccess(bootRoot, bootProjectId, bindHost);
   const resolveBootProject = projectAccess.resolveBootProject;
+  const sourceRuntime = deps.sourceRuntime;
+  const resolvedBootProjectId = bootProjectId ?? sourceRuntime?.bootProjectId ?? 'default';
   // Health's workspace garnish: id+name ONLY — never `root` (#431, see the
   // health route). Reads only the registry file; no per-root status probes,
   // so health stays cheap enough for the bookmarklet's 800 ms port sweep.
@@ -1868,7 +1874,7 @@ export function createApp(deps: ServerDeps) {
   // — which `resolveProjectScope` serves for unscoped requests, for `default`,
   // and for the boot project's own id. See `activateOptionalStores`.
   const bootContext: ProjectContext = {
-    id: bootProjectId ?? 'default',
+    id: resolvedBootProjectId,
     root: bootRoot,
     dataDir: bootDataDir,
     store: deps.store,
@@ -1876,10 +1882,11 @@ export function createApp(deps: ServerDeps) {
     automationStore: deps.automationStore ?? AutomationStore.open(bootDataDir),
     ...activateOptionalStores({
       env: process.env,
-      projectId: bootProjectId ?? 'default',
+      projectId: resolvedBootProjectId,
       root: bootRoot,
       dataDir: bootDataDir,
       bindHost,
+      sourceStore: sourceRuntime?.store(resolvedBootProjectId, bootRoot),
     }),
     launchKey: ensureLaunchKey(bootDataDir), // bookmarklet auto-start secret (spec 011)
   };
@@ -1893,6 +1900,7 @@ export function createApp(deps: ServerDeps) {
     // instance that would warm and latch independently
     // (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1).
     providerAuth,
+    sourceStore: sourceRuntime ? (projectId, root) => sourceRuntime.store(projectId, root) : undefined,
     // Defense-in-depth for `.ai/specs/2026-08-15-duplicate-project-context-wipes-runs.md`:
     // `registerFolder`'s own boot short-circuit (above) is what keeps a duplicate row from ever
     // being WRITTEN, but a registry pre-dating that fix — or a row written by a concurrent
@@ -1901,6 +1909,9 @@ export function createApp(deps: ServerDeps) {
     // duplicating; see that method's own comment.
     bootRoot,
   });
+  sourceRuntime?.setKnowledgeStoreResolver((projectId) =>
+    projectId === bootContext.id ? bootContext.knowledgeStore : contexts.peek(projectId)?.knowledgeStore,
+  );
   // Workspace-level SSE bus (step 2.8) — the registry mutators and the
   // checkout flow (Phase 4) emit here; /api/workspace/events relays.
   const workspaceEvents = deps.workspaceEvents ?? new WorkspaceEventBus();
@@ -7451,7 +7462,7 @@ export function createApp(deps: ServerDeps) {
   // into `v1` below); `notesRoutes`/`workspaceRunsRoutes`/`notificationsRoutes` are workspace-level
   // (mounted into `workspaceV1`).
   const knowledgeRoutes = createKnowledgeRoutes();
-  const sourcesRoutes = createSourcesRoutes();
+  const sourcesRoutes = createSourcesRoutes({ runtime: sourceRuntime });
 
   // The CLUSTER family (`.ai/specs/2026-08-22-multi-node-cezar-cluster.md`, `CEZ_CLUSTER=1`), on
   // the same terms as the two above: its own file, built by a factory, chained into
@@ -7942,6 +7953,15 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   const automationCoordinator = new AutomationCoordinator({ listProjects });
   const bootProjectId = deps.bootProjectId ?? 'default';
   const projectAccess = deps.projectAccess ?? createProjectAccess(deps.repoRoot, deps.bootProjectId, deps.bindHost);
+  const sourceRuntime = process.env.CEZ_SOURCES === '1'
+    ? deps.sourceRuntime ?? new SourceRuntime({
+        listProjects: async () => (await projectAccess.listVisibleProjects()).map(({ id, root, status }) => ({ id, root, status })),
+        bootProjectId,
+        bootRoot: deps.repoRoot,
+        env: process.env,
+        emit: (event, data) => workspaceEvents.emit(event, data),
+      })
+    : undefined;
   const bootAutomationStore = automationCoordinator.store(bootProjectId, deps.repoRoot)!;
   const sharedContexts = deps.contexts ?? new ProjectContexts({
     listProjects: projectAccess.listVisibleProjects,
@@ -7952,6 +7972,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     // `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1.
     providerAuth: deps.providerAuth,
     automationStore: (projectId, root) => automationCoordinator.store(projectId, root)!,
+    sourceStore: sourceRuntime ? (projectId, root) => sourceRuntime.store(projectId, root) : undefined,
     // Spec 2026-08-22-cross-project-worktree-orphan-prune-safety, Phase 3 prerequisite: without
     // this, `deps.bootRoot` never reaches `ProjectContexts` in production (`createApp`'s own
     // `bootRoot`-carrying `ProjectContexts` construction below is dead code — `deps.contexts` is
@@ -7976,6 +7997,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     contexts: sharedContexts,
     projectAccess,
     automationStore: bootAutomationStore,
+    sourceRuntime,
     workspaceEvents,
     socketHub,
     automationsChanged: () => rescheduleAutomations(),
@@ -8014,6 +8036,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
         inherited.listen({ fd: deps.listenFd });
         return inherited;
       })();
+  void sourceRuntime?.start();
   const automationProjects = new Map<string, { root: string; owner: string; repo: string }>();
   const automationScheduler = new WorkspaceAutomationScheduler({
     coordinator: automationCoordinator,
@@ -8059,7 +8082,8 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
         void getRepoInfo(project.root).then((info) => {
           const parsed = parseRemote(info?.remote ?? '');
           if (parsed?.host === 'github.com') automationProjects.set(project.id as string, { root: project.root as string, owner: parsed.owner, repo: parsed.repo });
-          return rescheduleAutomations();
+          rescheduleAutomations();
+          void sourceRuntime?.reschedule();
         });
       }
     } else if (event === 'project-removed') {
@@ -8068,6 +8092,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
         automationCoordinator.remove(id);
         automationProjects.delete(id);
         rescheduleAutomations();
+        void sourceRuntime?.reschedule();
       }
     }
   });
@@ -8106,6 +8131,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     lazyProjectIntentDiscovery.stop();
     unsubscribe();
     automationScheduler.stop();
+    void sourceRuntime?.stop();
     backupScheduler.stop();
   });
   socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost, deps.sessionResolver));

@@ -112,11 +112,7 @@ import type {
   WorkflowsResponse,
   WorkspaceConfigResponse,
   WorkspaceUiState,
-  // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`) — the five inert
-  // families' GET response shapes. Mutator wrappers are deliberately NOT added yet: every
-  // mutating route answers ONLY a 409 today (D19), with no 2xx branch for a wrapper to type
-  // against, so there is nothing real to wrap. Each wave that gives its family a real success
-  // response (W4.1, W4.6, W4.7, P2.3, W4.10) adds the matching mutator function here.
+  // Central-hub routes (`.ai/specs/2026-08-30-external-source-completion.md`).
   KnowledgeResponse,
   KnowledgeSearchResponse,
   KnowledgeDocumentsResponse,
@@ -139,6 +135,14 @@ import type {
   SourceDocumentResponse,
   SourceCommentsResponse,
   SourceLogResponse,
+  CreateSourceConnectionInput,
+  UpdateSourceConnectionInput,
+  SourceConnectionResponse,
+  SourceRemovedResponse,
+  SourceSyncKickResponse,
+  AdoptSourceDocumentResponse,
+  ResolveSourceConflictInput,
+  ResolveSourceConflictResponse,
   NotesListResponse,
   NoteResponse,
   NoteRemovedResponse,
@@ -2603,6 +2607,67 @@ export async function getSourceLog(
       init(opts),
     ),
     '/sources/:connectionId/log',
+  )
+}
+
+export async function createSourceConnection(input: CreateSourceConnectionInput): Promise<SourceConnectionResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources.$post({ param: { projectId: queryScope() }, json: input }),
+    '/sources',
+  )
+}
+
+export async function updateSourceConnection(
+  connectionId: string,
+  input: UpdateSourceConnectionInput,
+): Promise<SourceConnectionResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources[':connectionId'].$put({
+      param: { projectId: queryScope(), connectionId },
+      json: input,
+    }),
+    '/sources/:connectionId',
+  )
+}
+
+export async function deleteSourceConnection(connectionId: string): Promise<SourceRemovedResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources[':connectionId'].$delete({
+      param: { projectId: queryScope(), connectionId },
+    }),
+    '/sources/:connectionId',
+  )
+}
+
+export async function syncSourceConnection(connectionId: string): Promise<SourceSyncKickResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources[':connectionId'].sync.$post({
+      param: { projectId: queryScope(), connectionId },
+    }),
+    '/sources/:connectionId/sync',
+  )
+}
+
+export async function adoptSourceDocument(connectionId: string, docId: string): Promise<AdoptSourceDocumentResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources[':connectionId'].documents[':docId'].adopt.$post({
+      param: { projectId: queryScope(), connectionId, docId },
+    }),
+    '/sources/:connectionId/documents/:docId/adopt',
+  )
+}
+
+export async function resolveSourceConflict(
+  connectionId: string,
+  docId: string,
+  input: ResolveSourceConflictInput,
+): Promise<ResolveSourceConflictResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].sources[':connectionId'].documents[':docId'].resolve.$post({
+      param: { projectId: queryScope(), connectionId, docId },
+      json: input,
+    }),
+    '/sources/:connectionId/documents/:docId/resolve',
   )
 }
 

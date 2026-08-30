@@ -81,6 +81,12 @@ import {
   getSourceDocument,
   getSourceComments,
   getSourceLog,
+  createSourceConnection,
+  updateSourceConnection,
+  deleteSourceConnection,
+  syncSourceConnection,
+  adoptSourceDocument,
+  resolveSourceConflict,
   getWorkspaceNotes,
   getWorkspaceNote,
   createWorkspaceNote,
@@ -159,6 +165,9 @@ import type {
   UpdateAgentProfileInput,
   UpdateNoteInput,
   UpdateProjectInput,
+  CreateSourceConnectionInput,
+  UpdateSourceConnectionInput,
+  ResolveSourceConflictInput,
 } from '@loki-labs/better-cezar-api-client'
 import { subscribeTopic } from './ws'
 
@@ -2389,6 +2398,49 @@ export function useSourceLog(connectionId: string, enabled = true) {
     queryFn: ({ signal }) => getSourceLog(connectionId, {}, { signal }),
     enabled,
   })
+}
+
+function useSourceMutation<TArgs, TResult>(mutationFn: (args: TArgs) => Promise<TResult>) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn,
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.sources })
+    },
+  })
+}
+
+export function useCreateSourceConnection() {
+  return useSourceMutation((input: CreateSourceConnectionInput) => createSourceConnection(input))
+}
+
+export function useUpdateSourceConnection() {
+  return useSourceMutation(({ connectionId, input }: { connectionId: string; input: UpdateSourceConnectionInput }) =>
+    updateSourceConnection(connectionId, input),
+  )
+}
+
+export function useDeleteSourceConnection() {
+  return useSourceMutation((connectionId: string) => deleteSourceConnection(connectionId))
+}
+
+export function useSyncSourceConnection() {
+  return useSourceMutation((connectionId: string) => syncSourceConnection(connectionId))
+}
+
+export function useAdoptSourceDocument() {
+  return useSourceMutation(({ connectionId, docId }: { connectionId: string; docId: string }) =>
+    adoptSourceDocument(connectionId, docId),
+  )
+}
+
+export function useResolveSourceConflict() {
+  return useSourceMutation(({ connectionId, docId, input }: {
+    connectionId: string
+    docId: string
+    input: ResolveSourceConflictInput
+  }) => resolveSourceConflict(connectionId, docId, input))
 }
 
 /**

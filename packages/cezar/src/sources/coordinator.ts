@@ -23,6 +23,8 @@ export interface SourceProjectSource {
 
 export interface SourceCoordinatorOptions {
   listProjects: () => Promise<readonly SourceProjectSource[]>;
+  /** The boot project is always a source project, even when the registry is temporarily incomplete. */
+  bootProject?: SourceProjectSource;
   warn?: (message: string) => void;
 }
 
@@ -42,11 +44,14 @@ export class SourceCoordinator {
       );
       return;
     }
-    const present = new Set(projects.map((project) => project.id));
+    const allProjects = this.options.bootProject
+      ? [this.options.bootProject, ...projects.filter((project) => project.id !== this.options.bootProject!.id)]
+      : [...projects];
+    const present = new Set(allProjects.map((project) => project.id));
     for (const id of this.stores.keys()) {
       if (!present.has(id)) this.remove(id);
     }
-    for (const project of projects) {
+    for (const project of allProjects) {
       if (project.status === 'missing') {
         this.remove(project.id);
         continue;

@@ -38,6 +38,7 @@ export function normalizeComment(raw: NotionRawComment): NormalizedComment {
 
 export interface ListPageCommentsResult {
   comments: NormalizedComment[];
+  callsUsed: number;
   complete: boolean;
   nextPageCursor: string | null;
   truncated: boolean;
@@ -56,6 +57,7 @@ export async function listPageComments(
   const page = await client.listComments(blockId, opts);
   return {
     comments: page.results.map(normalizeComment),
+    callsUsed: page.callsUsed,
     complete: page.complete,
     nextPageCursor: page.nextPageCursor,
     truncated: page.truncated,

@@ -7,6 +7,7 @@ import type {
   SourceChange,
   SourceChangePage,
   SourceCollection,
+  SourceCommentListOptions,
   SourceCommentPage,
   SourceDocument,
   SourceDocumentPage,
@@ -52,11 +53,10 @@ import { blocksToMarkdown, splitOnH2, type NotionSection } from './markdown.ts';
  * (W4.4's `sync.ts`), not provider territory. This provider returns one page (or one H2 section)
  * per discovered document and nothing more.
  *
- * **`listCollections()` does not browse the remote for NEW collections.** `client.ts` exposes no
- * Notion search/discovery endpoint, so this method reflects the connection's OWN configured
- * `collections[]` rather than genuinely discovering ones the user hasn't added yet — a real gap
- * against the wire route's "browse the remote" framing, flagged in this package's implementation
- * report rather than worked around with an invented call.
+ * **`listCollections()` reflects configured collections.** `client.ts` exposes no Notion
+ * search/discovery endpoint, so this method returns the connection's OWN configured `collections[]`.
+ * Remote collection discovery is intentionally a separate future contract, not an invented call on
+ * this one.
  */
 
 export const NOTION_SOURCE_KIND: SourceKind = 'notion';
@@ -154,10 +154,24 @@ export class NotionSourceProvider implements SourceProvider {
     return { ...ref, title: section.title, docType, body: section.body, lossy: section.lossy };
   }
 
-  async listComments(ref: SourceDocumentRef, since?: string): Promise<SourceCommentPage> {
-    const result = await listPageComments(this.client, basePageId(ref.externalId));
+  async listComments(
+    ref: SourceDocumentRef,
+    since?: string,
+    opts: SourceCommentListOptions = {},
+  ): Promise<SourceCommentPage> {
+    const result = await listPageComments(this.client, basePageId(ref.externalId), {
+      cursor: opts.cursor ?? null,
+      callBudget: opts.callBudget,
+    });
     const comments = since ? result.comments.filter((comment) => comment.createdAt > since) : result.comments;
-    return { comments, nextPageCursor: result.nextPageCursor, complete: result.complete, truncated: result.truncated };
+    return {
+      comments,
+      callsUsed: result.callsUsed,
+      nextPageCursor: result.nextPageCursor,
+      complete: result.complete,
+      truncated: result.truncated,
+      ...(result.backoffHint ? { retryAfterMs: result.backoffHint.retryAfterMs } : {}),
+    };
   }
 
   viewUrl(ref: SourceDocumentRef): string | null {
@@ -168,9 +182,25 @@ export class NotionSourceProvider implements SourceProvider {
 
   private async listDatabaseDocuments(collection: SourceCollectionRef, opts: SourceListOptions): Promise<SourceDocumentPage> {
     const page = await this.client.queryDatabase(collection.externalId, { cursor: opts.cursor ?? null, callBudget: opts.callBudget });
-    if (page.error) return { documents: [], nextPageCursor: page.nextPageCursor, complete: false, truncated: page.truncated };
+    if (page.error) {
+      return {
+        documents: [],
+        callsUsed: page.callsUsed,
+        nextPageCursor: page.nextPageCursor,
+        complete: false,
+        truncated: page.truncated,
+        ...(page.backoffHint ? { retryAfterMs: page.backoffHint.retryAfterMs } : {}),
+      };
+    }
     const documents = page.results.filter((row) => !row.archived).map((row) => toDocumentRef(row, collection));
-    return { documents, nextPageCursor: page.nextPageCursor, complete: page.complete, truncated: page.truncated };
+    return {
+      documents,
+      callsUsed: page.callsUsed,
+      nextPageCursor: page.nextPageCursor,
+      complete: page.complete,
+      truncated: page.truncated,
+      ...(page.backoffHint ? { retryAfterMs: page.backoffHint.retryAfterMs } : {}),
+    };
   }
 
   private async pollDatabase(
@@ -179,7 +209,17 @@ export class NotionSourceProvider implements SourceProvider {
     opts: SourcePollOptions,
   ): Promise<SourceChangePage> {
     const page = await this.client.queryDatabase(collection.externalId, { cursor: opts.cursor ?? null, callBudget: opts.callBudget });
-    if (page.error) return { changes: [], watermark: since, nextPageCursor: page.nextPageCursor, complete: false, truncated: page.truncated };
+    if (page.error) {
+      return {
+        changes: [],
+        watermark: since,
+        callsUsed: page.callsUsed,
+        nextPageCursor: page.nextPageCursor,
+        complete: false,
+        truncated: page.truncated,
+        ...(page.backoffHint ? { retryAfterMs: page.backoffHint.retryAfterMs } : {}),
+      };
+    }
 
     let watermark = since;
     const changes: SourceChange[] = [];
@@ -192,7 +232,15 @@ export class NotionSourceProvider implements SourceProvider {
           : { type: 'upsert', doc: toDocumentRef(row, collection) },
       );
     }
-    return { changes, watermark, nextPageCursor: page.nextPageCursor, complete: page.complete, truncated: page.truncated };
+    return {
+      changes,
+      watermark,
+      callsUsed: page.callsUsed,
+      nextPageCursor: page.nextPageCursor,
+      complete: page.complete,
+      truncated: page.truncated,
+      ...(page.backoffHint ? { retryAfterMs: page.backoffHint.retryAfterMs } : {}),
+    };
   }
 
   // ---- page-tree collections -------------------------------------------------------------------
@@ -201,7 +249,14 @@ export class NotionSourceProvider implements SourceProvider {
     const callBudget = opts.callBudget ?? Number.POSITIVE_INFINITY;
     const walk = await this.walkPageTree(collection, callBudget);
     const documents = walk.pages.filter((found) => !found.archived).flatMap((found) => found.sections.map((section) => sectionToRef(section, collection, found.id)));
-    return { documents, nextPageCursor: null, complete: walk.complete, truncated: walk.truncated };
+    return {
+      documents,
+      callsUsed: walk.callsUsed,
+      nextPageCursor: null,
+      complete: walk.complete,
+      truncated: walk.truncated,
+      ...(walk.retryAfterMs !== undefined ? { retryAfterMs: walk.retryAfterMs } : {}),
+    };
   }
 
   private async pollPageTree(
@@ -224,7 +279,15 @@ export class NotionSourceProvider implements SourceProvider {
           }))
         : found.sections.map((section) => ({ type: 'upsert' as const, doc: sectionToRef(section, collection, found.id) })),
     );
-    return { changes, watermark: since, nextPageCursor: null, complete: walk.complete, truncated: walk.truncated };
+    return {
+      changes,
+      watermark: since,
+      callsUsed: walk.callsUsed,
+      nextPageCursor: null,
+      complete: walk.complete,
+      truncated: walk.truncated,
+      ...(walk.retryAfterMs !== undefined ? { retryAfterMs: walk.retryAfterMs } : {}),
+    };
   }
 
   /**
@@ -242,11 +305,12 @@ export class NotionSourceProvider implements SourceProvider {
   private async walkPageTree(
     collection: SourceCollectionRef,
     callBudget: number,
-  ): Promise<{ pages: DiscoveredPage[]; complete: boolean; truncated: boolean }> {
+  ): Promise<{ pages: DiscoveredPage[]; complete: boolean; truncated: boolean; callsUsed: number; retryAfterMs?: number }> {
     const maxDepth = collection.maxDepth ?? 3;
     let callsUsed = 0;
     let complete = true;
     let truncated = false;
+    let retryAfterMs: number | undefined;
     const pages: DiscoveredPage[] = [];
 
     const visit = async (id: string, title: string, depth: number, archived: boolean): Promise<void> => {
@@ -265,6 +329,7 @@ export class NotionSourceProvider implements SourceProvider {
       callsUsed += tree.callsUsed;
       if (tree.error) {
         complete = false;
+        retryAfterMs = tree.backoffHint?.retryAfterMs;
         return;
       }
       if (!tree.complete) {
@@ -284,7 +349,7 @@ export class NotionSourceProvider implements SourceProvider {
     };
 
     await visit(collection.externalId, collection.label ?? 'Untitled', 0, false);
-    return { pages, complete, truncated };
+    return { pages, complete, truncated, callsUsed, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
   }
 
   private findCollection(externalId: string): SourceCollectionRef | undefined {

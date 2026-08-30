@@ -1471,8 +1471,11 @@ function ensureDataGitignore(repoRoot: string): void {
     'source-state.json',
     'source-state.json.tmp',
     'source-log.ndjson',
+    'source-log.ndjson.tmp',
     'source-comments.ndjson',
+    'source-comments.ndjson.tmp',
     'sources-poll.lock',
+    'sources-store.lock',
     'sources/', // the mirror root itself, including its un-indexed conflicts/ and deleted/ subdirs
   ];
   try {
