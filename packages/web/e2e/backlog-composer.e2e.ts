@@ -86,6 +86,23 @@ beforeAll(async () => {
 
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 900)
+
+  // A project registered in a fresh CEZ_HOME still has no organization, so the asynchronous
+  // onboarding gate can replace an initially-rendered composer after the first interaction.
+  // Complete local onboarding before the feature walk, then navigate cold so the client's
+  // onboarding-entry probe cannot retain its pre-creation result.
+  browser.goto(`${baseUrl}/tasks`)
+  browser.waitForFunction(`document.querySelector('[data-slot="onboarding-org-name"]') !== null`)
+  browser.fill('[data-slot="onboarding-org-name"]', 'fixture-org')
+  browser.click('[data-slot="onboarding-org-submit"]')
+  browser.waitForFunction(
+    `document.querySelector('[data-slot="onboarding-team-accept"]') !== null || !location.pathname.startsWith('/onboarding')`,
+  )
+  if (browser.count('[data-slot="onboarding-team-accept"]') > 0) {
+    browser.click('[data-slot="onboarding-team-accept"]')
+  }
+  browser.goto(`${baseUrl}/p/fixture/new`)
+  browser.waitForFunction(`location.pathname === '/p/fixture/new'`)
 }, 180_000)
 
 afterAll(() => {
@@ -110,6 +127,7 @@ describe('the project-scoped Backlog composer against a live dry-run server', ()
     browser.waitForFunction(
       `document.querySelector('[data-slot="mode-backlog"]')?.getAttribute('aria-checked') === 'true'`,
     )
+    expect(browser.url()).toMatch(/\/p\/fixture\/new$/)
     browser.fill('[data-slot="composer"] textarea', 'File this from the browser, do not start it.')
     browser.screenshot(join(artifactsDir, 'backlog-composer-armed.png'))
 

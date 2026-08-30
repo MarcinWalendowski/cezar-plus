@@ -1,5 +1,15 @@
 # Close The Backlog Composer
 
+- **CORRECTED 2026-08-30:** Implemented and verified on the reconciled candidate. The onboarding
+  fixture repair passed its focused browser E2E in 12.00 seconds after a pre-fix negative control
+  failed. Typecheck, three full root test runs, unit, build, and package gates all passed. Both
+  required browser artifacts were captured and visually checked. Landing and deployment status
+  are recorded separately because this line describes implementation and QA only.
+- **CORRECTED 2026-08-30:** Implementation partial, QA needed. The non-browser gates passed on
+  reconciled commit `04f8f1f1`, but the focused browser E2E exposed an incomplete fixture: its
+  fresh `CEZ_HOME` has no organization, so the async onboarding gate redirects the initially
+  rendered composer to `/onboarding` before the Backlog interaction settles. Phase 3 below now
+  specifies the fixture repair and its regression proof.
 - **Status:** Specified (no code written, no gate run, no deploy performed by this step)
 - **Date:** 2026-08-29
 - **Task:** `1f02b61d-6f55-4b7f-a6e9-c929ab407eaf`, workflow `spec-to-deploy`, branch `cez/1f02b61d`
@@ -442,6 +452,35 @@ every `ms/MiB` figure verbatim, root and isolated, each labelled with which it i
 its numbers is not a verdict, and a verdict from the wrong condition is worse than none.
 
 ### Phase 3 — execute the browser E2E for real
+
+**CORRECTED 2026-08-30 after runtime diagnosis.** The first real focused executions did not find a
+Backlog product defect. Diagnostic DOM reads proved that `mode-backlog` rendered enabled at
+`/p/fixture/new`; after the trusted click, the browser was at `/onboarding` with only `Loading...`
+mounted. The fixture writes a project into a fresh `CEZ_HOME` but creates no organization, which
+is exactly the onboarding-incomplete state documented and handled by
+`filed-partitions.e2e.ts` and `plain-end-question.e2e.ts`.
+
+Before any Backlog assertion, the fixture must walk local onboarding once:
+
+1. Navigate to `/tasks` and wait for `onboarding-org-name`.
+2. Create `fixture-org`, then wait until either `onboarding-team-accept` appears or onboarding has
+   already completed. Accept the team step when it appears.
+3. Perform a fresh full-page navigation to `/p/fixture/new`, which clears the client's stale
+   onboarding-entry probe cache.
+4. Assert the route remains `/p/fixture/new` before and after selecting Backlog. This is the
+   regression check that fails on the pre-fix fixture and prevents an onboarding redirect from
+   being misreported as a composer failure again.
+
+No production module, contract, stored shape, API, or analytics event changes. Verification is the
+focused browser E2E first, including both required screenshots and the exact todo and run-count
+assertions already present, followed by the full authoritative gate sequence before landing.
+
+**Executed 2026-08-30:** the focused test passed, with one file and one test green in 12.00 seconds.
+`backlog-composer-armed.png` shows Backlog selected with the requested text armed;
+`backlog-filed-row.png` shows exactly one `To do` row in Backlog and zero Active rows. The negative
+control, run with only this fixture repair stashed, failed before the composer could be filled.
+The final authoritative sequence passed: typecheck; three root runs, each 654 files passed plus 2
+skipped and 12,283 tests passed plus 4 skipped; unit; build; package; focused browser E2E.
 
 1. `env -u NODE_ENV $scrub TMPDIR=$tmp TMP=$tmp TEMP=$tmp npm run test:e2e 2>&1 | tee /tmp/e2e.log`
 2. **Read the status line, not the exit code:** `grep -c 'TEST_E2E_STATUS=passed' /tmp/e2e.log`
