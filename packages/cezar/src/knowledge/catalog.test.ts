@@ -319,6 +319,7 @@ describe.sequential('C18: index build cost stays within a host-calibrated budget
     }
 
     expect(documents).toHaveLength(fileCount);
+    console.log(`C18 index build cost ${(bestMs / totalMiB).toFixed(1)} ms/MiB (budget ${C18_MAX_MS_PER_MIB})`);
     expect(
       bestMs / totalMiB,
       `index build cost ${(bestMs / totalMiB).toFixed(1)} ms/MiB, host budget ${C18_MAX_MS_PER_MIB}`,

@@ -43,13 +43,13 @@ describe('workspace migrations', () => {
   const rawGlobalUiState = () =>
     JSON.parse(readFileSync(workspaceUiStatePath(), 'utf8')) as Record<string, unknown>;
 
-  it('fresh home: creates config.json with defaults and schemaVersion 1', async () => {
+  it('fresh home: creates config.json with defaults and runs every migration to schemaVersion 2', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await runMigrations({ bootRepoRoot: null });
     const config = await loadWorkspaceConfig();
-    expect(config).toEqual({ ...defaultWorkspaceConfig(), schemaVersion: 1 });
+    expect(config).toEqual({ ...defaultWorkspaceConfig(), schemaVersion: 2 });
     expect(statSync(workspaceConfigPath()).mode & 0o777).toBe(0o600);
-    // nothing to import → the global ui-state file is not created
+    // nothing to import, and no importedSkills key to drop → the global ui-state file is not created
     expect(existsSync(workspaceUiStatePath())).toBe(false);
     expect(warn).not.toHaveBeenCalled();
   });
@@ -67,7 +67,7 @@ describe('workspace migrations', () => {
     await runMigrations({ bootRepoRoot: repoRoot });
 
     const config = await loadWorkspaceConfig();
-    expect(config.schemaVersion).toBe(1);
+    expect(config.schemaVersion).toBe(2);
     expect(config.resources.maxParallel).toBe(5);
     expect(config.resources.memoryLimitMb).toBe(1024);
     expect(rawGlobalUiState()).toEqual({
@@ -119,7 +119,7 @@ describe('workspace migrations', () => {
     await runMigrations({ bootRepoRoot: repoRoot });
 
     const config = await loadWorkspaceConfig();
-    expect(config.schemaVersion).toBe(1);
+    expect(config.schemaVersion).toBe(2);
     expect(config.resources.maxParallel).toBe(5);
     expect(rawGlobalUiState().appearance).toEqual({ accent: 'violet' });
   });
@@ -185,11 +185,51 @@ describe('workspace migrations', () => {
     expect(existsSync(workspaceConfigPath())).toBe(false);
   });
 
-  it('stays at schemaVersion 1 — a purely additive key needs no migration', () => {
+  it('registers exactly migrations 001 and 002, in order — pins the list so a future addition is deliberate', () => {
     // Agent profiles (spec 2026-07-29) added `agentProfiles` and `projects[].agentProfile`, both
-    // optional with an absent value that means exactly today's behaviour. There is nothing to
-    // move, so there is nothing to migrate; this pins that so a no-op migration is not added
-    // reflexively the next time a key lands here.
-    expect(WORKSPACE_MIGRATIONS.map((m) => m.to)).toEqual([1]);
+    // optional with an absent value that means exactly today's behaviour — nothing to move, so
+    // nothing to migrate for that change. Migration 002 (Risks 1 of
+    // .ai/specs/2026-08-30-close-open-mercato-residue.md) is the second and, as of this pin, last.
+    expect(WORKSPACE_MIGRATIONS.map((m) => m.to)).toEqual([1, 2]);
+    expect(WORKSPACE_MIGRATIONS.map((m) => m.id)).toEqual([
+      '001-workspace-config',
+      '002-drop-stale-imported-skills',
+    ]);
+  });
+
+  describe('migration 002 — drop stale importedSkills', () => {
+    it('drops a stale importedSkills key from the global ui-state, leaving other keys untouched', async () => {
+      writeFileSync(
+        workspaceUiStatePath(),
+        JSON.stringify({ appearance: { accent: 'violet' }, importedSkills: ['om-apply-upgrade-notes'] }),
+        'utf8',
+      );
+      await runMigrations({ bootRepoRoot: null });
+      const uiState = rawGlobalUiState();
+      expect(uiState.importedSkills).toBeUndefined();
+      expect(uiState.appearance).toEqual({ accent: 'violet' });
+      expect((await loadWorkspaceConfig()).schemaVersion).toBe(2);
+    });
+
+    it('is idempotent: re-running after the key is already gone does not fail or alter other keys', async () => {
+      writeFileSync(workspaceUiStatePath(), JSON.stringify({ importedSkills: ['om-x'] }), 'utf8');
+      await runMigrations({ bootRepoRoot: null });
+      expect(rawGlobalUiState().importedSkills).toBeUndefined();
+
+      // Simulate a crash between the migration body and the version bump, same as the framework
+      // test above: force schemaVersion back and re-run. The key is already gone by now, so the
+      // re-run must find nothing to drop rather than fail or destroy anything else.
+      writeFileSync(workspaceConfigPath(), JSON.stringify({ ...rawGlobalConfig(), schemaVersion: 1 }), 'utf8');
+      await expect(runMigrations({ bootRepoRoot: null })).resolves.toBeUndefined();
+      expect(rawGlobalUiState().importedSkills).toBeUndefined();
+      expect((await loadWorkspaceConfig()).schemaVersion).toBe(2);
+    });
+
+    it('leaves the global ui-state file byte-identical when importedSkills is already absent', async () => {
+      writeFileSync(workspaceUiStatePath(), JSON.stringify({ appearance: { accent: 'lime' } }), 'utf8');
+      const before = readFileSync(workspaceUiStatePath(), 'utf8');
+      await runMigrations({ bootRepoRoot: null });
+      expect(readFileSync(workspaceUiStatePath(), 'utf8')).toBe(before);
+    });
   });
 });

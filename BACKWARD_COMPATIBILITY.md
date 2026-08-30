@@ -192,6 +192,20 @@ A skill is a `.md` file with optional YAML frontmatter (`name`, `description`); 
 
 Breaking: requiring frontmatter, dropping a discovery directory, or inverting precedence so a team skill shadows a local one. Required path: additive discovery only; a precedence change needs a README callout and a minor bump.
 
+**CORRECTED 2026-08-30 by `.ai/specs/2026-08-30-close-open-mercato-residue.md`.** The paragraph
+below stated the gate's semantics as a protected contract, and it was false as shipped: since
+2026-08-16, "a `config.json` `skillsRepos` the user configured is never gated" was not a narrowing
+rule, it was **every** case — `gatedSkillsRepos` answered the empty set unconditionally, so curation
+never applied to anything, gated or not. 2026-08-30 P2 falsifies this sentence on purpose:
+`gatedSkillsRepos` now returns the repos of the effective `skillsRepos`, so curation applies to
+whatever team repos an operator has configured. What still holds, unchanged, is the half of the
+contract that matters for not silently emptying a catalog: `importedSkills`' **absence** still
+means "not curated, keep everything" — so a zero-config install, and any install whose curation
+predates 2026-08-16, is unaffected (the latter via migration `002-drop-stale-imported-skills`,
+which clears a stale array back to absent rather than letting it filter a newly-configured catalog
+to nothing). Only a *present* array narrows anything, same as always. The workspace-scope location
+of the selection (not the per-repo file) is also unchanged. Original text, left for the record:
+
 The Manage-skills opt-out (`importedSkills` in the global `~/.cezar/ui-state.json`) preserves this contract: the key is a tri-state and its **absence keeps the historical full default-repo catalog**, so an existing install that never curated sees exactly what it saw before. Only a *present* array (the user actively curated in the Skills page) narrows the default repo, and only that repo — a `config.json` `skillsRepos` the user configured is never gated. The selection lives at workspace scope (not the per-repo `.ai/cezar/ui-state.json`) so it follows the user across projects and never depends on the launch directory. Emptying the default catalog for a not-yet-curated install would be the breaking case, and is deliberately not what happens.
 
 ## 6. npm package surface (`package.json`)

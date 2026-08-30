@@ -94,6 +94,23 @@ describe('buildSystemdRunArgv', () => {
     expect(argv).toContain('--property=KillMode=process');
   });
 
+  it('starts the unit with Type=exec, so systemd-run returns without waiting for the deploy', () => {
+    // MEASURED 2026-08-30 on prod-host, one `/bin/sleep 6`: `Type=oneshot` made systemd-run
+    // return after 6049 ms — a oneshot start job is not complete until the command EXITS — while
+    // `Type=exec` returned after 24 ms. `manual-activation.ts`'s `registerUnit` runs this argv
+    // under `spawnSync` on the request path, so `oneshot` froze the server's event loop for the
+    // whole ~62 s activation and cost a 30 s TimeoutStopSec SIGKILL on the restart that same
+    // activation triggers. Spec: `.ai/specs/2026-08-30-activation-blocks-the-event-loop.md`.
+    expect(argv).toContain('--property=Type=exec');
+    expect(argv).not.toContain('--property=Type=oneshot');
+    // `--no-block` also returns fast — by not waiting for the start job at all, which reports rc=0
+    // for a unit that CANNOT start. That is the silent launch failure S3a of
+    // `2026-08-29-resolve-runs-the-deployment.md` exists to close; `exec` keeps the verification.
+    expect(argv).not.toContain('--no-block');
+    // Unchanged by the fix: the unit is still active exactly while the deploy runs.
+    expect(argv).toContain('--property=RemainAfterExit=no');
+  });
+
   it('sets the recursion guard in the child environment', () => {
     expect(argv).toContain(`--setenv=${DETACHED_ENV}=1`);
   });

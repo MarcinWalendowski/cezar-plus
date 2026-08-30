@@ -163,6 +163,19 @@ describe('activationArgv — the command has to outlive the restart it causes', 
     expect(argv.join(' ')).not.toContain('/var/log/cezar');
   });
 
+  it('does not block the click: the transient unit is Type=exec, never Type=oneshot', () => {
+    // THE 2026-08-30 REGRESSION, at the call site that paid for it. `registerUnit` runs this argv
+    // through `spawnSync` on the POST /handoff/resolve path deliberately, so that a launch which
+    // fails is reported rather than silently locked. With `Type=oneshot` the start job completes
+    // only when the command EXITS, so that spawnSync blocked node's event loop for the entire
+    // ~62 s activation — 4 of 4 Resolve-driven restarts hit TimeoutStopSec and were SIGKILLed,
+    // against 0 of 5 restarts driven from an ssh `cez server-deploy`.
+    const argv = activationArgv({ ...base, user: true, systemdRun: true });
+    expect(argv).toContain('--property=Type=exec');
+    expect(argv).not.toContain('--property=Type=oneshot');
+    expect(argv).not.toContain('--no-block');
+  });
+
   it('carries the user bus coordinates, which cezar.service does not have', () => {
     // MEASURED 2026-08-29, the first production press: `systemd-run --user` failed with "Failed to
     // connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and

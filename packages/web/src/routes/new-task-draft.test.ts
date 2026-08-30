@@ -74,6 +74,8 @@ describe('the new-task draft store', () => {
       worktree: null,
       autonomous: null,
       generateFollowups: null,
+      reviewSameModel: null,
+      reviewCrossModel: null,
     })
   })
 
@@ -89,6 +91,8 @@ describe('the new-task draft store', () => {
       worktree: false,
       autonomous: null,
       generateFollowups: false,
+      reviewSameModel: null,
+      reviewCrossModel: null,
     })
     const first = readDraft()
     expect(first.text).toBe('fix it')
@@ -110,6 +114,8 @@ describe('the new-task draft store', () => {
       worktree: null,
       autonomous: null,
       generateFollowups: true,
+      reviewSameModel: null,
+      reviewCrossModel: null,
     })
     clearDraftText()
     expect(readDraft()).toEqual({
@@ -123,6 +129,8 @@ describe('the new-task draft store', () => {
       worktree: null,
       autonomous: null,
       generateFollowups: true,
+      reviewSameModel: null,
+      reviewCrossModel: null,
     })
   })
 
@@ -138,6 +146,8 @@ describe('the new-task draft store', () => {
       worktree: false,
       autonomous: null,
       generateFollowups: false,
+      reviewSameModel: null,
+      reviewCrossModel: null,
     })
     // A fresh page has no in-memory cache but keeps localStorage: resetDraft removes storage, so
     // instead drop only the cache by round-tripping through a raw storage read.
@@ -164,6 +174,8 @@ describe('the new-task draft store', () => {
       worktree: null,
       autonomous: null,
       generateFollowups: null,
+      reviewSameModel: null,
+      reviewCrossModel: null,
     })
     expect(readDraft().source).toBeNull()
 
@@ -244,6 +256,7 @@ describe('the new-task draft store', () => {
         source: { source: 'workflow', ref: 'quick-task' },
         runner: null, agentProfile: null, model: null, variants: 1,
         runMode: 'start', worktree: null, autonomous: null, generateFollowups: null,
+        reviewSameModel: null, reviewCrossModel: null,
       })
       const stored = localStorage.getItem('cez-new-task-draft') as string
       resetDraft()
@@ -276,6 +289,8 @@ describe('the new-task draft store', () => {
       worktree: null,
       autonomous: null,
       generateFollowups: null,
+      reviewSameModel: null,
+      reviewCrossModel: null,
     })
 
     resetDraft()
@@ -292,6 +307,8 @@ describe('the new-task draft store', () => {
       worktree: null,
       autonomous: null,
       generateFollowups: null,
+      reviewSameModel: null,
+      reviewCrossModel: null,
     })
   })
 })

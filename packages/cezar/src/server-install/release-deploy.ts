@@ -269,9 +269,16 @@ export function defaultHost(log: (line: string) => void): ReleaseDeployHost {
     now: () => new Date().toISOString(),
     spawnDetached(argv, env) {
       const [bin, ...rest] = argv;
-      // `systemd-run` returns as soon as the unit is REGISTERED — it does not wait for the command
-      // — so this can be synchronous and still hand control straight back. That is the only way to
-      // learn that registration failed; a detached spawn with `stdio: 'ignore'` cannot tell anyone.
+      // `systemd-run` returns as soon as the unit's binary has been execed — it does not wait for
+      // the command to FINISH — so this can be synchronous and still hand control straight back.
+      // That is the only way to learn that the launch failed; a detached spawn with
+      // `stdio: 'ignore'` cannot tell anyone.
+      //
+      // CORRECTED 2026-08-30: this said "as soon as the unit is REGISTERED", which is true of a
+      // `Type=simple` unit and was false of the `Type=oneshot` one `buildSystemdRunArgv` actually
+      // built — that start job waits for the command to EXIT, so this handed control back only
+      // once the deploy was already over. Fixed at the source, where the type is now `Type=exec`;
+      // see `.ai/specs/2026-08-30-activation-blocks-the-event-loop.md`.
       if (bin === 'systemd-run') {
         const done = spawnSync(bin, rest, { env, encoding: 'utf8' });
         if (done.status === 0) return { ok: true };

@@ -84,8 +84,8 @@ function SkillsCatalog() {
   }
 
   const skills = orderSkills(skillsQuery.data ?? [])
-  // Only offer the import surface when a default (vendor) repo actually has skills to import —
-  // a repo with its own configured `skillsRepos` gates nothing, so the endpoint answers empty.
+  // Only offer the import surface when the configured `skillsRepos` team repos actually have
+  // skills to import — a zero-config install has none, so the endpoint answers empty.
   const canImport = (importableQuery.data?.length ?? 0) > 0
   const param = searchParams.get('skill')
   // Explicit choice if it still exists, else the first skill, else the bookmarklet panel —
@@ -167,11 +167,11 @@ function SkillsCatalog() {
                 <DownloadIcon aria-hidden="true" className="size-3.5 shrink-0 text-primary" />
                 <span className="min-w-0 truncate text-[13px] font-medium">Manage skills</span>
                 <span className="ml-auto shrink-0 rounded-full border border-border px-2 py-px font-mono text-[10.5px] text-soft-foreground">
-                  open-mercato
+                  team
                 </span>
               </span>
               <span className="pl-[22px] text-xs text-soft-foreground">
-                Choose which open-mercato skills appear in your catalog.
+                Choose which team skills appear in your catalog.
               </span>
             </Link>
           ) : null}

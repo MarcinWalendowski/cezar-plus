@@ -1,7 +1,8 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { SparklesIcon, TriangleAlertIcon } from 'lucide-react'
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { trackEvent } from '@/api/analytics'
 import { putWorkspaceUiState } from '@/api/client'
 import { queryKeys, useImportableSkills, useWorkspaceUiState, workspaceQueryKeys } from '@/api/queries'
 import type { WorkspaceUiState } from '@loki-labs/better-cezar-api-client'
@@ -68,13 +69,26 @@ export function ImportSkillsPanel() {
     [uiState.data, allNames],
   )
 
+  // `skills.manage_opened` (Analytics, the 2026-08-30 gate-repair spec): fires once per mount,
+  // and only once the importable list has actually loaded non-empty — an empty/errored list means
+  // this render is not the reachable surface the event exists to count (a hand-typed
+  // `?skill=__import` on a zero-config install renders this same component empty).
+  const manageOpenedFired = useRef(false)
+  useEffect(() => {
+    if (manageOpenedFired.current) return
+    if (!importable.isSuccess || all.length === 0) return
+    manageOpenedFired.current = true
+    trackEvent('skills.manage_opened', { importableCount: all.length })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importable.isSuccess, all.length])
+
   // Serializes the PUTs (each waits for the prior) and marks the newest write, so out-of-order
   // completion can neither reorder the server's writes nor let a stale response win the cache.
   const writeChain = useRef<Promise<unknown>>(Promise.resolve())
   const latestWrite = useRef(0)
 
   const persist = useCallback(
-    (compute: (prev: string[]) => string[]) => {
+    (action: 'enable' | 'disable' | 'enable_all' | 'disable_all', compute: (prev: string[]) => string[]) => {
       const key = workspaceQueryKeys.uiState
       // Read the LATEST cache, not the render-captured snapshot — a second toggle fired before the
       // rerender must build on the first, or the two derive from the same old array and one is lost.
@@ -84,6 +98,12 @@ export function ImportSkillsPanel() {
       const next = compute(effectiveImported(current, allNamesRef.current))
       // Optimistic now, so the checkbox flips instantly and the next toggle reads this state.
       queryClient.setQueryData(key, { ...current, importedSkills: next })
+      // `selected`/`total` describe the OFFERED set (what the checkboxes show), computed from the
+      // same `next` the PUT will send — captured here so the eventual event reports what this
+      // write actually intended, not a snapshot taken after later writes may have queued.
+      const offered = allNamesRef.current
+      const selected = offered.filter((name) => next.includes(name)).length
+      const total = offered.length
       const seq = ++latestWrite.current
       writeChain.current = writeChain.current.then(async () => {
         try {
@@ -95,6 +115,11 @@ export function ImportSkillsPanel() {
             // The gate lives in discoverSkills — re-read so the catalog (and the composer picker)
             // reflect the change without a manual Refresh.
             void queryClient.invalidateQueries({ queryKey: queryKeys.skills })
+            // `skills.curation_changed` fires HERE, after the write resolved — never on the
+            // optimistic flip above — so a PUT that rejects (below) never reports a count that
+            // was never actually saved. No repo path or skill name in the props: a closed-set
+            // action plus two counts is all the question needs.
+            trackEvent('skills.curation_changed', { action, selected, total })
           }
         } catch (error: unknown) {
           toast(error instanceof Error ? error.message : String(error), { tone: 'danger' })
@@ -109,9 +134,10 @@ export function ImportSkillsPanel() {
 
   const toggle = useCallback(
     (name: string) => {
-      persist((prev) => (prev.includes(name) ? prev.filter((entry) => entry !== name) : [...prev, name]))
+      const action = imported.has(name) ? 'disable' : 'enable'
+      persist(action, (prev) => (prev.includes(name) ? prev.filter((entry) => entry !== name) : [...prev, name]))
     },
-    [persist],
+    [persist, imported],
   )
 
   const allImported = allNames.length > 0 && allNames.every((name) => imported.has(name))
@@ -120,10 +146,10 @@ export function ImportSkillsPanel() {
     if (allImported) {
       // Remove only the names this panel offers — never touch a selection made elsewhere.
       const offered = new Set(allNamesRef.current)
-      persist((prev) => prev.filter((name) => !offered.has(name)))
+      persist('disable_all', (prev) => prev.filter((name) => !offered.has(name)))
     } else {
       // Union so an already-kept skill is preserved and duplicates never accumulate.
-      persist((prev) => [...new Set([...prev, ...allNamesRef.current])])
+      persist('enable_all', (prev) => [...new Set([...prev, ...allNamesRef.current])])
     }
   }, [allImported, persist])
 

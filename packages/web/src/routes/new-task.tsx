@@ -252,6 +252,24 @@ export function NewTaskRoute() {
     ? skillList.find((skill) => skill.name === source.ref)
     : undefined
 
+  // Composer review-step toggles (`.ai/specs/2026-08-30-composer-review-step-toggles.md`):
+  // shown only when the EFFECTIVE workflow actually carries the matching step id — the same
+  // "filtered, not disabled" doctrine `workflowsForScope` already applies to the picker itself,
+  // because a control that would be silently discarded is worse than an absent one. `None`
+  // resolves to `spec-to-deploy` server-side (`resolveRunWorkflow`'s default floor), the same
+  // fallback `github-task.ts`/`new-task-autostart.ts` already hardcode for it; a skill pick is an
+  // inline one-step chain with neither id, so it resolves to no steps and hides both chips.
+  const effectiveWorkflowName = source === null
+    ? 'spec-to-deploy'
+    : source.source === 'workflow'
+      ? source.ref
+      : null
+  const effectiveWorkflowSteps = effectiveWorkflowName
+    ? offeredWorkflows.find((w) => w.name === effectiveWorkflowName)?.steps ?? []
+    : []
+  const reviewSameModelToggleShown = effectiveWorkflowSteps.some((s) => s.id === 'review-spec-local')
+  const reviewCrossModelToggleShown = effectiveWorkflowSteps.some((s) => s.id === 'review-spec')
+
   // ---- prompt templates (#413 follow-up) ----------------------------------------------------
   // The same list the GitHub hand-over and Inbox composers read. Two ways in here: the footer's
   // icon trigger inserts one by hand at the caret, and a skill whose templates are assigned to it
@@ -388,6 +406,11 @@ export function NewTaskRoute() {
   })
   const worktreeOn = runMode.worktree
   const autonomousOn = runMode.autonomous
+
+  // Composer review-step toggles: no interaction with plan-mode/interactive-skill the way
+  // autonomy has, so the resolution is the plain default-on fallback `worktree` uses elsewhere.
+  const reviewSameModelOn = draft.reviewSameModel ?? true
+  const reviewCrossModelOn = draft.reviewCrossModel ?? true
 
   // Follow-up generation (#444) is offered only while the server has the global inbox on
   // (#471, `CEZ_FOLLOWUPS=1`) — there is no inbox for the follow-ups to land in otherwise, and
@@ -599,6 +622,8 @@ export function NewTaskRoute() {
         images,
         worktree: worktreeOn,
         autonomous: autonomousOn,
+        reviewSameModel: reviewSameModelOn,
+        reviewCrossModel: reviewCrossModelOn,
         generateFollowups: generateFollowupsOn,
         // #374: when the Inbox's "Run" sent us here, hand the entry's id back so the server
         // records this run on it and it leaves the inbox — the audit trail the old
@@ -871,6 +896,26 @@ export function NewTaskRoute() {
                 disabled={draft.runMode === 'plan'}
                 onChange={(on) => update({ autonomous: on })}
               />
+              {reviewSameModelToggleShown ? (
+                <ReviewStepToggle
+                  slot="review-same-model-toggle"
+                  label="Same-model review"
+                  on={reviewSameModelOn}
+                  titleOn="Adds a review pass on the same model as the spec writer before the cross-model review — uncheck to skip it."
+                  titleOff="Skips the same-model review pass — check to add it back."
+                  onChange={(on) => update({ reviewSameModel: on })}
+                />
+              ) : null}
+              {reviewCrossModelToggleShown ? (
+                <ReviewStepToggle
+                  slot="review-cross-model-toggle"
+                  label="Cross-model review"
+                  on={reviewCrossModelOn}
+                  titleOn="Adds a review pass on a different model/provider before implementation begins — uncheck to skip it."
+                  titleOff="Skips the cross-model review pass — check to add it back."
+                  onChange={(on) => update({ reviewCrossModel: on })}
+                />
+              ) : null}
               {/* Workspace scope only: there is nothing to auto-start anywhere else — a
                   project-scoped submit already IS the run. */}
               {workspaceActive ? (
@@ -982,6 +1027,45 @@ function WorktreeToggle({
         <SquareIcon aria-hidden="true" className="size-3 shrink-0 text-soft-foreground" />
       )}
       Worktree
+    </button>
+  )
+}
+
+/** A composer review-step toggle (`.ai/specs/2026-08-30-composer-review-step-toggles.md`):
+ *  checked = the step runs (the default); unchecked = it is dropped from the resolved workflow.
+ *  Shown only when the effective workflow actually carries the matching step id — see the
+ *  `reviewSameModelToggleShown`/`reviewCrossModelToggleShown` doc comment above for why. */
+function ReviewStepToggle({
+  slot,
+  label,
+  on,
+  titleOn,
+  titleOff,
+  onChange,
+}: {
+  slot: string
+  label: string
+  on: boolean
+  titleOn: string
+  titleOff: string
+  onChange: (on: boolean) => void
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={on}
+      data-slot={slot}
+      onClick={() => onChange(!on)}
+      title={on ? titleOn : titleOff}
+      className={cn(chipClass, on && 'border-primary/60 text-foreground')}
+    >
+      {on ? (
+        <CheckIcon aria-hidden="true" className="size-3 shrink-0 text-primary" />
+      ) : (
+        <SquareIcon aria-hidden="true" className="size-3 shrink-0 text-soft-foreground" />
+      )}
+      {label}
     </button>
   )
 }

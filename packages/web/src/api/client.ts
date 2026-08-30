@@ -772,8 +772,8 @@ export async function refreshSkills(): Promise<Skill[]> {
   )
 }
 
-/** The default (vendor) repo's full skill list — every skill the "Import skills" panel can
- *  offer, regardless of import state. Empty once a repo configures its own `skillsRepos`. */
+/** The configured team repos' full skill list — every skill the "Import skills" panel can
+ *  offer, regardless of import state. Empty for a zero-config install. */
 export async function getImportableSkills(opts?: ReadOptions): Promise<ImportableSkill[]> {
   return unwrap(
     await cez.api.v1.p[':projectId'].skills.importable.$get(

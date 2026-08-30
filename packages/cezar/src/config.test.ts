@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
-  DEFAULT_SKILLS_REPOS,
   DEFAULT_STEP_BUDGET,
   DEFAULT_WORKTREE_RETENTION,
   gatedSkillsRepos,
@@ -256,10 +255,10 @@ describe('resolveWorktreeRetention', () => {
 
 /**
  * `gatedSkillsRepos` decides which repos are opt-in per skill (the "Import skills" flow). The
- * invariant: a repo listed as the *default* `skillsRepos` is gated (opt-out per skill),
- * and a repo that sets its OWN `skillsRepos` gates nothing (it took control — everything it lists
- * auto-loads). Detection must probe the raw file because the schema's `.default()` erases the
- * "did the user set this?" distinction — the same reason `resolveWorktreeRetention` probes it.
+ * invariant: the repos listed in the EFFECTIVE `skillsRepos` are gated (opt-out per skill) —
+ * curation applies to whatever team repos an operator has configured. There is no separate
+ * raw-file probe: `loadConfig`'s own degradation (a missing file, malformed JSON, or a
+ * non-object root all fall back to the schema default, `[]`) is what this function relies on.
  */
 describe('gatedSkillsRepos', () => {
   let repoRoot: string;
@@ -273,23 +272,17 @@ describe('gatedSkillsRepos', () => {
     rmSync(repoRoot, { recursive: true, force: true });
   });
 
-  const write = (value: unknown) =>
-    writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), JSON.stringify(value), 'utf8');
+  const configPath = () => join(repoRoot, '.ai/cezar', 'config.json');
+  const write = (value: unknown) => writeFileSync(configPath(), JSON.stringify(value), 'utf8');
 
-  const defaults = DEFAULT_SKILLS_REPOS.map((r) => r.repo);
-
-  it('gates the vendor defaults when there is no config file (zero-config)', async () => {
-    expect([...(await gatedSkillsRepos(repoRoot))]).toEqual(defaults);
-  });
-
-  it('gates the vendor defaults when the config omits skillsRepos (additive)', async () => {
-    write({ maxParallel: 4 });
-    expect([...(await gatedSkillsRepos(repoRoot))]).toEqual(defaults);
-  });
-
-  it('gates nothing once the repo sets its own skillsRepos', async () => {
+  it('gates a configured repo (anti-vacuity: proves the gate can return non-empty)', async () => {
     write({ skillsRepos: [{ repo: 'acme/team-skills', ref: 'main' }] });
-    expect((await gatedSkillsRepos(repoRoot)).size).toBe(0);
+    expect([...(await gatedSkillsRepos(repoRoot))]).toEqual(['acme/team-skills']);
+  });
+
+  it('gates every configured repo, not just the first', async () => {
+    write({ skillsRepos: [{ repo: 'a/one' }, { repo: 'b/two' }] });
+    expect([...(await gatedSkillsRepos(repoRoot))]).toEqual(['a/one', 'b/two']);
   });
 
   it('gates nothing even when skillsRepos is set to empty (an explicit opt-out)', async () => {
@@ -297,9 +290,23 @@ describe('gatedSkillsRepos', () => {
     expect((await gatedSkillsRepos(repoRoot)).size).toBe(0);
   });
 
-  it('degrades a malformed config to the vendor defaults (like loadConfig)', async () => {
-    writeFileSync(join(repoRoot, '.ai/cezar', 'config.json'), '{ nope', 'utf8');
-    expect([...(await gatedSkillsRepos(repoRoot))]).toEqual(defaults);
+  it('gates nothing when the config omits skillsRepos (no repos configured)', async () => {
+    write({ maxParallel: 4 });
+    expect((await gatedSkillsRepos(repoRoot)).size).toBe(0);
+  });
+
+  it('gates nothing when there is no config file at all (zero-config)', async () => {
+    expect((await gatedSkillsRepos(repoRoot)).size).toBe(0);
+  });
+
+  it('degrades malformed JSON to no repos gated, via loadConfig', async () => {
+    writeFileSync(configPath(), '{ nope', 'utf8');
+    expect((await gatedSkillsRepos(repoRoot)).size).toBe(0);
+  });
+
+  it('degrades a non-object root to no repos gated, via loadConfig', async () => {
+    writeFileSync(configPath(), '[]', 'utf8');
+    expect((await gatedSkillsRepos(repoRoot)).size).toBe(0);
   });
 });
 
