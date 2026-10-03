@@ -37,7 +37,7 @@ export function FiledTodosCard({ run }: { run: ApiRun }) {
             return (
               <li key={key} data-slot="filed-todo" data-todo-id={item.todoId} className="flex items-center gap-2 text-[12.5px]">
                 <Link
-                  to={`/tasks?fdetail=${encodeURIComponent(key)}`}
+                  to={`/p/${encodeURIComponent(item.project)}/todos/${encodeURIComponent(item.todoId)}`}
                   data-slot="filed-todo-link"
                   className="min-w-0 flex-1 truncate font-medium hover:underline"
                 >

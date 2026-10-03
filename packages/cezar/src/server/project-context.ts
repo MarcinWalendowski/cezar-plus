@@ -9,6 +9,7 @@ import { KnowledgeStore } from '../knowledge/store.ts';
 import { NotificationOutbox, notificationsDataDir } from '../notifications/outbox.ts';
 import { NotificationRegistry } from '../notifications/registry.ts';
 import { NotificationSender } from '../notifications/sender.ts';
+import { armRepoHandle } from '../runs/arm-repo-handle.ts';
 import { reclaimWorktrees } from '../runs/retention.ts';
 import { RunStore } from '../runs/store.ts';
 import { findForeignWorkspaceOwner, loadForeignWorkspaceRunSources } from '../runs/worktree-ownership.ts';
@@ -23,6 +24,7 @@ import { RunManager } from '../workflows/run.ts';
 import { isLoopbackHost } from './capabilities.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { getRepoInfo } from './git.ts';
+import { resolveTrackerAgentEnv } from './tracker/agent-credentials.ts';
 
 /**
  * Per-project server context (spec 2026-07-20-multi-project-workspace,
@@ -457,6 +459,8 @@ export class ProjectContexts {
     this.notifyStoreCreated(store);
     const manager = new RunManager(store, project.root, {
       semaphore: this.semaphore,
+      projectId: project.id,
+      resolveTrackerEnv: resolveTrackerAgentEnv,
       ...(this.accountAuth ? { accountAuth: this.accountAuth } : {}),
     });
 
@@ -517,6 +521,7 @@ export class ProjectContexts {
         await reclaimWorktrees(project.root, store, keep).catch(() => [] as string[]);
       }
       await manager.recover();
+      armRepoHandle(store, project.root);
       return {
         id: project.id,
         root: project.root,

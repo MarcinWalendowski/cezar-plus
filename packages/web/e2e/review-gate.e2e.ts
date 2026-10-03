@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, cezarCli, fixtureServeEnv } from './agent-browser'
 
 /**
  * The review gate (R3 Step 2.2) end-to-end, against a LIVE dry run — cezar's core promise
@@ -85,6 +85,7 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot, { CEZ_REVIEW_GATE: '1' }), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
 
   const created = (await (
     await fetch(`${baseUrl}/api/v1/runs`, {
@@ -108,10 +109,10 @@ beforeAll(async () => {
   browser.waitForFunction(`document.querySelector('[data-slot="review-panel"]') !== null`)
 }, 180_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('the review gate against a live parked run', () => {

@@ -24,10 +24,12 @@ const configFile = resolve(dataDir, 'config.json')
 
 let browser: AgentBrowser
 let baseUrl: string
+let bootProject: string
 let previousConfig: string | null = null
 
-beforeAll(() => {
+beforeAll(async () => {
   baseUrl = readTestEnv().baseUrl
+  bootProject = ((await (await fetch(`${baseUrl}/api/v1/projects`)).json()) as { bootProject: string }).bootProject
   previousConfig = existsSync(configFile) ? readFileSync(configFile, 'utf8') : null
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(DESKTOP.width, DESKTOP.height)
@@ -54,7 +56,7 @@ async function waitForConfig(check: (config: ConfigAnswer) => boolean): Promise<
 }
 
 const gotoResources = () => {
-  browser.goto(`${baseUrl}/settings/worktrees`)
+  browser.goto(`${baseUrl}/settings/worktrees?project=${encodeURIComponent(bootProject)}`)
   browser.waitForFunction(`document.querySelector('[data-slot="worktrees-section"]') !== null`)
 }
 

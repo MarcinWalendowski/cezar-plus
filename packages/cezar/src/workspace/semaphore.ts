@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { LockableRunner } from '@loki-labs/cezar-plus-contract';
-import { DEFAULT_MONITORING_WAKE_MINUTES, loadWorkspaceConfig } from './config.ts';
+import { DEFAULT_IDLE_TIMEOUT_MINUTES, DEFAULT_MONITORING_WAKE_MINUTES, loadWorkspaceConfig } from './config.ts';
 
 /**
  * Workspace-wide resource governance (spec 2026-07-20-multi-project-workspace,
@@ -52,6 +52,8 @@ export interface WorkspaceResourceLimits {
   maxHeavySteps?: number;
   /** Durable monitoring sessions that do not consume active-task capacity. */
   maxMonitoringSessions?: number;
+  /** Plain waiting/ASK session idle timeout in minutes; null/0 disables it. */
+  idleTimeoutMinutes?: number | null;
   /** Automatic monitoring re-check cadence in minutes. Default ON at
    *  `DEFAULT_MONITORING_WAKE_MINUTES`; explicit `null` means stay parked; absent means
    *  "this loader predates the key" and reads as the default. */
@@ -165,6 +167,7 @@ export interface SemaphoreParticipant {
 const DEFAULT_LIMITS: WorkspaceResourceLimits = {
   maxParallel: 2,
   maxMonitoringSessions: 2,
+  idleTimeoutMinutes: DEFAULT_IDLE_TIMEOUT_MINUTES,
   monitoringWakeIntervalMinutes: DEFAULT_MONITORING_WAKE_MINUTES,
   autoResumeOnUsageLimit: true,
   fallbackAcrossAccountsWhenLimited: true,
@@ -190,6 +193,7 @@ async function loadResourceLimits(): Promise<WorkspaceResourceLimits> {
     // (besides the schema) that has to remember absent means unbounded.
     maxHeavySteps: resources.maxHeavySteps,
     maxMonitoringSessions: resources.maxMonitoringSessions,
+    idleTimeoutMinutes: resources.idleTimeoutMinutes,
     monitoringWakeIntervalMinutes: resources.monitoringWakeIntervalMinutes,
     autoResumeOnUsageLimit: resources.autoResumeOnUsageLimit,
     fallbackAcrossAccountsWhenLimited: resources.fallbackAcrossAccountsWhenLimited,
@@ -324,6 +328,12 @@ export class WorkspaceSemaphore {
 
   maxMonitoringSessions(): number {
     return this.limits.maxMonitoringSessions ?? 2;
+  }
+
+  idleTimeoutMinutes(): number | null {
+    return this.limits.idleTimeoutMinutes === undefined
+      ? DEFAULT_IDLE_TIMEOUT_MINUTES
+      : this.limits.idleTimeoutMinutes;
   }
 
   /** Cadence for automatic monitoring re-checks, or null when the operator chose "park

@@ -71,6 +71,7 @@ if [ "$installed" != 1 ]; then
 fi
 
 # ---- 3. run the specs -------------------------------------------------------
+export CEZ_E2E_RECORD="${CEZ_E2E_RECORD:-1}"
 cd "$REPO_ROOT"
 if npx vitest run --config packages/web/e2e/vitest.config.ts; then
   echo "TEST_E2E_STATUS=passed"

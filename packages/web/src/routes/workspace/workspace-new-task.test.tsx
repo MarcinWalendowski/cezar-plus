@@ -54,7 +54,7 @@ const HEALTH_ON: HealthResponse = {
     costMetrics: true,
     followups: true,
     singleProject: false,
-    automations: false,
+    automations: false, dispatch: false,
     knowledge: false,
     sources: false,
     notes: true,

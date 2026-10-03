@@ -12,9 +12,9 @@ yourself. It's idempotent and resumable, and it ends with a real
 works behind its login.
 
 ```bash
-npx cezar-cli server-install   --platform <id>   # install
-npx cezar-cli server-deploy    --platform <id>   # redeploy a new version (reload the service)
-npx cezar-cli server-uninstall --platform <id>   # reverse it
+npx @loki-labs/cezar-plus-run server-install   --platform <id>   # install
+npx @loki-labs/cezar-plus-run server-deploy    --platform <id>   # redeploy a new version (reload the service)
+npx @loki-labs/cezar-plus-run server-uninstall --platform <id>   # reverse it
 ```
 
 ## Available providers
@@ -91,14 +91,14 @@ already gives them separate ports, nginx sites and logins.
 
 ## Redeploying a new version
 
-`npx cezar-cli server-deploy --platform <id>` is the standardized, per-strategy way to
+`npx @loki-labs/cezar-plus-cli server-deploy --platform <id>` is the standardized, per-strategy way to
 roll out a new cezar-plus: it restarts the service and re-verifies. See each guide's
 **Updating / redeploying** section for the checkout-vs-npx details.
 
 To test an unreleased build on a server, pin a preview version
 (see [Preview builds](../publishing.md)) — for example roll a box to a PR's
-exact snapshot with `npx cezar-cli@<version> server-deploy --platform <id>`,
-or track a branch with `npx cezar-cli@develop server-deploy --platform <id>`.
+exact snapshot with `npx @loki-labs/cezar-plus-run@<version> server-deploy --platform <id>`,
+or track a branch with `npx @loki-labs/cezar-plus-run@develop server-deploy --platform <id>`.
 
 ---
 

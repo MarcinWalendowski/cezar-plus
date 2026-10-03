@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
 
 /**
  * The Files tab (R5 Step 1.6) end-to-end against a LIVE dry run, same doctrine as
@@ -99,6 +99,7 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot, { CEZ_REVIEW_GATE: '1' }), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   bootProject = await bootProjectId(baseUrl)
 
   const created = (await (
@@ -120,10 +121,10 @@ beforeAll(async () => {
   browser.setViewport(1440, 900)
 }, 180_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('the Files tab against a live dry-run worktree', () => {

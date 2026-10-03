@@ -108,7 +108,7 @@ function health(forgeAvailable: boolean, automations = false): HealthResponse {
     checks: [],
     defaultRunner: 'claude',
     forge: forgeAvailable ? { kind: 'github', available: true } : null,
-    capabilities: { cluster: false, localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: true, singleProject: false, automations, knowledge: false, sources: false, notes: false, workspaceViews: false, notify: false, accountUsage: false, autoAccounts: false, skills: true },
+    capabilities: { cluster: false, localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: true, singleProject: false, automations, knowledge: false, sources: false, notes: false, workspaceViews: false, notify: false, accountUsage: false, autoAccounts: false, skills: true, dispatch: false },
   }
 }
 
@@ -239,7 +239,15 @@ describe('opening and closing', () => {
 })
 
 describe('Views group', () => {
-  it('leads with New task and its C hint, then the 6 nav destinations', async () => {
+  it('uses the associated provider label in a single-project workspace', async () => {
+    renderPalette({ projects: [project({ id: 'cezar', tracker: 'linear' })], entry: '/p/cezar/' })
+    openWith({ metaKey: true })
+    await screen.findByRole('dialog')
+    await waitFor(() => expect(document.querySelector('[data-nav-to="/tracker"]')).not.toBeNull())
+    expect(document.querySelector('[data-nav-to="/tracker"]')?.textContent).toContain('Linear')
+  })
+
+  it('leads with New task and its C hint, then the 8 nav destinations', async () => {
     renderPalette({ automations: true })
     openWith({ metaKey: true })
     await screen.findByRole('dialog')
@@ -303,22 +311,19 @@ describe('Views group', () => {
     ).toBe('/new')
   })
 
-  // R6 Step 1.1: the palette must not offer a view the sidebar honestly hides. Since 2026-08-14
-  // that is true of `/github` under EVERY health answer, forge or no forge — so this asserts the
-  // forge-gated `/automations` (the one item still carrying that gate) alongside it.
-  it('drops the forge-gated views when health reports no forge', async () => {
+  it('offers opted-in scheduled automations without a forge', async () => {
     renderPalette({ forge: false, automations: true })
     openWith({ metaKey: true })
     await screen.findByRole('dialog')
 
     await waitFor(() =>
-      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(6),
+      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(7),
     )
     const targets = [...document.querySelectorAll('[data-slot="palette-view"]')].map((view) =>
       view.getAttribute('data-nav-to'),
     )
     expect(targets).not.toContain('/github')
-    expect(targets).not.toContain('/automations')
+    expect(targets).toContain('/automations')
   })
 
   /** The hidden pair (GitHub, Workflows — Skills was restored 2026-08-17), asserted with the forge
@@ -986,5 +991,24 @@ describe('the pure ordering helpers', () => {
     // Unscoped (global settings) nothing is active, so it is pure recency.
     expect(orderProjects(input, null).map((entry) => entry.id)).toEqual(['here', 'recent', 'old'])
     expect(input.map((entry) => entry.id)).toEqual(['old', 'here', 'recent'])
+  })
+
+  it('orderProjects follows the sidebar’s hand-picked order, still sinking the active one', () => {
+    // #952: the drawer's order reaches the palette, because a registry listed two ways in one
+    // cockpit reads as a glitch. Only the active-last rule is the palette's own.
+    const input = [
+      project({ id: 'old', lastOpenedAt: '2026-07-10T00:00:00Z' }),
+      project({ id: 'here', lastOpenedAt: '2026-07-14T00:00:00Z' }),
+      project({ id: 'recent', lastOpenedAt: '2026-07-12T00:00:00Z' }),
+    ]
+    const dragged = ['old', 'here', 'recent']
+    expect(orderProjects(input, null, dragged).map((entry) => entry.id)).toEqual(dragged)
+    // The picked order survives being split around the active project — `old` still precedes
+    // `recent`, which recency alone would have reversed.
+    expect(orderProjects(input, 'here', dragged).map((entry) => entry.id)).toEqual([
+      'old',
+      'recent',
+      'here',
+    ])
   })
 })

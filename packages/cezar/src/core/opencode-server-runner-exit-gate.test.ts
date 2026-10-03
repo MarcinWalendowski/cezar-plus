@@ -26,6 +26,22 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
+const httpHook = vi.hoisted(() => ({
+  request: null as null | typeof import('./opencode-http.ts').opencodeRequest,
+  events: null as null | typeof import('./opencode-http.ts').openOpencodeEventStream,
+}));
+
+vi.mock('./opencode-http.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./opencode-http.ts')>();
+  return {
+    ...actual,
+    opencodeRequest: (...args: Parameters<typeof actual.opencodeRequest>) =>
+      httpHook.request ? httpHook.request(...args) : actual.opencodeRequest(...args),
+    openOpencodeEventStream: (...args: Parameters<typeof actual.openOpencodeEventStream>) =>
+      httpHook.events ? httpHook.events(...args) : actual.openOpencodeEventStream(...args),
+  };
+});
+
 /** Polls a predicate against the accumulated v1 event log — the only externally visible proof of
  *  internal state this runner offers (no getters for `sessionId`/`terminatedByCezar`). */
 async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
@@ -214,30 +230,28 @@ describe('OpencodeServerRunner exit gate — exit vs. close, whichever arrives f
     return { child, stdout, kills };
   }
 
-  /** Bare-minimum fetch double: POST /session, GET /event (a stream that never closes on its
-   *  own — the test kills the child directly instead), POST /session/:id/message. */
-  function installFakeFetch(): void {
-    vi.stubGlobal(
-      'fetch',
-      async (url: string, init?: RequestInit) => {
-        if (url.endsWith('/event')) {
-          const body = new ReadableStream<Uint8Array>({ start() {} });
-          return new Response(body, { status: 200 });
-        }
-        if (init?.method === 'POST' && url.endsWith('/session')) {
-          return new Response(JSON.stringify({ id: 'ses_fake_1' }), {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          });
-        }
-        // .../session/ses_fake_1/message
-        return new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } });
-      },
-    );
+  /** A connected event bus stays live until the fixture tears the child down. */
+  function installFakeHttp(): void {
+    let onFrame: ((frame: string) => void) | undefined;
+    httpHook.events = async (_url, opts) => {
+      onFrame = opts.onFrame;
+      opts.signal?.addEventListener('abort', () => opts.onClose?.(), { once: true });
+      return true;
+    };
+    httpHook.request = async (url) => {
+      if (url.endsWith('/session')) return { status: 200, body: JSON.stringify({ id: 'ses_fake_1' }) };
+      // A settled POST alone no longer closes a live turn; the wire idle signal does.
+      queueMicrotask(() => onFrame?.('data: ' + JSON.stringify({
+        type: 'session.idle', properties: { sessionID: 'ses_fake_1' },
+      })));
+      return { status: 200, body: '{}' };
+    };
   }
 
   afterEach(() => {
     spawnHook.override = null;
+    httpHook.request = null;
+    httpHook.events = null;
     vi.unstubAllGlobals();
   });
 
@@ -247,7 +261,7 @@ describe('OpencodeServerRunner exit gate — exit vs. close, whichever arrives f
     events: AgentEvent[];
     kills: NodeJS.Signals[];
   }> {
-    installFakeFetch();
+    installFakeHttp();
     const { child, stdout, kills } = fakeChild();
     spawnHook.override = () => child;
 

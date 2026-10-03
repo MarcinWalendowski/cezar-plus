@@ -137,7 +137,7 @@ describe('useRunNodeRoster', () => {
           repoRoot: '/repo',
           repo: { root: '/repo', branch: 'main' },
           forge: null,
-          capabilities: { localHandoff: true, followups: true, cluster: true },
+          capabilities: { localHandoff: true, followups: true, cluster: true, dispatch: false },
           defaultRunner: 'claude',
           checks: [],
         })
@@ -212,7 +212,7 @@ describe('useRunNodeRoster', () => {
             repoRoot: '/repo',
             repo: { root: '/repo', branch: 'main' },
             forge: null,
-            capabilities: { localHandoff: true, followups: true, cluster: true },
+            capabilities: { localHandoff: true, followups: true, cluster: true, dispatch: false },
             defaultRunner: 'claude',
             checks: [],
           })

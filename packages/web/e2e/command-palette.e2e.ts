@@ -43,18 +43,18 @@ describe('command palette', () => {
     browser.waitForFunction(`document.activeElement?.hasAttribute('cmdk-input') === true`)
     browser.screenshot(`${artifactsDir}/command-palette-open.png`)
 
-    // "view work" rides the Views values' `view ` prefix, so the Workflows destination wins the
+    // "view skills" rides the Views values' `view ` prefix, so the Skills destination wins the
     // ranking regardless of which runs and skills this shared machine happens to have.
-    browser.fill(INPUT, 'view work')
+    browser.fill(INPUT, 'view skills')
     browser.waitForFunction(
-      `document.querySelector('[cmdk-item][aria-selected="true"]')?.getAttribute('data-nav-to') === '/workflows'`,
+      `document.querySelector('[cmdk-item][aria-selected="true"]')?.getAttribute('data-nav-to') === '/skills'`,
     )
     browser.screenshot(`${artifactsDir}/command-palette-filtered.png`)
 
     browser.press('Enter')
-    browser.waitForFunction(`location.pathname === '/p/${bootProject}/workflows'`)
+    browser.waitForFunction(`location.pathname === '/p/${bootProject}/skills'`)
     browser.waitForFunction(`document.querySelector('${ROOT}') === null`)
-    expect(browser.url()).toContain('/workflows')
+    expect(browser.url()).toContain('/skills')
     expect(browser.count(ROOT)).toBe(0)
   })
 

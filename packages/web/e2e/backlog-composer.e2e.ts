@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, cezarCli, fixtureServeEnv } from './agent-browser'
 
 const artifactsDir = resolve(import.meta.dirname, '../../../.ai/qa/artifacts_e2e')
 const sessionId = `e2e-backlog-composer-${process.pid}`
@@ -83,32 +83,19 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
 
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 900)
 
-  // A project registered in a fresh CEZ_HOME still has no organization, so the asynchronous
-  // onboarding gate can replace an initially-rendered composer after the first interaction.
-  // Complete local onboarding before the feature walk, then navigate cold so the client's
-  // onboarding-entry probe cannot retain its pre-creation result.
-  browser.goto(`${baseUrl}/tasks`)
-  browser.waitForFunction(`document.querySelector('[data-slot="onboarding-org-name"]') !== null`)
-  browser.fill('[data-slot="onboarding-org-name"]', 'fixture-org')
-  browser.click('[data-slot="onboarding-org-submit"]')
-  browser.waitForFunction(
-    `document.querySelector('[data-slot="onboarding-team-accept"]') !== null || !location.pathname.startsWith('/onboarding')`,
-  )
-  if (browser.count('[data-slot="onboarding-team-accept"]') > 0) {
-    browser.click('[data-slot="onboarding-team-accept"]')
-  }
   browser.goto(`${baseUrl}/p/fixture/new`)
   browser.waitForFunction(`location.pathname === '/p/fixture/new'`)
 }, 180_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('the project-scoped Backlog composer against a live dry-run server', () => {

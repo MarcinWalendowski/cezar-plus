@@ -39,6 +39,7 @@ const MENU_BUTTON = '[data-slot="mobile-top-bar"] button[aria-label="Open menu"]
 let browser: AgentBrowser
 let baseUrl: string
 let forgeAvailable = false
+let automationsAvailable = false
 /** The task-thread view's subject — an existing run when the env has one, else a dry run
  *  started (and settled) by this spec. */
 let threadRunId: string
@@ -67,8 +68,9 @@ async function waitForStatus(id: string, wanted: string[]): Promise<string> {
 
 beforeAll(async () => {
   baseUrl = readTestEnv().baseUrl
-  const health = (await api<{ forge: { available: boolean } | null }>('/api/v1/health'))
+  const health = (await api<{ forge: { available: boolean } | null; capabilities: { automations: boolean } }>('/api/v1/health'))
   forgeAvailable = health.forge?.available === true
+  automationsAvailable = health.capabilities.automations
 
   // The thread view needs a run. Prefer whatever the shared env already holds (newest live
   // record); only when the list is empty does this spec start one dry run — and then settles it
@@ -159,7 +161,7 @@ describe('iOS sweep — every primary view at 390×844', () => {
 
   // Global settings live outside `/p/:projectId` (step 3.5) — swept at their real URLs.
   it('/settings/global/appearance', () => {
-    sweep('settings-appearance', '/settings/global/appearance', '[data-route="settings-global-appearance"]')
+    sweep('settings-appearance', '/settings/global/appearance', '[data-route="settings-appearance"]')
   })
 
   it('/settings/skills', () => {
@@ -176,8 +178,19 @@ describe('iOS sweep — every primary view at 390×844', () => {
     sweep(
       'settings-notifications',
       '/settings/global/notifications',
-      '[data-route="settings-global-notifications"]',
+      '[data-route="settings-notifications"]',
     )
+  })
+
+  it('/automations (list, spec 2026-09-14)', () => {
+    sweep('automations', '/automations', '[data-slot="automations-list"], [data-slot="centered-state"]')
+  })
+
+  it('/automations/new (editor)', () => {
+    sweep('automations-new', '/automations/new', automationsAvailable
+      ? '[data-slot="automation-editor"]'
+      : '[data-route="automations"] [data-slot="centered-state"]')
+    if (!automationsAvailable) expect(browser.text('main')).toContain('Automations are off')
   })
 
   it('/new (full-screen composer)', () => {

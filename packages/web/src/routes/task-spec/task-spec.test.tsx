@@ -237,7 +237,7 @@ const HEALTH: HealthResponse = {
   capabilities: {
     cluster: false, localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true,
     followups: false, singleProject: false, knowledge: false, sources: false, notes: false,
-    workspaceViews: false, notify: false, accountUsage: false, autoAccounts: false, skills: true, automations: false,
+    workspaceViews: false, notify: false, accountUsage: false, autoAccounts: false, skills: true, automations: false, dispatch: false,
   },
 }
 

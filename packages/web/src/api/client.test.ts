@@ -29,6 +29,7 @@ import {
   getSkillsWhenReady,
   getTodos,
   getUiState,
+  getWorkspaceConfig,
   getWorkflows,
   getWorkspaceTodos,
   openRunInCli,
@@ -73,7 +74,8 @@ const VALID_PROVIDER_STATUS = {
     { provider: 'claude', status: 'connected', enabled: true },
     { provider: 'codex', status: 'disconnected', enabled: true },
     { provider: 'opencode', status: 'not-installed', enabled: true },
-  ],
+    { provider: 'cursor', status: 'not-installed', enabled: true },
+        ],
 }
 
 /** The (path, init) the client actually asked for. */
@@ -133,7 +135,9 @@ describe('request shapes', () => {
       body: { authFailureId: 'incident-1' },
     },
     { name: 'getRunnerModels', call: () => getRunnerModels('codex'), path: '/api/v1/models?runner=codex', method: 'GET' },
+    { name: 'getRunnerModels(claude)', call: () => getRunnerModels('claude'), path: '/api/v1/models?runner=claude', method: 'GET' },
     { name: 'getRunnerModels(opencode)', call: () => getRunnerModels('opencode'), path: '/api/v1/models?runner=opencode', method: 'GET' },
+    { name: 'getRunnerModels(cursor)', call: () => getRunnerModels('cursor'), path: '/api/v1/models?runner=cursor', method: 'GET' },
     { name: 'getRuns', call: () => getRuns(), path: '/api/v1/runs', method: 'GET' },
     { name: 'getRun', call: () => getRun('run-1'), path: '/api/v1/runs/run-1', method: 'GET' },
     { name: 'getRunDiff', call: () => getRunDiff('run-1'), path: '/api/v1/runs/run-1/diff', method: 'GET' },
@@ -406,6 +410,41 @@ describe('project scope (multi-project spec, step 3.1)', () => {
 })
 
 describe('response parsing', () => {
+  const workspaceConfig = (resources: Record<string, unknown>) => ({
+    browseRoot: '~/',
+    projectsDir: '~/cezar/projects',
+    skillsAutoUpdate: null,
+    effectiveSkillsAutoUpdate: true,
+    composerDefaults: {
+      autonomous: null,
+      worktree: null,
+      inheritedAutonomous: 'source-dependent',
+      inheritedWorktree: true,
+    },
+    resources: {
+      maxParallel: 2,
+      maxMonitoringSessions: 2,
+      monitoringWakeIntervalMinutes: 5,
+      autoResumeOnUsageLimit: true,
+      memoryLimitMb: null,
+      worktreeRetentionDefault: 10,
+      ...resources,
+    },
+    agentDefaults: {},
+  })
+
+  it.each([
+    ['absent defaults to 15', {}, 15],
+    ['null stays disabled', { idleTimeoutMinutes: null }, null],
+    ['zero stays disabled', { idleTimeoutMinutes: 0 }, 0],
+    ['positive values pass through', { idleTimeoutMinutes: 30 }, 30],
+  ])('normalizes idle timeout: %s', async (_label, resources, expected) => {
+    reply(workspaceConfig(resources))
+    await expect(getWorkspaceConfig()).resolves.toMatchObject({
+      resources: { idleTimeoutMinutes: expected },
+    })
+  })
+
   it('normalizes provider status into canonical order without unexpected fields', async () => {
     reply({
       ignored: 'top-level raw value',
@@ -413,7 +452,8 @@ describe('response parsing', () => {
         { provider: 'opencode', status: 'unknown', hint: 'Try again.', enabled: true, raw: 'private' },
         { provider: 'claude', status: 'connected', enabled: false, account: 'private@example.test' },
         { provider: 'codex', status: 'disconnected', enabled: true, authFailureId: 'incident-1', raw: 'private' },
-      ],
+        { provider: 'cursor', status: 'not-installed', enabled: true },
+        ],
     })
 
     await expect(getProviderStatus()).resolves.toEqual({
@@ -421,7 +461,8 @@ describe('response parsing', () => {
         { provider: 'claude', status: 'connected', enabled: false },
         { provider: 'codex', status: 'disconnected', enabled: true, authFailureId: 'incident-1' },
         { provider: 'opencode', status: 'unknown', hint: 'Try again.', enabled: true },
-      ],
+        { provider: 'cursor', status: 'not-installed', enabled: true },
+        ],
     })
   })
 
@@ -436,6 +477,7 @@ describe('response parsing', () => {
           { provider: 'claude', status: 'connected' },
           { provider: 'codex', status: 'future-state' },
           { provider: 'opencode', status: 'connected' },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     ],
@@ -446,6 +488,7 @@ describe('response parsing', () => {
           { provider: 'claude', status: 'connected' },
           { provider: 'claude', status: 'disconnected' },
           { provider: 'opencode', status: 'connected' },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     ],
@@ -455,6 +498,7 @@ describe('response parsing', () => {
         providers: [
           { provider: 'claude', status: 'connected' },
           { provider: 'codex', status: 'connected' },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     ],

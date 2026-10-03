@@ -839,7 +839,7 @@ function TransportDialog({
                 data-slot="transport-dialog-auth-mode"
                 value={authMode}
                 onChange={(event) => setAuthMode(event.target.value as TransportAuthMode)}
-                className="rounded-md border border-input bg-card px-2 py-1 text-[13px] outline-none focus-visible:border-ring"
+                className="rounded-md border border-input bg-card px-2 py-1 text-[13px] outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
               >
                 <option value="unset">{isEdit ? 'Leave unchanged' : 'No auth'}</option>
                 <option value="env">Environment variable</option>

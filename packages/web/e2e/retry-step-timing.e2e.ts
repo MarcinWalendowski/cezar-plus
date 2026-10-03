@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
 import record from './fixtures/retry-timing-run.record.json'
 
 /**
@@ -94,6 +94,7 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   bootProject = await bootProjectId(baseUrl)
 
   // Assert the fixture parses BEFORE touching the browser, so a schema drift fails as a schema
@@ -124,7 +125,7 @@ beforeAll(async () => {
   }
 }, 120_000)
 
-afterAll(() => {
+afterAll(async () => {
   if (recordingStarted) {
     try {
       browser.stopRecording(recordingPath)
@@ -133,8 +134,8 @@ afterAll(() => {
     }
   }
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('retry step timing', () => {

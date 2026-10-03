@@ -27,6 +27,7 @@ import { isHttpUrl } from '@/lib/utils'
 import { finishTitle } from './run-actions'
 import { readTaskDraft, writeTaskDraft } from './task-drafts'
 import { useContinuationProvider } from './continuation-provider'
+import { useDraft } from './thread-draft'
 import { useFinishRun } from './use-finish-run'
 
 /**
@@ -129,8 +130,24 @@ function ReviewActions({ run }: { run: ApiRun }) {
   // the composer, whose single `onValueChange` carries both), so ONE helper writes the pair and
   // they cannot drift — that is the `hand-to-agent.tsx` trap, and here it is real.
   const [notes, setNotes] = useState(() => readTaskDraft('reviewNotes', run.id))
+  const initialText = useRef(notes).current
+  const draft = useDraft(run.id, 'review-notes', { initialText })
+  const edited = useRef(false)
+  const seeded = useRef(false)
+  useEffect(() => {
+    if (!draft.ready || edited.current) return
+    if (!seeded.current && notes !== '') {
+      seeded.current = true
+    } else if (!seeded.current && draft.text !== '') {
+      seeded.current = true
+      setNotes(draft.text)
+      writeTaskDraft('reviewNotes', run.id, draft.text)
+    }
+  }, [draft.ready, draft.text, draft.setText, notes, run.id])
   const updateNotes = (next: string) => {
+    edited.current = true
     setNotes(next)
+    draft.setText(next)
     writeTaskDraft('reviewNotes', run.id, next)
   }
   const [manual, setManual] = useState<string | null>(null)
@@ -144,10 +161,14 @@ function ReviewActions({ run }: { run: ApiRun }) {
   const sendBack = useMutation({
     mutationFn: async (text: string) => {
       if (!continuation.canContinue) return null
-      return continueRun(run.id, {
-        text: `Review feedback:\n${text}`,
-        runner: continuation.runnerOverride,
-      })
+      // Through the draft's submit seam: the notes are dropped once they have really gone back,
+      // and a rejected send-back leaves them in the box AND in the store.
+      return draft.submit(() =>
+        continueRun(run.id, {
+          text: `Review feedback:\n${text}`,
+          runner: continuation.runnerOverride,
+        }),
+      )
     },
     onSuccess: (result) => {
       if (result === null) return

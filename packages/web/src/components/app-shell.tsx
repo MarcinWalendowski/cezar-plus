@@ -2,6 +2,8 @@ import {
   FolderIcon,
   FilePlus2Icon,
   FolderOpenIcon,
+  LayersIcon,
+  LayoutDashboardIcon,
   MenuIcon,
   PlusIcon,
   SearchIcon,
@@ -10,9 +12,10 @@ import {
 } from 'lucide-react'
 import * as React from 'react'
 import type { ReactNode } from 'react'
-import { Link as RouterLink, matchPath, useLocation } from 'react-router'
+import { Link as RouterLink, NavLink, matchPath, useLocation } from 'react-router'
 
 import { AccountUsagePanel } from '@/components/account-usage-panel'
+import { TRACKER_PROVIDERS } from '@/lib/tracker-providers'
 import { AddProjectDialog } from '@/components/add-project-dialog'
 import { BlankProjectDialog } from '@/components/blank-project-dialog'
 import { CloneProjectDialog } from '@/components/clone-project-dialog'
@@ -20,6 +23,7 @@ import { openCommandPalette } from '@/components/command-palette'
 import { GithubIcon } from '@/components/icons'
 import { commandShortcutHint } from '@/lib/use-command-shortcut'
 import { Link, stripProjectPrefix } from '@/lib/project-router'
+import { SelfUpdateDialog } from '@/components/self-update-dialog'
 import { StatusDot } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
@@ -39,6 +43,7 @@ import {
   workspaceNavItems,
   type NavItem,
 } from '@/components/nav-items'
+import type { TrackerKind } from '@loki-labs/cezar-plus-api-client'
 import {
   DEFAULT_SIDEBAR_WIDTH,
   MAX_SIDEBAR_WIDTH,
@@ -87,6 +92,11 @@ export type AppShellProps = {
   latestVersion?: string | null
   /** Step 3.3's grouped task quick-list. */
   taskQuickList?: ReactNode
+  /** The sidebar's machine glance (spec `.ai/specs/2026-09-20-host-telemetry-sidebar-widget.md`):
+   *  effective CPU, its sparkline and compact RAM, rendered as the footer's first row. It is a
+   *  SLOT because `AppShell` stays presentational and QueryClient-free - the container supplies a
+   *  node whose own viewport/transport gate decides whether anything mounts at all. */
+  hostWidget?: ReactNode
   /** Step 4.2's Tools dropdown trigger. */
   toolsMenu?: ReactNode
   /** Forge gating (R6 Step 1.1): `false` drops the GitHub nav item — see `visibleNavItems`.
@@ -109,6 +119,7 @@ export type AppShellProps = {
    *  opt-in via `CEZ_AUTOMATIONS=1`. Defaults to shown for the same reason as `forgeAvailable`;
    *  the container passes the health payload's truth. */
   automationsAvailable?: boolean
+  tracker?: TrackerKind
   /** Single-project capability gating: hides workspace-expansion affordances. Defaults off so
    *  standalone and older callers preserve the multi-project shell. */
   singleProject?: boolean
@@ -153,6 +164,38 @@ export type AppShellProps = {
  */
 const SidebarNavigateContext = React.createContext<(() => void) | undefined>(undefined)
 
+const AppShellMain = React.memo(function AppShellMain({
+  children,
+  mainRef,
+}: {
+  children: ReactNode
+  mainRef: React.RefObject<HTMLElement | null>
+}) {
+  React.useLayoutEffect(() => {
+    const main = mainRef.current
+    if (!main) return
+    const publishHeight = () => {
+      const height = main.clientHeight
+      if (height > 0) main.style.setProperty('--cez-main-height', `${height}px`)
+    }
+    publishHeight()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(publishHeight)
+    observer.observe(main)
+    return () => observer.disconnect()
+  }, [mainRef])
+
+  return (
+    <main
+      ref={mainRef}
+      data-slot="main"
+      className="row-start-4 min-h-0 overflow-y-auto overscroll-contain"
+    >
+      {children}
+    </main>
+  )
+})
+
 export function useSidebarNavigate(): (() => void) | undefined {
   return React.useContext(SidebarNavigateContext)
 }
@@ -190,7 +233,7 @@ export function routeOwnsScrollArrival(pathname: string): boolean {
  *  - Below `md` the sidebar is gone and its content moves, unchanged, into an overlay drawer
  *    (`MobileNavDrawer`). Same components, only the framing changes.
  */
-export function AppShell({
+export const AppShell = React.memo(function AppShell({
   children,
   repo = null,
   inboxCount = null,
@@ -198,6 +241,7 @@ export function AppShell({
   version = null,
   latestVersion = null,
   taskQuickList,
+  hostWidget,
   toolsMenu,
   forgeAvailable = true,
   inboxAvailable = true,
@@ -205,6 +249,7 @@ export function AppShell({
   notesAvailable = true,
   skillsAvailable = true,
   automationsAvailable = true,
+  tracker,
   singleProject = false,
   accountUsage = false,
   globalBar,
@@ -221,8 +266,12 @@ export function AppShell({
   // scope, and stripping the prefix is exactly what destroys that (D5). `/p/x/notes` stripped is
   // `/notes`, which would light the workspace Notes row from inside a project.
   const activeWorkspaceTo = activeWorkspaceNavPath(pathname)
-  const current = activeNavItem(areaPathname)
+  const currentBase = activeNavItem(areaPathname)
+  const current = currentBase?.to === '/tracker' && tracker
+    ? { ...currentBase, label: TRACKER_PROVIDERS[tracker].label }
+    : currentBase
   const [menuOpen, setMenuOpen] = React.useState(false)
+  const closeMenu = React.useCallback(() => setMenuOpen(false), [])
   const mainRef = React.useRef<HTMLElement>(null)
   const routeOwnsArrival = routeOwnsScrollArrival(pathname)
   // The desktop column's width (#788). Read once, lazily, from `localStorage` — it is a
@@ -278,6 +327,7 @@ export function AppShell({
     notes: notesAvailable,
     skills: skillsAvailable,
     automations: automationsAvailable,
+    tracker,
   }
 
   const nav = {
@@ -292,63 +342,112 @@ export function AppShell({
     version,
     latestVersion,
     taskQuickList,
+    hostWidget,
     toolsMenu,
     projectGroups,
     singleProject,
     accountUsage,
   }
 
+  const desktop = useDesktopShell()
+
   return (
-    // The Sheet root renders no DOM of its own — it is the context that lets the top bar's menu
-    // button be a real SheetTrigger while the open state stays ours to close on navigation.
-    <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
-      <div
-        data-slot="app-shell"
-        data-chromeless={chromeless ? '' : undefined}
-        className="flex h-dvh overflow-hidden bg-background text-foreground pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
-      >
-        {chromeless ? null : <Sidebar {...nav} width={sidebarWidth} onWidthChange={changeSidebarWidth} />}
-        {/* The drawer keeps its fixed 264px: it is a full-height overlay on a phone, where
-            there is no second column to trade width with and no pointer to drag a border. */}
-        {chromeless ? null : <MobileNavDrawer {...nav} onNavigate={() => setMenuOpen(false)} />}
-
-        <div className="grid min-w-0 flex-1 grid-rows-[auto_auto_auto_1fr_auto] overflow-hidden">
-          {chromeless ? null : <MobileTopBar title={current?.label ?? 'cezar-plus'} />}
-
-          {/* Row 2: the global engine-lock bar. Deliberately NOT gated on `chromeless` — that is
-              the one place this shell deviates from "chromeless hides chrome" (D9). The container
-              decides whether to pass `globalBar` at all, so the shell's own rule is simply
-              "render whenever the slot is filled". */}
-          {globalBar ? (
-            <div data-slot="global-bar" className="row-start-2">
-              {globalBar}
-            </div>
+    <div
+      data-slot="app-shell"
+      data-desktop={desktop ?? undefined}
+      data-chromeless={chromeless ? '' : undefined}
+      className="flex h-dvh overflow-hidden bg-background text-foreground pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
+    >
+      {/* Desktop shell (packages/desktop, macOS): the native title bar is a transparent overlay
+          with no title, 28px tall (a title bar's native height), and the traffic lights sit at
+          their native offset. Nothing is PAINTED for it — each column carries 28px of top
+          padding so its own colour runs to the window's edge, the way Finder's sidebar does —
+          and this transparent strip on top is what Tauri's injected handler drags the window by
+          (double-click zooms). Only the shell's init script sets `desktop`; a browser tab never
+          gets any of it. */}
+      {!chromeless && desktop === 'macos' ? (
+        <div
+          data-slot="desktop-titlebar"
+          data-tauri-drag-region=""
+          className="fixed inset-x-0 top-0 z-[60] flex h-[28px] select-none items-center pl-[80px]"
+        >
+          {version && latestVersion && latestVersion !== version ? (
+            <TitlebarUpdateButton latestVersion={latestVersion} />
           ) : null}
-
-          {!chromeless && banner ? (
-            <div data-slot="banner-slot" className="row-start-3">
-              {banner}
-            </div>
-          ) : null}
-
-          <main
-            ref={mainRef}
-            data-slot="main"
-            className="row-start-4 min-h-0 overflow-y-auto overscroll-contain"
-          >
-            {children}
-          </main>
-
-          {/* Row 5: the composer dock (thread reply, Step R3). Empty today, but it still carries
-              the bottom safe-area gutter so the scroller never runs under the home indicator. */}
-          <div
-            data-slot="composer"
-            className="row-start-5 pb-[env(safe-area-inset-bottom)]"
-          />
         </div>
+      ) : null}
+      {chromeless ? null : <Sidebar {...nav} width={sidebarWidth} onWidthChange={changeSidebarWidth} desktop={desktop} />}
+      <div
+        className={cn(
+          'grid min-w-0 flex-1 grid-rows-[auto_auto_auto_1fr_auto] overflow-hidden',
+          desktop === 'macos' && 'pt-[28px]',
+        )}
+      >
+        {/* The Sheet root renders no DOM of its own. Keep only the mobile controls inside its
+            context so a sidebar update cannot propagate through the routed view. */}
+        <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
+          {chromeless ? null : <MobileTopBar title={current?.label ?? 'cezar-plus'} />}
+          {/* The drawer keeps its fixed 264px: it is a full-height overlay on a phone, where
+              there is no second column to trade width with and no pointer to drag a border. */}
+          {chromeless ? null : <MobileNavDrawer {...nav} onNavigate={closeMenu} />}
+        </Sheet>
+
+        {globalBar ? <div data-slot="global-bar" className="row-start-2">{globalBar}</div> : null}
+        {!chromeless && banner ? (
+          <div data-slot="banner-slot" className="row-start-3">
+            {banner}
+          </div>
+        ) : null}
+
+        <AppShellMain mainRef={mainRef}>{children}</AppShellMain>
+
+        {/* Row 4: the composer dock (thread reply, Step R3). Empty today, but it still carries
+            the bottom safe-area gutter so the scroller never runs under the home indicator. */}
+        <div
+          data-slot="composer"
+          className="row-start-5 pb-[env(safe-area-inset-bottom)]"
+        />
       </div>
-    </Sheet>
+    </div>
   )
+})
+
+/**
+ * The title strip's "Update cezar-plus" button (desktop shell only): shown whenever the channel the
+ * cockpit follows has something newer than what is running, sitting right after the traffic
+ * lights where the native title would be. With nothing running, one click starts the update and
+ * the dialog shows the install log and the restart. With tasks in flight the dialog opens to its
+ * warning instead and waits for "Update & restart": a restart interrupts them.
+ */
+function TitlebarUpdateButton({ latestVersion }: { latestVersion: string }) {
+  const [open, setOpen] = React.useState(false)
+  return (
+    <>
+      <button
+        type="button"
+        data-slot="titlebar-update"
+        onClick={() => setOpen(true)}
+        title={`Update cezar-plus to v${latestVersion} and restart`}
+        className="inline-flex h-[18px] items-center gap-1 rounded-full border border-primary/40 bg-primary/15 px-2 text-[11px] font-semibold text-foreground transition-colors hover:bg-primary/30"
+      >
+        <StatusDot tone="pending" pulse className="size-[5px] shrink-0" />
+        Update cezar-plus
+        <span className="font-mono font-medium text-muted-foreground">v{latestVersion}</span>
+      </button>
+      {open ? <SelfUpdateDialog open={open} onOpenChange={setOpen} autoApply={latestVersion} /> : null}
+    </>
+  )
+}
+
+/** Which desktop shell hosts this page, read once from the init script's `data-cez-desktop`
+ *  (packages/desktop). Null in every browser. */
+function useDesktopShell(): 'macos' | 'windows' | 'linux' | null {
+  const [platform] = React.useState<'macos' | 'windows' | 'linux' | null>(() => {
+    if (typeof document === 'undefined') return null
+    const value = document.documentElement.dataset.cezDesktop
+    return value === 'macos' || value === 'windows' || value === 'linux' ? value : null
+  })
+  return platform
 }
 
 type NavProps = {
@@ -367,6 +466,7 @@ type NavProps = {
   version: string | null
   latestVersion: string | null
   taskQuickList?: ReactNode
+  hostWidget?: ReactNode
   toolsMenu?: ReactNode
   projectGroups?: ReactNode
   singleProject: boolean
@@ -385,18 +485,26 @@ type NavProps = {
  * the class is left off entirely below `md`, where `hidden` takes the element out of flow and the
  * drawer (a fixed 264px) is the sidebar instead.
  */
-function Sidebar({ width, onWidthChange, ...props }: NavProps & SidebarResize) {
+const Sidebar = React.memo(function Sidebar({
+  width,
+  onWidthChange,
+  desktop = null,
+  ...props
+}: NavProps & SidebarResize & { desktop?: 'macos' | 'windows' | 'linux' | null }) {
   return (
     <aside
       data-slot="sidebar"
       style={{ width }}
-      className="relative hidden shrink-0 flex-col border-r border-border bg-sidebar md:flex"
+      className={cn(
+        'relative hidden shrink-0 flex-col border-r border-border bg-sidebar md:flex',
+        desktop === 'macos' && 'pt-[28px]',
+      )}
     >
-      <SidebarContent {...props} />
+      <SidebarContent {...props} compactHeader={desktop === 'macos'} />
       <SidebarResizeHandle width={width} onWidthChange={onWidthChange} />
     </aside>
   )
-}
+})
 
 type SidebarResize = {
   width: number
@@ -503,7 +611,7 @@ function SidebarResizeHandle({ width, onWidthChange }: SidebarResize) {
  * dismiss-on-tap, and `aria-hidden` on everything outside the portal — which is how it delivers
  * modality (it does not set `aria-modal`; `hideOthers` is the stronger guarantee).
  */
-function MobileNavDrawer({ onNavigate, ...props }: NavProps & { onNavigate: () => void }) {
+const MobileNavDrawer = React.memo(function MobileNavDrawer({ onNavigate, ...props }: NavProps & { onNavigate: () => void }) {
   return (
     <SheetContent
       side="left"
@@ -531,7 +639,7 @@ function MobileNavDrawer({ onNavigate, ...props }: NavProps & { onNavigate: () =
       />
     </SheetContent>
   )
-}
+})
 
 /**
  * Everything inside the sidebar: brand lockup, New task CTA, nav, quick-list, footer. Framed by
@@ -552,12 +660,14 @@ function SidebarContent({
   version,
   latestVersion,
   taskQuickList,
+  hostWidget,
   toolsMenu,
   projectGroups,
   singleProject,
   accountUsage,
   onNavigate,
   headerAction,
+  compactHeader = false,
 }: NavProps & {
   /** Fires on any in-drawer navigation. The route-change effect already closes the drawer for
    *  every *changed* route; this also covers re-clicking the active item (per the spec, Tasks
@@ -565,6 +675,10 @@ function SidebarContent({
   onNavigate?: () => void
   /** The drawer's close button. Absent on desktop, which has nothing to close. */
   headerAction?: ReactNode
+  /** Under the desktop shell's title strip the brand row already has 28px above it, so it
+   *  gives up most of its own top padding — otherwise the logo floats a full toolbar's height
+   *  below the traffic lights. */
+  compactHeader?: boolean
 }) {
   return (
     <div
@@ -575,7 +689,7 @@ function SidebarContent({
       // an `@min-[…]/sidebar:` query and returns when the user drags the column wider.
       className="@container/sidebar flex min-h-0 flex-1 flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
     >
-      <div className="flex items-center gap-[9px] px-3.5 pt-3.5 pb-2.5">
+      <div className={cn('flex items-center gap-[9px] px-3.5 pb-2.5', compactHeader ? 'pt-1.5' : 'pt-3.5')}>
         <BrandTile />
         <span className="text-[15px] font-semibold">cezar-plus</span>
         {/* With project groups mounted the boot repo/branch is one group header among many —
@@ -622,6 +736,11 @@ function SidebarContent({
         {singleProject ? null : <AddProjectMenu />}
       </div>
 
+      {/* The first of the two top-level doors; `AllTasksLink` is the other. They share one skin
+          (SIDEBAR_SECTION_LINK_CLASS) because they stack directly against each other. */}
+      <div className="shrink-0 px-1.5">
+        <DashboardLink onNavigate={onNavigate} />
+      </div>
       {projectGroups ? (
         <>
           {/* PINNED above the scroller, not the first row inside it. It is about every group
@@ -786,6 +905,7 @@ function SidebarContent({
         data-slot="sidebar-footer"
         className="flex flex-col gap-1.5 border-t border-border px-3.5 py-2.5"
       >
+        {hostWidget}
         <CommandPaletteHint />
         <div data-slot="sidebar-footer-controls" className="flex items-center gap-2">
           {/* SLOT — Step 4.2 mounts the Tools dropdown (aggregate status dot + tool versions) here. */}
@@ -802,13 +922,91 @@ function SidebarContent({
 }
 
 /**
- * The footer's way into `/settings/*` (multi-project spec, "Sidebar → Footer").
+ * The shared skin of the sidebar's two top-level doors — Dashboard and All tasks. They stack
+ * directly on top of each other, so they are peers and must be painted as one: the same row
+ * height, the same type scale, the same violet icon.
  *
- * A PLAIN router Link, deliberately: Settings sits outside every project
- * (`.ai/specs/2026-08-21-one-settings-area.md`), and the scoped `Link` this file otherwise uses
- * would prefix the target with the active `/p/<id>` — a path that only redirects back out. Icon-
- * only to keep the footer's one row intact; the accessible name and the tooltip both carry the
- * label.
+ * ONE constant rather than two copies on purpose. Dashboard shipped as its own inline class
+ * string and drifted to `min-h-11`/`text-sm`/no icon colour, which read on desktop as an 8px
+ * taller row with the only grey icon of the pair. A shared string is what makes the next tweak
+ * land on both rows or on neither.
+ *
+ * Not the per-project nav rows below them: those are a lower tier (muted foreground, semibold
+ * only when active, `md:h-[34px]`) and are deliberately NOT peers of these two.
+ */
+const SIDEBAR_SECTION_LINK_CLASS =
+  'flex h-11 w-full items-center gap-2.5 rounded-md px-2.5 text-[13.5px] font-semibold text-foreground transition-colors hover:bg-muted md:h-9'
+
+/**
+ * The accent icon of a top-level door — violet, the same hue the tag chips and the Tasks page's
+ * own selected filters use, so the door and the room match. Full strength once the row is the
+ * current page.
+ */
+function sidebarSectionIconClass(isActive: boolean) {
+  return cn('size-4 shrink-0', isActive ? 'text-violet' : 'text-violet/70')
+}
+
+/**
+ * The way into the cross-project Dashboard (`/dashboard`).
+ *
+ * A `NavLink`, unlike its `AllTasksLink` neighbour: `/dashboard` carries its own view and period
+ * query strings (`?view=costs`, `?period=30d`), and NavLink's path-only matching keeps the row
+ * lit across all of them where a `pathname ===` check on a full location would not.
+ */
+function DashboardLink({ onNavigate }: { onNavigate?: () => void }) {
+  return (
+    <NavLink
+      to="/dashboard"
+      data-slot="dashboard-link"
+      onClick={onNavigate}
+      className={({ isActive }) => cn(SIDEBAR_SECTION_LINK_CLASS, isActive && 'bg-muted')}
+    >
+      {({ isActive }) => (
+        <>
+          <LayoutDashboardIcon className={sidebarSectionIconClass(isActive)} aria-hidden="true" />
+          Dashboard
+        </>
+      )}
+    </NavLink>
+  )
+}
+
+/**
+ * The way into the global Tasks page (`/tasks`) — every project's work in one table, filtered
+ * and grouped by project, tag, status or workflow.
+ *
+ * A PLAIN router Link, like the footer's global-settings one and for the same reason: the page
+ * sits outside every project, and the scoped `Link` this file otherwise uses would prefix it
+ * with the active `/p/<id>`, which is not a route. Its own icon (layers, not the per-project
+ * checklist) so the two Tasks surfaces never read as the same button.
+ */
+function AllTasksLink({ onNavigate }: { onNavigate?: () => void }) {
+  const { pathname } = useLocation()
+  const isActive = pathname === '/tasks'
+  return (
+    <RouterLink
+      to="/tasks"
+      data-slot="all-tasks-link"
+      onClick={onNavigate}
+      aria-current={isActive ? 'page' : undefined}
+      // Reads at the weight of a section header rather than a nav row: full-strength foreground
+      // and semibold, where the project groups below it are semibold-on-default and their nav
+      // rows are muted.
+      className={cn(SIDEBAR_SECTION_LINK_CLASS, isActive && 'bg-muted')}
+    >
+      <LayersIcon className={sidebarSectionIconClass(isActive)} aria-hidden="true" />
+      All tasks
+    </RouterLink>
+  )
+}
+
+/**
+ * The footer's way into `/settings/global/*` (multi-project spec, "Sidebar → Footer").
+ *
+ * A PLAIN router Link, deliberately: global settings sit outside every project, and the scoped
+ * `Link` this file otherwise uses would prefix the target with the active `/p/<id>` — a path
+ * that is not a route. Icon-only to keep the footer's one row intact; the accessible name and
+ * the tooltip both carry the label.
  */
 function GlobalSettingsLink({
   className,
@@ -944,16 +1142,24 @@ function CommandPaletteHint() {
  */
 function VersionChip({ version, latestVersion }: { version: string; latestVersion: string | null }) {
   const updateAvailable = Boolean(latestVersion && latestVersion !== version)
+  // The chip opens the self-update dialog (PoC): channel, latest, and a version picker.
+  const [open, setOpen] = React.useState(false)
   return (
-    <span
-      data-slot="version-chip"
-      data-update-available={updateAvailable ? 'true' : undefined}
-      title={updateAvailable ? `v${version} — update available: v${latestVersion}` : `v${version}`}
-      className="flex min-w-0 items-center gap-1 rounded-full border border-border px-1.5 py-px font-mono text-[10px] font-medium text-soft-foreground"
-    >
-      {updateAvailable ? <StatusDot tone="pending" pulse className="size-[5px] shrink-0" /> : null}
-      <span className="truncate">v{version}</span>
-    </span>
+    <>
+      <button
+        type="button"
+        data-slot="version-chip"
+        data-update-available={updateAvailable ? 'true' : undefined}
+        title={updateAvailable ? `v${version} — update available: v${latestVersion}` : `v${version}`}
+        aria-label={updateAvailable ? `cezar-plus v${version}, update to v${latestVersion} available — open updater` : `cezar-plus v${version} — open updater`}
+        onClick={() => setOpen(true)}
+        className="flex min-w-0 cursor-pointer items-center gap-1 rounded-full border border-border px-1.5 py-px font-mono text-[10px] font-medium text-soft-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+      >
+        {updateAvailable ? <StatusDot tone="pending" pulse className="size-[5px] shrink-0" /> : null}
+        <span className="truncate">v{version}</span>
+      </button>
+      {open ? <SelfUpdateDialog open={open} onOpenChange={setOpen} /> : null}
+    </>
   )
 }
 
@@ -978,7 +1184,7 @@ function MobileTopBar({ title }: { title: string }) {
       data-slot="mobile-top-bar"
       className="row-start-1 border-b border-border bg-card pt-[env(safe-area-inset-top)] md:hidden"
     >
-      <div className="flex h-[52px] items-center gap-2.5 px-3">
+      <div className="flex h-11 items-center gap-2.5 px-3">
         {/* A real SheetTrigger rather than an onClick that flips our state: it is what registers
             the button as the dialog's trigger, which is what Radix restores focus to on close —
             with a bare onClick, closing the drawer drops focus on <body>. It also carries the

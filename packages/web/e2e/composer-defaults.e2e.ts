@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
 
 const sessionId = `e2e-composer-defaults-${process.pid}`
 
@@ -82,15 +82,16 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   bootProject = await bootProjectId(baseUrl)
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 900)
 }, 60_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('configurable composer run defaults', () => {
@@ -98,10 +99,13 @@ describe('configurable composer run defaults', () => {
     await putDefaults(null, null)
     try {
       browser.goto(`${baseUrl}/p/${bootProject}/new`)
+      // A cold composer picks nothing: the source pill is the empty invitation, and the run it
+      // would start is the plain built-in quick-task. Wait on the LABEL, not on the kind — an
+      // unpicked pill reports `none` while it is still showing its loading ellipsis.
       browser.waitForFunction(
-        `document.querySelector('[data-slot="source-pill"]')?.textContent.includes('spec-to-deploy')`,
+        `document.querySelector('[data-slot="source-pill"]')?.textContent.includes('None')`,
       )
-      expect(browser.text('[data-slot="source-pill"]')).toContain('spec-to-deploy')
+      expect(browser.text('[data-slot="source-pill"]')).toContain('None')
       expect(browser.evaluate(
         `document.querySelector('[data-slot="worktree-toggle"]')?.getAttribute('aria-checked')`,
       )).toBe('true')
@@ -115,6 +119,9 @@ describe('configurable composer run defaults', () => {
       browser.waitForFunction(
         `document.querySelector('[data-slot="interactive-skill-hint"]') !== null`,
       )
+      // The popover is dismissed by the pick, but its exit animation still covers the chip row
+      // for a frame or two — and the toggles below are exactly what this spec clicks next.
+      browser.waitForFunction(`document.querySelector('[data-slot="source-menu"]') === null`)
       for (const slot of ['worktree-toggle', 'autonomous-toggle']) {
         expect(browser.evaluate(
           `document.querySelector('[data-slot="${slot}"]')?.getAttribute('aria-checked')`,

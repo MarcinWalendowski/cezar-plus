@@ -5,8 +5,7 @@
 **Parallel coding agents orchestrator** — a local cockpit for running and
 tracking AI coding-agent tasks in your repo.
 
-Type a task, pick a workflow and an agent — **Claude Code, Codex, OpenCode or pi
-(the latter two experimental), or a mix of them per step** — and watch it work live: steps, tool calls,
+Type a task, pick a workflow and an agent — **Claude Code, Codex, Copilot, Cursor, Junie, OpenCode or pi, or a mix per step** — and watch it work live: steps, tool calls,
 tokens, diffs, in a browser cockpit that runs entirely on your machine.
 Your CLI logins, your `gh`, your files. No accounts, no database, no cloud.
 
@@ -85,9 +84,9 @@ agent steps plus shell checks, with bounded `onFail` retry loops).
 ## What we improved over base cezar
 
 A hard fork of [`open-mercato/cezar`](https://github.com/open-mercato/cezar), diverged
-2026-08-14 and now **578 commits ahead** with 226 specs of its own. Base cezar is a
-single-box, single-repo, single-provider cockpit; cezar-plus is built to run unattended on
-a server.
+2026-08-14. **Corrected 2026-10-03:** upstream 0.14.0 is integrated; the older commit/spec
+counts and single-repo comparison no longer describe the current branches. The fork retains
+its protected capabilities and is built to run unattended on a server.
 
 - 🔁 **Runs survive the cockpit.** Each run gets a detached broker in its own
   `systemd-run --scope` cgroup with a byte-addressed spool, so it outlives a `systemctl
@@ -1027,3 +1026,24 @@ Every module is meant to be read in one sitting.
 ## License
 
 **MIT** © Patryk Lewczuk — full text in [LICENSE](LICENSE).
+
+## Upstream 0.14 integration
+
+The workspace Dashboard now includes live summaries, usage and cost, delivery, failure,
+backend/model and automation insights. Connect Jira or Linear per project to browse tracker
+items and start tasks. Credentials are managed outside repositories and are never loaded
+into the server's process environment.
+
+Automations support scheduled, GitHub and tracker triggers. The fork keeps them **off by
+ default**: only `CEZ_AUTOMATIONS=1` enables the surface, scheduler and agent creation tools.
+Each definition must also be enabled before it launches work. A schedule needs no GitHub remote.
+
+Tasks can dispatch independent children with separate worktrees, bounded concurrency and
+shared budgets; child reports return to the parent session. Dispatch remains default-on;
+`CEZ_DISPATCH=0` disables it. Files attached to prompts use the updated attachment contract.
+
+The desktop shell remains version 0.1.3 independently of the 0.14.0 CLI packages. It uses the
+fork managed install and release destinations. Native shell updates and CI publishing remain
+disabled until fork signing/publication is configured; no upstream signing key is trusted.
+Local native development uses `CEZ_DESKTOP_ENTRY` and `CEZ_DESKTOP_CWD`. No service activation
+occurs as a side effect of building or syncing upstream.

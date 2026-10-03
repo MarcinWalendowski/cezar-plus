@@ -112,7 +112,7 @@ const temps = [];
 let failures = 0;
 
 function log(...a) {
-  console.log('[cluster-e2e]', ...a);
+  console.log('[cluster-e2e]', new Date().toISOString(), ...a);
 }
 function check(name, ok, detail) {
   if (ok) {
@@ -699,7 +699,9 @@ async function main() {
   // fabricated. If it never arrives, that is reported as a REPLICATION failure and named as such —
   // it is a different fault from a dispatch that was refused, and collapsing the two is exactly
   // what would let a broken replication path read as a working cluster.
-  writeTodos(hubRepo, [remoteTodo, localTodo]);
+  // Replication and restart must finish before either node can place work. Context construction
+  // itself triggers autostart, so merely delaying pokeProject does not establish that precondition.
+  writeTodos(hubRepo, [{ ...remoteTodo, autostart: false }, { ...localTodo, autostart: false }]);
 
   const spokeHoldsRemote = () => readTodo(spokeRepo, REMOTE_TODO_ID);
 
@@ -708,30 +710,46 @@ async function main() {
   // (`DEFAULT_OP_FLUSH_MS`), so 30s is ~6 cycles.
   let replicatedBy = (await waitFor(spokeHoldsRemote, 30_000)) ? 'live fan-out' : undefined;
 
-  // Probe 2 — CONNECT-TIME REPLAY, which is the other real path and needs a fresh `hello`. Restart
-  // the spoke process rather than simulate one: `link-client.ts` sends `hello` on open, and
-  // `hub-router.ts`'s `hello` case calls `scanForReplay` over the hub's own todos for every project
-  // the roster says this node is confirmed-paired for. This is the path a laptop that was asleep
-  // takes, so it is worth exercising on its own.
-  if (!replicatedBy) {
-    log('not replicated on the live link within 30s — restarting the spoke to force connect-time replay');
-    const restartedAt = Date.now();
-    await stopChild('spoke');
-    boot('spoke(restart)', spokeHome, spokePort, spokeBoot, { CEZ_CLUSTER_HUB: hubUrl });
-    await waitHealthy(spokeUrl);
-    // Wait for the hub to see the NEW link, not the old one: `lastSeenAt` must advance past the
-    // moment the previous process was killed, or a stale stamp reads as a live reconnection.
-    await waitFor(() => {
-      const row = readJsonIfPresent(hubPeersPath)?.nodes?.find((n) => n.nodeId === spokeNodeId);
-      return row?.lastSeenAt && Date.parse(row.lastSeenAt) > restartedAt ? row : undefined;
-    }, 45_000);
-    replicatedBy = (await waitFor(spokeHoldsRemote, 30_000)) ? 'connect-time replay' : undefined;
-  }
+  log('restarting the spoke to verify reconnect and replication after an offline write');
+  const previousSpokePid = children.find((c) => c.label === 'spoke')?.child.pid;
+  await stopChild('spoke');
+  const restartTodo = {
+    id: 'e2e-restart-replication',
+    ts: new Date().toISOString(),
+    summary: 'cluster e2e — written while the SPOKE is offline',
+    autostart: false,
+  };
+  const probeAbsentBeforeRestart = !readTodo(spokeRepo, restartTodo.id);
+  const currentHubTodos = readJsonIfPresent(join(hubRepo, '.ai', 'cezar', 'todos.json'));
+  writeTodos(hubRepo, [...currentHubTodos, restartTodo]);
+  const restartedAt = Date.now();
+  const restartedSpoke = boot('spoke(restart)', spokeHome, spokePort, spokeBoot, { CEZ_CLUSTER_HUB: hubUrl });
+  await waitHealthy(spokeUrl);
+  // A retained record alone cannot prove a new link or replication after a restart. Require fresh
+  // hub presence and a record authored while the previous spoke process was stopped.
+  const reconnected = await waitFor(() => {
+    const row = readJsonIfPresent(hubPeersPath)?.nodes?.find((n) => n.nodeId === spokeNodeId);
+    return row?.lastSeenAt && Date.parse(row.lastSeenAt) > restartedAt ? row : undefined;
+  }, 45_000);
+  check(
+    'the SPOKE restarted as a new process and reconnected with fresh hub presence',
+    restartedSpoke.pid !== previousSpokePid && Boolean(reconnected),
+    `previous pid=${previousSpokePid} new pid=${restartedSpoke.pid}; hub presence=${JSON.stringify(reconnected?.lastSeenAt)}`,
+  );
+  const replicatedAfterRestart = await waitFor(() => readTodo(spokeRepo, restartTodo.id), 30_000);
+  check(
+    'the todo written while the SPOKE was offline REPLICATED after its restart',
+    probeAbsentBeforeRestart && replicatedAfterRestart?.summary === restartTodo.summary,
+    `absent before restart=${probeAbsentBeforeRestart}; spoke record=${JSON.stringify(replicatedAfterRestart)}`,
+  );
+
+  const remoteAfterRestart = await waitFor(spokeHoldsRemote, 30_000);
+  if (!replicatedBy && remoteAfterRestart) replicatedBy = 'connect-time replay';
 
   const hubRemoteBeforeDispatch = readTodo(hubRepo, REMOTE_TODO_ID);
   check(
     'the todo the hub holds REPLICATED to the spoke (the record a dispatch needs at the far end)',
-    Boolean(replicatedBy),
+    Boolean(replicatedBy) && Boolean(remoteAfterRestart),
     `neither the live link nor a fresh \`hello\` delivered "${REMOTE_TODO_ID}" to ${join(spokeRepo, '.ai/cezar/todos.json')}. ` +
       `The hub's own copy has hubSeq = ${JSON.stringify(hubRemoteBeforeDispatch?.hubSeq)} — ` +
       '`replay.ts#scanForReplay` (Decision 1) puts every `hubSeq === undefined` row in `unordered` and ' +
@@ -751,14 +769,56 @@ async function main() {
     writeTodos(spokeRepo, [remoteTodo]);
   }
 
-  // Poke the SPOKE, and its refusal is an assertion in its own right rather than setup. This makes
-  // the spoke run one reconcile pass over a todo that is `autostart: true` and pinned elsewhere:
-  // the D9a guard (`createSpokeAutostartCluster#claimStart`) must refuse it out loud. If the guard
-  // were broken this pass is exactly what would start the cross-node duplicate — so the negative
-  // below is a POSITIVE observation (a named refusal was logged) rather than an absence.
+  const dispatchReady = await waitFor(async () => {
+    const hub = await api(hubUrl, '/api/v1/cluster');
+    const spoke = await api(spokeUrl, '/api/v1/cluster');
+    const row = hub.body?.nodes?.find((n) => n.nodeId === spokeNodeId);
+    const drift = row?.repoDrift?.find((d) => d.projectKey === PROJECT_KEY);
+    const hubPair = hub.body?.pairings?.find((p) => p.projectKey === PROJECT_KEY);
+    const spokePair = spoke.body?.pairings?.find((p) => p.projectKey === PROJECT_KEY);
+    return hub.status === 200 && spoke.status === 200 &&
+      row?.acceptsDispatch && spoke.body?.self?.acceptsDispatch &&
+      Date.parse(row.capacityAt) > restartedAt && row.capacity?.active < row.capacity?.maxParallel &&
+      drift && drift.dirty === 0 && !drift.merging && drift.ahead === 0 && drift.behind === 0 &&
+      hubPair?.byNode?.[hubNodeId]?.confirmedAt && hubPair?.byNode?.[spokeNodeId]?.confirmedAt &&
+      spokePair?.byNode?.[spokeNodeId]?.confirmedAt
+      ? row : undefined;
+  }, 45_000);
+  check(
+    'the restarted SPOKE reports fresh dispatch capacity, clean project drift and confirmed pairing through the real APIs',
+    Boolean(dispatchReady),
+    'the restarted spoke never met the dispatch preconditions within 45s',
+  );
+  log('dispatch readiness', JSON.stringify(dispatchReady));
+  // Activating on the spoke exercises its own worker policy before the hub can place the work.
+  // The hub's roster opt-in is a separate gate from the spoke's own opt-in, and a strict placement
+  // pin prevents a local fallback while that target is temporarily fenced.
+  const fenced = await api(hubUrl, `/api/v1/cluster/nodes/${encodeURIComponent(spokeNodeId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ acceptsDispatch: false }),
+  });
+  if (fenced.status !== 200 || fenced.body?.acceptsDispatch !== false) {
+    throw new Error(`could not fence hub placement for the worker-policy probe: status ${fenced.status}`);
+  }
+  // The public PATCH contract cannot set autostart. Change only this fixture flag on the exact
+  // replicated row, then use a supported PATCH to hydrate the context and exercise its real pass.
+  const spokeTodosToActivate = readJsonIfPresent(join(spokeRepo, '.ai', 'cezar', 'todos.json'));
+  if (!spokeTodosToActivate?.some((todo) => todo.id === REMOTE_TODO_ID)) {
+    throw new Error('the worker-policy probe requires the already-replicated remote todo');
+  }
+  writeTodos(spokeRepo, spokeTodosToActivate.map((todo) =>
+    todo.id === REMOTE_TODO_ID ? { ...todo, autostart: true } : todo));
+  const activated = await api(spokeUrl,
+    `/api/v1/p/${encodeURIComponent(spokeProject.id)}/todos/${encodeURIComponent(REMOTE_TODO_ID)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ priority: 'high' }),
+    });
+  if (activated.status !== 200 || activated.body?.todo?.priority !== 'high') {
+    throw new Error(`spoke todo priority PATCH failed: status ${activated.status}`);
+  }
   await pokeProject(spokeUrl, spokeProject.id);
   const spokeRefusal = await waitFor(
-    () => new RegExp(`todo autostart refused for "[^"]*" \\(${REMOTE_TODO_ID}\\): (.*)`).exec(logText('spoke')) ?? undefined,
+    () => new RegExp(String.raw`todo autostart refused for "[^"]*" \(${REMOTE_TODO_ID}\): (.*)`).exec(logText('spoke(restart)')) ?? undefined,
     30_000,
   );
   check(
@@ -766,8 +826,30 @@ async function main() {
     Boolean(spokeRefusal) && /cluster worker|hub places its work/.test(spokeRefusal[1]),
     spokeRefusal
       ? `refused with ${JSON.stringify(spokeRefusal[1].trim())}`
-      : `the spoke logged no autostart refusal for "${REMOTE_TODO_ID}" within 30s — it either started it (see the run assertions) or never ran a pass`,
+      : `the active spoke logged no autostart refusal for "${REMOTE_TODO_ID}" within 30s`,
   );
+  const guardRuns = readRuns(spokeRepo);
+  check(
+    'the SPOKE created no run or claim while its worker-policy refusal was exercised',
+    Boolean(spokeRefusal) && guardRuns.length === 0 && !readTodo(spokeRepo, REMOTE_TODO_ID)?.startedTaskId,
+    `spoke runs=${JSON.stringify(guardRuns.map((r) => ({ id: r.id, via: r.author?.via })))}; ` +
+      `startedTaskId=${JSON.stringify(readTodo(spokeRepo, REMOTE_TODO_ID)?.startedTaskId)}`,
+  );
+  log('worker-policy refusal observed with hub placement fenced', spokeRefusal?.[1] ?? 'none');
+  if (!spokeRefusal || guardRuns.length > 0 || readTodo(spokeRepo, REMOTE_TODO_ID)?.startedTaskId) {
+    throw new Error('worker-policy probe did not refuse without starting a run; hub placement remains fenced');
+  }
+  const restored = await api(hubUrl, `/api/v1/cluster/nodes/${encodeURIComponent(spokeNodeId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ acceptsDispatch: true }),
+  });
+  if (restored.status !== 200 || restored.body?.acceptsDispatch !== true) {
+    throw new Error(`could not restore hub placement after the worker-policy probe: status ${restored.status}`);
+  }
+  const hubTodosToArm = readJsonIfPresent(join(hubRepo, '.ai', 'cezar', 'todos.json'));
+  writeTodos(hubRepo, hubTodosToArm.map((todo) =>
+    todo.id === REMOTE_TODO_ID || todo.id === LOCAL_TODO_ID ? { ...todo, autostart: true } : todo));
+  log('hub placement restored; dispatch assertions begin');
 
   // Now the hub. Both todos were written above in one file, so one reconcile pass makes both
   // decisions — `e2e-remote` pinned to the spoke, `e2e-local` pinned here.
@@ -782,8 +864,13 @@ async function main() {
   // The spoke's run is the real evidence. Wait on the STAMP (`markStarted` writes `startedTaskId`
   // and clears `autostart` as the last step of `startTodoRun`), then resolve it in the run index.
   const spokeStarted = await waitFor(() => readTodo(spokeRepo, REMOTE_TODO_ID)?.startedTaskId, 60_000);
-  const spokeRuns = readRuns(spokeRepo);
-  const spokeRun = spokeRuns.find((r) => r.id === spokeStarted);
+  // The todo stamp is synchronous, while RunStore saves its index on a 300 ms debounce.
+  log('spoke todo stamped', spokeStarted ?? 'none');
+  const spokeRun = spokeStarted
+    ? await waitFor(() => readRuns(spokeRepo).find((r) => r.id === spokeStarted), 60_000)
+    : undefined;
+
+  log('spoke persisted dispatched run', spokeRun?.id ?? 'none');
 
   // The hub's local control is matched on the RUN, not on the todo's stamp — the two are separate
   // facts and this test found them disagreeing. `RunRecord#task` is `todoTaskText(todo)`, so the
@@ -916,7 +1003,7 @@ async function main() {
       'no dispatched run exists on the spoke either, so an empty spoke run set proves nothing about the guard',
     );
   } else {
-    const selfStarted = spokeRuns.filter((r) => r.author?.via === 'todo-autostart');
+    const selfStarted = readRuns(spokeRepo).filter((r) => r.author?.via === 'todo-autostart');
     check(
       'the SPOKE did not self-start the replicated todo (a worker waits to be dispatched)',
       selfStarted.length === 0,

@@ -21,7 +21,7 @@ type Health = {
 
 /** The agent CLIs among `checks[]` — `gh` and `git` are rows too, but neither runs a task. Kept in
  *  step with the contract's runner enum (`packages/contract/src/health.ts`). */
-const RUNNERS = new Set(['claude', 'codex', 'opencode', 'pi'])
+const RUNNERS = new Set(['claude', 'codex', 'junie', 'opencode', 'cursor', 'pi', 'copilot'])
 
 /** What (if anything) keeps the aggregate dot from green, derived from the live health answer the
  *  same way `toolsBlocker()` derives it: the dot is amber only when cez cannot start a task at all,
@@ -73,7 +73,7 @@ describe('tools menu', () => {
 
     const blocker = blockerFor(health)
     const missing = health.checks.filter((c) => !c.available).map((c) => c.name)
-    let expectedTitle = `cezar v${health.version}`
+    let expectedTitle = `cezar-plus v${health.version}`
     if (blocker) expectedTitle += ` · ${blocker}`
     else if (missing.length > 0) expectedTitle += ` · optional: ${missing.join(', ')} not installed`
     expect(browser.evaluate(`document.querySelector('${TRIGGER}').getAttribute('title')`)).toBe(expectedTitle)
@@ -117,7 +117,7 @@ describe('tools menu', () => {
       } else {
         expect(row?.version).toBe('not found')
         if (check.hint) expect(row?.hint).toBe(check.hint)
-        expect(row?.setupHref).toBe(scoped('/settings/agents'))
+        expect(row?.setupHref).toBe(`/settings/agents?project=${encodeURIComponent(bootProject)}`)
       }
     }
 
@@ -128,10 +128,10 @@ describe('tools menu', () => {
     // Still open from the previous test — the cog row is its footer.
     expect(
       browser.evaluate(`document.querySelector('${MENU} [data-slot="tools-settings"]').getAttribute('href')`)
-    ).toBe(scoped('/settings/agents'))
+    ).toBe(`/settings/agents?project=${encodeURIComponent(bootProject)}`)
 
     browser.click(`${MENU} [data-slot="tools-settings"]`)
-    browser.waitForFunction(`location.pathname === '${scoped('/settings/agents')}'`)
+    browser.waitForFunction(`location.pathname === '/settings/agents' && new URLSearchParams(location.search).get('project') === '${bootProject}'`)
     browser.waitForFunction(`document.querySelector('${MENU}') === null`)
     expect(browser.count(MENU)).toBe(0)
     expect(browser.url()).toContain('/settings/agents')

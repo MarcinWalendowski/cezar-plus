@@ -1,12 +1,12 @@
+import { randomUUID } from 'node:crypto'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, cezarCli, fixtureServeEnv } from './agent-browser'
 
 /**
  * #484 end-to-end: skill search must rank the (almost-)exact match to the TOP wherever it is
@@ -49,6 +49,8 @@ let browser: AgentBrowser
 let server: ChildProcess
 let dataRoot: string
 let baseUrl: string
+const queryTokens = [`zebra${randomUUID().replaceAll('-', '')}`, `quokka${randomUUID().replaceAll('-', '')}`]
+const multiQuery = queryTokens.join(' ')
 
 beforeAll(async () => {
   dataRoot = mkdtempSync(join(tmpdir(), 'cezar-e2e-skill-search-'))
@@ -68,7 +70,7 @@ beforeAll(async () => {
     join(dataRoot, '.ai/skills/auto-review-pr.md'),
     // The two rare tokens let the multi-keyword spec assert a UNIQUE match that the machine's
     // global om-* skills (also listed in the picker) cannot accidentally satisfy.
-    '---\ndescription: Open and merge a pull request zebratoken quokkatoken\n---\n\nReview and merge.\n',
+    `---\ndescription: Open and merge a pull request ${multiQuery}\n---\n\nReview and merge.\n`,
     'utf8',
   )
   writeFileSync(
@@ -90,6 +92,7 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
 
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 900)
@@ -97,10 +100,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   browser?.close()
-  if (server && server.exitCode === null) {
-    server.kill()
-    await once(server, 'exit')
-  }
+  await stopFixtureServer(server)
   if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
 })
 
@@ -146,7 +146,7 @@ describe('#484 skill search ranks the (almost-)exact match first', () => {
   it('multi-keyword search still matches across name + description (#411 preserved)', () => {
     // Both rare tokens live only in auto-review-pr's description — the ranker must keep the
     // multi-word "every word must match somewhere" rule (a query missing either word drops it).
-    searchPicker('zebratoken quokkatoken', 'auto-review-pr')
+    searchPicker(multiQuery, 'auto-review-pr')
     expect(pickerSkillRefs()).toEqual(['auto-review-pr'])
 
     // Close the picker so it does not overlay the composer in the next spec.

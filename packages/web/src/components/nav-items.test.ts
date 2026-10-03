@@ -21,6 +21,8 @@ describe('activeNavPath', () => {
     ['/git', '/git'],
     ['/knowledge', '/knowledge'],
     ['/knowledge/abc123', '/knowledge'],
+    ['/tracker', '/tracker'],
+    ['/tracker/OPS-7', '/tracker'],
     ['/skills', '/skills'],
 
     // Hidden 2026-08-14 (owner decision, `NAV_ITEMS`): the ROUTES still render, so these URLs
@@ -91,6 +93,7 @@ describe('NAV_ITEMS', () => {
       'Automations',
       'Knowledge',
       'Reports',
+      'Tracker',
       'Skills',
       'Notes',
       'Settings',
@@ -131,7 +134,7 @@ describe('NAV_ITEMS', () => {
  *  because the old wording ("Each gate owns ONLY its own item") reads as a rule a future session
  *  would enforce. */
 describe('visibleNavItems', () => {
-  const ALL: Required<Parameters<typeof visibleNavItems>[0]> = {
+  const ALL: NonNullable<Parameters<typeof visibleNavItems>[0]> = {
     forge: true,
     inbox: true,
     knowledge: true,
@@ -143,20 +146,19 @@ describe('visibleNavItems', () => {
     visibleNavItems(opts).map((item) => item.label)
 
   it('with everything available, the full nav renders', () => {
-    expect(visibleNavItems(ALL)).toEqual(NAV_ITEMS)
+    expect(visibleNavItems(ALL)).toEqual(NAV_ITEMS.filter((item) => !item.tracker))
   })
 
-  it('without a forge, the Automations item drops out', () => {
-    expect(labelsOf({ ...ALL, forge: false })).toEqual([
-      'Tasks',
-      'Inbox',
-      'Git',
-      'Knowledge',
-      'Reports',
-      'Skills',
-      'Notes',
-      'Settings',
-    ])
+  it('a scheduled Automation needs no forge but remains opt-in', () => {
+    expect(labelsOf({ ...ALL, forge: false })).toEqual(labelsOf(ALL))
+    expect(labelsOf({ ...ALL, forge: false })).toContain('Automations')
+    expect(labelsOf({ ...ALL, forge: false, automations: false })).not.toContain('Automations')
+  })
+
+  it('shows the saved tracker provider and hides an unassociated tracker', () => {
+    expect(labelsOf({ tracker: 'jira' })).toContain('Jira')
+    expect(labelsOf({ tracker: 'linear' })).toContain('Linear')
+    expect(labelsOf()).not.toContain('Tracker')
   })
 
   it('without the inbox, exactly the Inbox item drops out (#471)', () => {

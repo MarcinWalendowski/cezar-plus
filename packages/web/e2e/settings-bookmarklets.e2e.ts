@@ -91,7 +91,7 @@ afterAll(() => {
 
 describe('settings â†’ bookmarklets against the live dry-run server', () => {
   it('is a first-class subpage: /settings/bookmarklets renders the generator and the nav marks it current', () => {
-    browser.goto(`${baseUrl}/settings/bookmarklets`)
+    browser.goto(`${baseUrl}/settings/bookmarklets?project=${encodeURIComponent(bootProject)}`)
     browser.waitForFunction(`document.querySelector('[data-slot="bookmarklet-panel"]') !== null`)
 
     // The point of the change (#399): reachable by URL and findable in the nav, not buried
@@ -211,9 +211,10 @@ describe('legacy flat bookmarklet URLs keep landing (BACKWARD_COMPATIBILITY.md Â
     browser.screenshot(`${artifactsDir}/settings-bookmarklets-legacy-redirect.png`)
   })
 
-  it('the legacy flat /settings/bookmarklets URL normalizes to the scoped subpage', () => {
+  it('the workspace bookmarklets URL asks for the project whose launch key it will bake', () => {
     browser.goto(`${baseUrl}/settings/bookmarklets`)
-    browser.waitForFunction(`document.querySelector('[data-slot="bookmarklet-panel"]') !== null`)
-    browser.waitForFunction(`location.pathname === '/p/${bootProject}/settings/bookmarklets'`)
+    browser.waitForFunction(`document.body.textContent.includes('Pick a project')`)
+    expect(browser.count('[data-slot="bookmarklet-panel"]')).toBe(0)
+    expect(browser.evaluate(`location.pathname`)).toBe('/settings/bookmarklets')
   })
 })

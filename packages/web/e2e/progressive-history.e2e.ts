@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, bootProjectId, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, bootProjectId, fixtureServeEnv } from './agent-browser'
 import { largeThreadEvents } from './fixtures/make-large-thread'
 import record from './fixtures/thread-run.record.json'
 
@@ -125,6 +125,9 @@ function navigateAndSampleArrival(runId: string): ArrivalSample[] {
         window.__cezArrivalSamples.push({
           top: main.scrollTop,
           maxTop: main.scrollHeight - main.clientHeight,
+          url: location.href,
+          row: (() => { const row = ready.querySelector('[data-slot="thread-row"]'); return row ? { key: row.getAttribute('data-row-key'), height: row.getBoundingClientRect().height } : null })(),
+          dockHeight: document.querySelector('[data-slot="thread-dock"]')?.getBoundingClientRect().height,
         })
       }
       if (window.__cezArrivalSamples.length < 6 && attempts < 120) requestAnimationFrame(sample)
@@ -133,17 +136,26 @@ function navigateAndSampleArrival(runId: string): ArrivalSample[] {
     link.click()
   })()`)
   browser.waitForFunction(`window.__cezArrivalSamples?.length >= 6`)
-  return browser.evaluate(`window.__cezArrivalSamples`) as ArrivalSample[]
+  const samples = browser.evaluate(`window.__cezArrivalSamples`) as ArrivalSample[]
+  mkdirSync(artifactsDir, { recursive: true })
+  writeFileSync(join(artifactsDir, `progressive-arrival-${runId}-${Date.now()}.json`), JSON.stringify({ runId, samples }, null, 2))
+  browser.screenshot(join(artifactsDir, `progressive-arrival-${runId}.png`), { viewport: true })
+  return samples
 }
 
 function parkCurrentThread(): number {
-  return Number(browser.evaluate(`(() => {
+  browser.waitForFunction(`(() => {
     const main = document.querySelector('[data-slot="main"]')
-    main.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true }))
-    main.scrollTop = Math.max(160, Math.round((main.scrollHeight - main.clientHeight) / 2))
-    main.dispatchEvent(new Event('scroll', { bubbles: true }))
-    return main.scrollTop
-  })()`))
+    const target = Math.max(160, Math.round((main.scrollHeight - main.clientHeight) / 2))
+    if (Math.abs(main.scrollTop - target) > 50) {
+      main.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true }))
+      main.scrollTop = target
+      main.dispatchEvent(new Event('scroll', { bubbles: true }))
+      return false
+    }
+    return true
+  })()`)
+  return Number(browser.evaluate(`document.querySelector('[data-slot="main"]').scrollTop`))
 }
 
 beforeAll(async () => {
@@ -165,6 +177,7 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   bootProject = await bootProjectId(baseUrl)
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 900)
@@ -179,11 +192,11 @@ beforeAll(async () => {
   )
 }, 120_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
+  await stopFixtureServer(server)
   try {
-    if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+    if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
   } catch {
     // The killed fixture may still be releasing its transcript file; the OS reaps the temp dir.
   }

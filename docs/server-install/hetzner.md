@@ -156,7 +156,7 @@ supervisor is provisioned on the host.
 ### 1. The supervisor
 
 ```bash
-npx cezar-cli server-install --platform hetzner --domain login.example.com
+npx @loki-labs/cezar-plus-cli server-install --platform hetzner --domain login.example.com
 ```
 
 You will be asked for:
@@ -174,7 +174,7 @@ Steps it runs: `supervisor-user` → `supervisor-systemd` → `nginx` → `tls` 
 ### 2. An organization
 
 ```bash
-npx cezar-cli server-install --platform hetzner \
+npx @loki-labs/cezar-plus-cli server-install --platform hetzner \
   --domain acme.login.example.com --org-slug acme
 ```
 
@@ -305,10 +305,10 @@ disagree with the install about which org it is acting on:
 
 ```bash
 # the supervisor
-npx cezar-cli server-deploy --platform hetzner --domain login.example.com
+npx @loki-labs/cezar-plus-cli server-deploy --platform hetzner --domain login.example.com
 
 # one org
-npx cezar-cli server-deploy --platform hetzner --domain acme.login.example.com
+npx @loki-labs/cezar-plus-cli server-deploy --platform hetzner --domain acme.login.example.com
 ```
 
 It restarts the unit and re-runs the full end-to-end verify, so "deployed" means
@@ -333,8 +333,8 @@ node <checkout>/packages/cezar/dist/index.js server-migrate-releases        # pl
 node <checkout>/packages/cezar/dist/index.js server-migrate-releases --yes  # apply
 
 # from then on
-npx cezar-cli server-deploy --strategy=blue-green --follow
-npx cezar-cli server-deploy --rollback[=<releaseId>]
+npx @loki-labs/cezar-plus-cli server-deploy --strategy=blue-green --follow
+npx @loki-labs/cezar-plus-cli server-deploy --rollback[=<releaseId>]
 ```
 
 `--strategy=restart` stays the default, so an existing invocation does not change
@@ -366,7 +366,7 @@ Design, phases and current status:
 ## Uninstall
 
 ```bash
-npx cezar-cli server-uninstall --platform hetzner --domain acme.login.example.com
+npx @loki-labs/cezar-plus-cli server-uninstall --platform hetzner --domain acme.login.example.com
 ```
 
 `undo` reverses only what a completed step actually created, and it

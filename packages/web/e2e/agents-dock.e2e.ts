@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, cezarCli, fixtureServeEnv } from './agent-browser'
 import record from './fixtures/subagents-run.record.json'
 
 /**
@@ -121,25 +121,33 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
 
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 900)
 }, 180_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 const DOCK = '[data-slot="agents-dock"]'
 const ROW = '[data-slot="agent-item"]'
 
+function openDock(): void {
+  browser.goto(`${baseUrl}/tasks/${RUN_ID}`)
+  browser.waitForFunction(`document.querySelector('${DOCK} > button') !== null`)
+  if (browser.evaluate(`document.querySelector('${DOCK} > button').getAttribute('aria-expanded')`) === 'false') {
+    browser.click(`${DOCK} > button`)
+  }
+  browser.waitForFunction(`document.querySelectorAll('${ROW}').length === 2`)
+}
+
 describe('the Agents dock against a replayed fan-out', () => {
   it('docks both sub-agents with odometer, type badge, activity and tool count', () => {
-    browser.goto(`${baseUrl}/tasks/${RUN_ID}`)
-    // The dock mounts only once the replay has produced the fan-out.
-    browser.waitForFunction(`document.querySelectorAll('${ROW}').length === 2`)
+    openDock()
     browser.waitForFunction(
       `document.querySelector('[data-slot="agents-count"]')?.textContent.includes('2/2')`,
     )
@@ -166,8 +174,7 @@ describe('the Agents dock against a replayed fan-out', () => {
   }, 120_000)
 
   it('a row opens the drill-down sheet with that agent’s output and nobody else’s', () => {
-    browser.goto(`${baseUrl}/tasks/${RUN_ID}`)
-    browser.waitForFunction(`document.querySelectorAll('${ROW}').length === 2`)
+    openDock()
 
     // The second agent's row — a real dialog-opening button.
     browser.click(`${ROW}:nth-of-type(2) button`)
@@ -197,10 +204,13 @@ describe('the Agents dock against a replayed fan-out', () => {
   }, 120_000)
 
   it('the long agent panel scrolls, detaches from follow-tail, and exposes the jump pill', () => {
-    browser.goto(`${baseUrl}/tasks/${RUN_ID}`)
-    browser.waitForFunction(`document.querySelectorAll('${ROW}').length === 2`)
+    openDock()
     browser.click(`${ROW}:nth-of-type(1) button`)
     browser.waitForFunction(`document.querySelector('[data-slot="transcript-viewport"]') !== null`)
+    browser.waitForFunction(`Math.abs(document.querySelector('[data-slot="subagent-sheet"]').getBoundingClientRect().right - window.innerWidth) < 2`)
+    const earlier = '[data-slot="subagent-sheet"] [data-slot="tool-streak"] > button[aria-expanded="false"]'
+    if (browser.count(earlier) > 0) browser.click(earlier)
+    browser.waitForFunction(`(() => { const viewport = document.querySelector('[data-slot="transcript-viewport"]'); return viewport.scrollHeight > viewport.clientHeight })()`)
 
     const metrics = JSON.parse(
       browser.evaluate(`JSON.stringify((() => {
@@ -230,8 +240,7 @@ describe('the Agents dock against a replayed fan-out', () => {
   }, 120_000)
 
   it('collapses to a one-line odometer', () => {
-    browser.goto(`${baseUrl}/tasks/${RUN_ID}`)
-    browser.waitForFunction(`document.querySelectorAll('${ROW}').length === 2`)
+    openDock()
 
     browser.click(`${DOCK} > button`)
     browser.waitForFunction(`document.querySelectorAll('${ROW}').length === 0`)

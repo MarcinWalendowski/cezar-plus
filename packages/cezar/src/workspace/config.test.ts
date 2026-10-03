@@ -63,7 +63,7 @@ describe('workspace config', () => {
     expect(config.schemaVersion).toBe(0);
     expect(config.browseRoot).toBe('~/');
     expect(config.projectsDir).toBe('~/cezar/projects');
-    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, fallbackAcrossAccountsWhenLimited: true, memoryLimitMb: null, runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null, worktreeRetentionDefault: 1000 });
+    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, idleTimeoutMinutes: 15, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, fallbackAcrossAccountsWhenLimited: true, memoryLimitMb: null, runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null, worktreeRetentionDefault: 1000 });
     expect(config.composerDefaults).toEqual({});
     expect(config.projects).toEqual([]);
     expect(warn).not.toHaveBeenCalled();
@@ -229,14 +229,14 @@ describe('workspace config', () => {
       schemaVersion: 'two',
       browseRoot: 42,
       projectsDir: 42,
-      resources: { maxParallel: 99, maxHeavySteps: 0, maxMonitoringSessions: 99, monitoringWakeIntervalMinutes: 0, memoryLimitMb: 'lots', runMemoryHighMb: 'plenty', runMemoryMaxMb: -1, runCpuWeight: 0, runsSliceMemoryMaxMb: 99_999_999, worktreeRetentionDefault: -1 },
+      resources: { maxParallel: 99, maxHeavySteps: 0, maxMonitoringSessions: 99, idleTimeoutMinutes: 9999, monitoringWakeIntervalMinutes: 0, memoryLimitMb: 'lots', runMemoryHighMb: 'plenty', runMemoryMaxMb: -1, runCpuWeight: 0, runsSliceMemoryMaxMb: 99_999_999, worktreeRetentionDefault: -1 },
       projects: [project('good')],
     });
     const config = await loadWorkspaceConfig();
     expect(config.schemaVersion).toBe(0);
     expect(config.browseRoot).toBe('~/');
     expect(config.projectsDir).toBe('~/cezar/projects');
-    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, fallbackAcrossAccountsWhenLimited: true, memoryLimitMb: null, runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null, worktreeRetentionDefault: 1000 });
+    expect(config.resources).toEqual({ maxParallel: 2, maxMonitoringSessions: 2, idleTimeoutMinutes: 15, monitoringWakeIntervalMinutes: 5, autoResumeOnUsageLimit: true, fallbackAcrossAccountsWhenLimited: true, memoryLimitMb: null, runMemoryHighMb: null, runMemoryMaxMb: null, runCpuWeight: null, runsSliceMemoryMaxMb: null, worktreeRetentionDefault: 1000 });
     expect(config.projects).toEqual([project('good')]);
   });
 

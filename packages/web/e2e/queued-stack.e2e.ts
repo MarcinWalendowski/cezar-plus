@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, fixtureServeEnv, cezarCli } from './agent-browser'
 
 /**
  * Stacking, editing and removing a queued run's prompt (#472), end-to-end against a LIVE
@@ -122,9 +122,10 @@ beforeAll(async () => {
   server = spawn(
     process.execPath,
     [cezarCli, 'serve', '--repo', dataRoot, '--port', String(port), '--no-open'],
-    { env: { ...process.env, CEZ_DRY_RUN: '1', CEZ_HOME: cezHome }, stdio: 'ignore' },
+    { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
 
   // Hold the only slot with a slow turn, then queue the run under test behind it.
   const blockerId = await startRun(baseUrl, 'mock:slow occupy the only agent slot')
@@ -138,10 +139,10 @@ beforeAll(async () => {
   browser.waitForFunction(`document.querySelector('[data-slot="composer"] textarea') !== null`)
 }, 180_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('a queued run’s prompt is amendable (#472)', () => {
@@ -180,11 +181,12 @@ describe('a queued run’s prompt is amendable (#472)', () => {
   })
 
   it('edits the stacked message in place', async () => {
-    browser.click('[aria-label="Remove message"], [aria-label="Edit message"]')
+    browser.evaluate(`(() => { const bubble = [...document.querySelectorAll('[data-slot="user-bubble"]')].find((el) => el.textContent.includes('also update the changelog')); bubble.querySelector('[aria-label="Edit message"]').click() })()`)
     browser.waitForFunction(`document.querySelector('[aria-label="Edit the message"]') !== null`)
     browser.fill('[aria-label="Edit the message"]', 'also update the changelog and the README')
     browser.screenshot(`${artifactsDir}/queued-editing.png`)
     browser.click('[data-slot="user-bubble"][data-editing="true"] button:last-of-type')
+    browser.waitForFunction(`document.querySelector('[data-slot="user-bubble"][data-editing="true"]') === null`)
 
     browser.waitForFunction(
       `document.body.textContent.includes('also update the changelog and the README')`,
@@ -196,10 +198,14 @@ describe('a queued run’s prompt is amendable (#472)', () => {
   })
 
   it('removes the stacked message', async () => {
-    browser.click('[aria-label="Remove message"]')
+    browser.evaluate(`(() => { const bubble = [...document.querySelectorAll('[data-slot="user-bubble"]')].find((el) => el.textContent.includes('also update the changelog and the README')); bubble.querySelector('[aria-label="Remove message"]').click() })()`)
     browser.waitForFunction(`document.querySelectorAll('[data-slot="user-bubble"]').length === 1`)
 
-    const record = await getRun(baseUrl, queuedId)
+    let record = await getRun(baseUrl, queuedId)
+    for (let attempt = 0; (record.queuedMessages?.length ?? 0) > 0 && attempt < 40; attempt += 1) {
+      await new Promise((done) => setTimeout(done, 100))
+      record = await getRun(baseUrl, queuedId)
+    }
     expect(record.queuedMessages ?? []).toEqual([])
   })
 

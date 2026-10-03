@@ -1,12 +1,12 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
+import { measureDiffTree } from './diff-tree-geometry'
 
 /**
  * The Changes tab (R5 Step 1.5) end-to-end against a LIVE dry run, same doctrine as
@@ -100,6 +100,7 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot, { CEZ_REVIEW_GATE: '1' }), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   bootProject = await bootProjectId(baseUrl)
 
   const created = (await (
@@ -127,10 +128,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   browser?.close()
-  if (server && server.exitCode === null) {
-    server.kill()
-    await once(server, 'exit')
-  }
+  await stopFixtureServer(server)
   if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
 })
 
@@ -264,4 +262,34 @@ describe('the Changes tab against a live dry run', () => {
     browser.screenshot(`${artifactsDir}/changes-mobile.png`)
     browser.setViewport(1440, 900)
   })
+  it('keeps the task changes tree inside the real main scrollport and scrolls it independently', () => {
+    for (let file = 0; file < 120; file += 1) {
+      writeFileSync(join(worktreePath, `tree-cap-${file}.ts`), `export const file${file} = ${file}\n`, 'utf8')
+    }
+    browser.goto(`${baseUrl}${scoped(`/tasks/${runId}/changes`)}`)
+    browser.waitForFunction(`document.querySelectorAll('[data-slot="changes-tree-pane"] [data-slot="tree-file"]').length >= 120`)
+    mkdirSync(artifactsDir, {recursive:true})
+    const natural = measureDiffTree(browser)
+    browser.screenshot(`${artifactsDir}/task-changes-tree-natural.png`, {viewport:true})
+    browser.evaluate(`document.querySelector('[data-slot="main"]').scrollTop = 900`)
+    const sticky = measureDiffTree(browser)
+    browser.screenshot(`${artifactsDir}/task-changes-tree-sticky.png`, {viewport:true})
+    browser.setViewport(1440, 640)
+    const resized = measureDiffTree(browser)
+    browser.screenshot(`${artifactsDir}/task-changes-tree-resized.png`, {viewport:true})
+    const states = {natural,sticky,resized}
+    writeFileSync(join(artifactsDir, 'task-changes-tree-geometry.json'), JSON.stringify(states,null,2))
+    browser.setViewport(1440, 900)
+    for (const [state, geometry] of Object.entries(states)) {
+      expect(geometry.rows, state).toBeGreaterThanOrEqual(120)
+      expect(geometry.overflow, state).toBeGreaterThan(0)
+      expect(geometry.paneBottom, `${state}: the task tree hangs below main`).toBeLessThanOrEqual(geometry.mainBottom)
+      expect(geometry.treeTop, state).toBe(geometry.treeMax)
+      expect(geometry.mainAfter, `${state}: scrolling the tree moved main`).toBe(geometry.mainTop)
+      expect(geometry.lastTop, `${state}: last file above pane`).toBeGreaterThanOrEqual(geometry.paneTop - 1)
+      expect(geometry.lastBottom, `${state}: last file below pane`).toBeLessThanOrEqual(geometry.paneBottom + 1)
+    }
+
+  })
+
 })

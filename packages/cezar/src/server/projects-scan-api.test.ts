@@ -6,7 +6,7 @@ import type { ProjectScanResponse } from '@loki-labs/cezar-plus-contract';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { clearProjectProbeCache, registerProject } from '../workspace/projects.ts';
-import { mergeWriteWorkspaceConfig } from '../workspace/config.ts';
+import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from '../workspace/config.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp, type ServerDeps } from './server.ts';
 
@@ -167,6 +167,9 @@ describe('GET /api/v1/projects/scan', () => {
     expect((await scan(browseRoot)).status).toBe(200);
 
     const listed = await apiRequest(makeApp(), '/api/v1/projects');
-    expect(((await listed.json()) as { projects: unknown[] }).projects).toEqual([]);
+    const projects = ((await listed.json()) as { projects: { unregistered?: true }[] }).projects;
+    expect(projects).toHaveLength(1);
+    expect(projects[0]?.unregistered).toBe(true);
+    expect((await loadWorkspaceConfig()).projects).toEqual([]);
   });
 });

@@ -1,4 +1,5 @@
 import { loadWorkspaceConfig } from '../workspace/config.ts';
+import { randomUUID } from 'node:crypto';
 import { acquireLock, deleteServerState, isResolved, loadServerState, saveServerState } from './state.ts';
 import { StepAborted, StepCancelled, StepSkipped, defaultRunner } from './steps.ts';
 import { createAutoUi, createClackUi } from './ui.ts';
@@ -160,6 +161,9 @@ export async function runInstall(strategy: PlatformStrategy, opts: RunOptions): 
     // Record instance identity so the file is self-describing and later
     // uninstall/deploy runs (and `server-instances/` listings) agree on it.
     state.instance = opts.instance ?? state.instance ?? 'default';
+    // Mint once so two users running clones with the same basename still have
+    // an unambiguous identity at the HTTP health boundary.
+    state.instanceId ??= randomUUID();
     if (opts.domain) state.domain = opts.domain;
     if (opts.orgSlug) state.orgSlug = opts.orgSlug;
     if (opts.role) state.role = opts.role;

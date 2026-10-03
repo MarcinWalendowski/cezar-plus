@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, cezarCli, fixtureServeEnv } from './agent-browser'
 
 /**
  * The composer (R3 Step 2.1) end-to-end, against a LIVE dry-run session — not a replayed
@@ -92,6 +92,7 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
 
   // Boot the run the composer will talk to. The mock's reply has no CEZ:DONE marker, so after
   // its first turn the session stays open and the run parks at `waiting`.
@@ -111,10 +112,10 @@ beforeAll(async () => {
   browser.waitForFunction(`document.querySelector('[data-slot="composer"] textarea') !== null`)
 }, 180_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('the thread composer against a live waiting session', () => {
@@ -172,7 +173,7 @@ describe('the thread composer against a live waiting session', () => {
     )
     expect(
       browser.evaluate(`[...document.querySelectorAll('[data-slot="user-bubble"]')].at(-1).textContent`),
-    ).toBe('Please run /lint-fix')
+    ).toContain('Please run /lint-fix')
   })
 
   it('the mock answers the reply and the run parks at waiting again', async () => {

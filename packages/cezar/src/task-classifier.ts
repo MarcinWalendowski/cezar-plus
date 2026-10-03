@@ -203,6 +203,9 @@ const CHEAPEST_MODEL: Record<RunnerId, { model?: string; effort?: string } | und
   codex: { model: 'gpt-5.6-luna', effort: 'low' },
   opencode: undefined,
   pi: undefined,
+  copilot: undefined,
+  cursor: undefined,
+  junie: undefined,
 };
 
 function describe(error: unknown): string {

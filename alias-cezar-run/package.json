@@ -1,0 +1,21 @@
+{
+  "name": "@loki-labs/cezar-plus-run",
+  "version": "0.14.0",
+  "description": "Alias for @loki-labs/cezar-plus \u2014 so `npx @loki-labs/cezar-plus-run` just works. Local cockpit for running and tracking AI agent tasks in your repo.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "cezar-run": "bin.js"
+  },
+  "dependencies": {
+    "@loki-labs/cezar-plus": "^0.14.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MarcinWalendowski/cezar-plus",
+    "directory": "alias-cezar-run"
+  }
+}

@@ -33,6 +33,7 @@ interface HealthBody {
     costMetrics: boolean;
     cluster: boolean;
   };
+  instanceId?: string;
 }
 
 describe('GET /api/v1/health — forge + capabilities', () => {
@@ -46,6 +47,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
   const savedHideTokenUsage = process.env.CEZ_HIDE_TOKEN_USAGE;
   const savedHideCost = process.env.CEZ_HIDE_COST;
   const savedDryRun = process.env.CEZ_DRY_RUN;
+  const savedInstanceId = process.env.CEZ_INSTANCE_ID;
 
   beforeEach(() => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-health-'));
@@ -55,7 +57,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
     // must not decide what these assertions see.
     delete process.env.CEZ_FOLLOWUPS;
     delete process.env.CEZ_SINGLE_PROJECT;
-    // #801: automations are opt-in for the same reason, and the same ambient-env hazard applies.
+    // The fork keeps automations opt-in; ambient configuration must not decide this fixture.
     delete process.env.CEZ_AUTOMATIONS;
     delete process.env.CEZ_HIDE_TOKEN_METRICS;
     delete process.env.CEZ_HIDE_TOKEN_USAGE;
@@ -63,6 +65,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
     // Dry-run keeps the forge probe (and the claude check) off the network,
     // so the assertions are deterministic on any machine.
     process.env.CEZ_DRY_RUN = '1';
+    delete process.env.CEZ_INSTANCE_ID;
   });
 
   afterEach(() => {
@@ -84,6 +87,8 @@ describe('GET /api/v1/health — forge + capabilities', () => {
     else process.env.CEZ_HIDE_COST = savedHideCost;
     if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
     else process.env.CEZ_DRY_RUN = savedDryRun;
+    if (savedInstanceId === undefined) delete process.env.CEZ_INSTANCE_ID;
+    else process.env.CEZ_INSTANCE_ID = savedInstanceId;
   });
 
   const makeApp = (over: Partial<ServerDeps> = {}) =>
@@ -110,6 +115,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       followups: false,
       singleProject: false,
       automations: false,
+      dispatch: true,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -135,6 +141,11 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       // stayed green and let a key appear in the bookmarklet contract with nothing noticing.
       cluster: false,
     });
+  });
+
+  it('includes the installed instance identity when the service supplies one', async () => {
+    process.env.CEZ_INSTANCE_ID = 'install-a';
+    expect((await health()).instanceId).toBe('install-a');
   });
 
   // getRepoInfo needs a resolvable HEAD — an empty commit is enough.
@@ -180,6 +191,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       followups: false,
       singleProject: false,
       automations: false,
+      dispatch: true,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -217,6 +229,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       followups: false,
       singleProject: false,
       automations: false,
+      dispatch: true,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -239,6 +252,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       followups: false,
       singleProject: false,
       automations: false,
+      dispatch: true,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -266,6 +280,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       followups: true,
       singleProject: false,
       automations: false,
+      dispatch: true,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -290,17 +305,24 @@ describe('GET /api/v1/health — forge + capabilities', () => {
 
   // #801 — the automations capability rides the same payload, and is what the cockpit's nav gate
   // reads. Asserted as a whole object so a capability leaking on by accident cannot pass.
-  it('reports automations:false by default — GitHub automations are opt-in', async () => {
+  it('reports automations:true after explicitly opting in', async () => {
+    process.env.CEZ_AUTOMATIONS = '1';
+    expect((await health()).capabilities.automations).toBe(true);
+  });
+
+  it('reports automations:false with CEZ_AUTOMATIONS=0', async () => {
+    process.env.CEZ_AUTOMATIONS = '0';
     expect((await health()).capabilities.automations).toBe(false);
   });
 
-  it('reports automations:true with CEZ_AUTOMATIONS=1', async () => {
+  it('reports the whole capability set with CEZ_AUTOMATIONS=1', async () => {
     process.env.CEZ_AUTOMATIONS = '1';
     expect((await health()).capabilities).toEqual({
       localHandoff: true,
       followups: false,
       singleProject: false,
       automations: true,
+      dispatch: true,
       tokenMetrics: true,
       tokenUsageMetrics: true,
       costMetrics: true,
@@ -323,6 +345,7 @@ describe('GET /api/v1/health — forge + capabilities', () => {
       followups: false,
       singleProject: false,
       automations: false,
+      dispatch: true,
       tokenMetrics: false,
       tokenUsageMetrics: false,
       costMetrics: false,

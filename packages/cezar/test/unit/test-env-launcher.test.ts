@@ -27,8 +27,6 @@ function commandPath(command: string): string {
   return execFileSync('/bin/sh', ['-c', `command -v ${command}`], { encoding: 'utf8' }).trim();
 }
 
-const hasSetsid = spawnSync('/bin/sh', ['-c', 'command -v setsid'], { stdio: 'ignore' }).status === 0;
-
 function makeFixture(withSetsid: boolean): { root: string; path: string } {
   const root = mkdtempSync(join(tmpdir(), 'cez-test-env-launcher-'));
   fixtures.push(root);
@@ -42,7 +40,7 @@ function makeFixture(withSetsid: boolean): { root: string; path: string } {
   writeFileSync(join(root, 'package-lock.json'), '{}\n');
 
   const commands = ['cat', 'chmod', 'curl', 'date', 'dirname', 'find', 'grep', 'id', 'kill', 'mkdir', 'mv', 'nohup', 'pwd', 'rm', 'sh', 'sleep', 'tail', 'uname'];
-  if (withSetsid) commands.push('setsid');
+  if (withSetsid) writeFileSync(join(root, 'bin/setsid'), '#!/bin/sh\nexit 99\n', { mode: 0o755 });
   for (const command of commands) symlinkSync(commandPath(command), join(root, 'bin', command));
   symlinkSync(process.execPath, join(root, 'bin/node'));
 
@@ -60,7 +58,7 @@ const http = require('node:http');
 const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
 http.createServer((req, res) => {
   res.writeHead(200, { 'content-type': req.url === '/api/health' ? 'application/json' : 'text/html' });
-  res.end(req.url === '/api/health' ? '{"ok":true}' : '<!doctype html>');
+  res.end(req.url === '/api/health' ? JSON.stringify({ ok: true, pid: process.pid, env: { dryRun: process.env.CEZ_DRY_RUN, home: process.env.CEZ_HOME, analytics: process.env.CEZ_ANALYTICS, singleProject: process.env.CEZ_SINGLE_PROJECT, inheritedUrl: process.env.CEZ_PUBLIC_URL, nodeEnv: process.env.NODE_ENV } }) : '<!doctype html>');
 }).listen(port, '127.0.0.1');
 EOF
 printf '<!doctype html>' > packages/cezar/web/dist/index.html
@@ -90,31 +88,37 @@ function descriptor(root: string): { baseUrl: string; app: { pid: number } } {
 
 for (const withSetsid of [true, false]) {
   test(
-    `generated launcher survives its caller and stops by descriptor PID (${withSetsid ? 'setsid' : 'nohup fallback'})`,
-    { skip: withSetsid && !hasSetsid ? 'setsid is not available on this platform' : false },
+    `generated launcher survives its caller and stops by descriptor PID (${withSetsid ? 'setsid on PATH' : 'no setsid available'})`,
     async () => {
       const fixture = makeFixture(withSetsid);
-      const env = { ...process.env, PATH: fixture.path, TEST_ENV_CACHE_TTL_SECONDS: '600' };
+      const env = {
+        ...process.env,
+        PATH: fixture.path,
+        TEST_ENV_CACHE_TTL_SECONDS: '600',
+        CEZ_PUBLIC_URL: 'https://must-not-inherit.example',
+        NODE_ENV: 'production',
+        CEZ_SINGLE_PROJECT: withSetsid ? '1' : '',
+      };
       const up = join(fixture.root, '.ai/scripts/test-env-up.sh');
       const down = join(fixture.root, '.ai/scripts/test-env-down.sh');
       const callerPidFile = join(fixture.root, 'caller.pid');
 
-      const coldCommand = withSetsid ? commandPath('setsid') : '/bin/sh';
-      const coldArgs = withSetsid
-        ? ['/bin/sh', '-c', 'echo $$ > "$2"; sh "$1"', 'launcher-parent', up, callerPidFile]
-        : ['-c', 'echo $$ > "$2"; sh "$1"', 'launcher-parent', up, callerPidFile];
-      const cold = spawnSync(coldCommand, coldArgs, {
-        cwd: tmpdir(),
-        encoding: 'utf8',
-        env,
-        timeout: 20_000,
-      });
+      // Model a captured tool shell with its own process group even on macOS without setsid.
+      const cold = spawnSync(process.execPath, ['-e', `
+        const { spawnSync } = require('node:child_process');
+        const result = spawnSync('/bin/sh', ['-c', 'echo $$ > "$2"; sh "$1"',
+          'launcher-parent', process.argv[1], process.argv[2]],
+          { env: process.env, detached: true, encoding: 'utf8', timeout: 20000 });
+        process.stdout.write(result.stdout || '');
+        process.stderr.write(result.stderr || '');
+        process.exit(result.status ?? 1);
+      `, up, callerPidFile], { cwd: tmpdir(), encoding: 'utf8', env, timeout: 25_000 });
       assert.equal(cold.status, 0, cold.stderr);
       assert.match(cold.stdout, /TEST_ENV_REUSED=0/);
 
       const first = descriptor(fixture.root);
       launchedPids.add(first.app.pid);
-      if (withSetsid) {
+      {
         const callerPid = Number(readFileSync(callerPidFile, 'utf8').trim());
         try {
           process.kill(-callerPid, 'SIGTERM');
@@ -125,7 +129,20 @@ for (const withSetsid of [true, false]) {
       }
       assert.equal(process.kill(first.app.pid, 0), true);
       const health = await fetch(`${first.baseUrl}/api/health`).then((response) => response.json());
-      assert.deepEqual(health, { ok: true });
+      assert.deepEqual(health, {
+        ok: true,
+        pid: first.app.pid,
+        env: {
+          dryRun: '1',
+          home: join(fixture.root, '.ai/qa/cez-home'),
+          analytics: '1',
+          ...(withSetsid ? { singleProject: '1' } : {}),
+        },
+      });
+      const group = Number(
+        execFileSync(commandPath('ps'), ['-p', String(first.app.pid), '-o', 'pgid='], { encoding: 'utf8' }).trim(),
+      );
+      assert.equal(group, first.app.pid, 'server owns a new process group');
 
       const warm = spawnSync('/bin/sh', [up], { encoding: 'utf8', env, timeout: 20_000 });
       assert.equal(warm.status, 0, warm.stderr);

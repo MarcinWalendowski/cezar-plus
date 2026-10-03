@@ -1,7 +1,7 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, useLocation, useNavigate } from 'react-router'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from './api/query-client'
 import { queryKeys, workspaceQueryKeys } from './api/queries'
@@ -51,7 +51,7 @@ const HEALTH = {
   checks: [],
   defaultRunner: 'claude',
   forge: null,
-  capabilities: { localHandoff: true, followups: true, singleProject: false, automations: false },
+  capabilities: { localHandoff: true, followups: true, singleProject: false, automations: false, dispatch: false },
   projects: [{ id: BOOT, name: 'cezar' }],
   bootProject: BOOT,
 }
@@ -376,9 +376,11 @@ describe('scoped route map (/p/:projectId)', () => {
  * redirect into it with query and hash intact; and the project one carries the project it named.
  */
 describe('the settings area (/settings)', () => {
+  beforeAll(async () => { await import('./routes/automations/automations-route') }, 30_000)
   const SETTINGS_CASES: Array<[string, string, string]> = [
     ['/settings', 'settings', 'Settings'],
     ['/settings/project', 'settings-project', 'Project'],
+    ['/settings/tracker', 'settings-tracker', 'Issue tracker'],
     ['/settings/agents', 'settings-agents', 'Agents'],
     ['/settings/providers', 'settings-providers', 'Providers'],
     ['/settings/agent-config', 'settings-agent-config', 'Agent config'],
@@ -425,7 +427,7 @@ describe('the settings area (/settings)', () => {
       renderAt(`/p/${BOOT}/${path}`)
       expect(currentPathname()).toBe(`/p/${BOOT}/${path}`)
       expect(routeName()).toBe('automations')
-      expect(await screen.findByText('GitHub automations are off')).not.toBeNull()
+      expect(await screen.findByText('Automations are off')).not.toBeNull()
       expect(screen.getByText(/CEZ_AUTOMATIONS=1/)).not.toBeNull()
     })
   }
@@ -438,7 +440,7 @@ describe('the settings area (/settings)', () => {
     expect(routeName()).toBe('automations')
     expect(screen.getByText('Loading automations…')).not.toBeNull()
     expect(document.querySelector('#automation-name')).toBeNull()
-    expect(screen.queryByText('GitHub automations are off')).toBeNull()
+    expect(screen.queryByText('Automations are off')).toBeNull()
   })
 
   it('omits the Projects route when single-project mode is active', () => {
@@ -616,6 +618,47 @@ describe('legacy flat URLs redirect to the boot project', () => {
     renderAt('/', { registry: null })
 
     await waitFor(() => expect(currentPathname()).toBe(expected), { timeout: 4_000 })
+  })
+
+  /** The launch folder stopped being a project once the user has some (#774 follow-up):
+   *  `/api/v1/projects` no longer lists `bootProject`, so a bare launch must open a project the
+   *  sidebar actually shows — while every explicit URL still reaches the served folder. */
+  describe('with the boot folder served but not listed', () => {
+    const UNLISTED: ProjectsResponse = {
+      ...REGISTRY,
+      projects: [
+        {
+          ...REGISTRY.projects[1]!,
+          id: 'older',
+          name: 'older',
+          root: '/home/u/older',
+          lastOpenedAt: '2026-01-01T00:00:00.000Z',
+        },
+        { ...REGISTRY.projects[1]!, lastOpenedAt: '2026-02-01T00:00:00.000Z' },
+      ],
+    }
+
+    it('opens the most recently opened registered project from the bare root', () => {
+      renderAt('/', { registry: UNLISTED })
+
+      expect(currentPathname()).toBe('/p/other/')
+      expect(routeName()).toBe('tasks')
+    })
+
+    it('still restores a remembered location', () => {
+      rememberLocation({ projectId: 'older', pathname: '/p/older/tasks/run-1' })
+      renderAt('/', { registry: UNLISTED })
+
+      expect(currentPathname()).toBe('/p/older/tasks/run-1')
+    })
+
+    it('still resolves an explicit legacy deep link to the served folder', () => {
+      renderAt('/tasks/run-2?file=y#L3', { registry: UNLISTED })
+
+      expect(currentPathname()).toBe('/p/boot/tasks/run-2')
+      expect(currentSearch()).toBe('?file=y')
+      expect(currentHash()).toBe('#L3')
+    })
   })
 
   it('keeps the quiet resolving surface while bare-root inputs are pending', () => {

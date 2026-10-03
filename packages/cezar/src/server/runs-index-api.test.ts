@@ -244,6 +244,7 @@ describe('workspace runs index API', () => {
       'markerRefs',
       'referencedPrCandidates',
       'referencedIssueCandidates',
+      'prRefs',
       'costUsd',
       'peakRssBytes',
       'peakProcCount',

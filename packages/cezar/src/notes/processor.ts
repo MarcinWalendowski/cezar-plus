@@ -190,8 +190,8 @@ export class NoteProcessor {
   private async ask(
     prompt: string,
   ): Promise<
-    | { ok: true; data: NotePassResponse; runner: 'claude' | 'codex' | 'opencode' | 'pi' }
-    | { ok: false; error: string; runner: 'claude' | 'codex' | 'opencode' | 'pi' }
+    | { ok: true; data: NotePassResponse; runner: RunnerId }
+    | { ok: false; error: string; runner: RunnerId }
   > {
     const config = await loadConfig(this.deps.bootRoot);
     const runnerId = this.deps.runnerLock?.() ?? config.defaultRunner;

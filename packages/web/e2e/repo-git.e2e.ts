@@ -50,6 +50,34 @@ afterAll(() => {
   browser?.close()
 })
 
+function assertDiffMatches(files: Array<{ path: string }>): void {
+  browser.waitForFunction(`document.querySelectorAll('[data-slot="diff-file"]').length > 0`)
+  const expected = files.map((file) => file.path)
+  const rendered = () => browser.evaluate(
+    `[...document.querySelectorAll('[data-slot="diff-file"]')].map((file) => file.dataset.path)`,
+  ) as string[]
+  const virtualized = browser.evaluate(`document.querySelector('[data-slot="diff-files"]')?.dataset.virtualized`) === 'true'
+  if (!virtualized) {
+    expect(rendered().sort()).toEqual([...expected].sort())
+    return
+  }
+  expect(rendered().length).toBeLessThan(expected.length)
+  expect(rendered().every((path) => expected.includes(path))).toBe(true)
+  const last = expected.at(-1)!
+  for (let attempt = 0; attempt < 10 && !rendered().includes(last); attempt += 1) {
+    browser.evaluate(`(() => { const main = document.querySelector('main'); main.scrollTop = main.scrollHeight })()`)
+    browser.evaluate(`new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))`)
+  }
+  browser.waitForFunction(`[...document.querySelectorAll('[data-slot="diff-file"]')].some((file) => file.dataset.path === ${JSON.stringify(last)})`)
+  expect(rendered().every((path) => expected.includes(path))).toBe(true)
+  const reachable = browser.evaluate(`(() => {
+    const main = document.querySelector('main').getBoundingClientRect()
+    const file = [...document.querySelectorAll('[data-slot="diff-file"]')].find((file) => file.dataset.path === ${JSON.stringify(last)}).getBoundingClientRect()
+    return file.bottom > main.top && file.top < main.bottom
+  })()`)
+  expect(reachable).toBe(true)
+}
+
 describe('the repo view against the live dry-run server', () => {
   it('/git renders the header from live git state and an honest Changes segment', async () => {
     const repo = await api<RepoPayload>('/api/v1/repo')
@@ -71,15 +99,15 @@ describe('the repo view against the live dry-run server', () => {
     ).toBe(scoped('/git'))
 
     // The working tree may be clean or dirty — assert the view tells the same story the API does.
-    const changes = await api<{ files: unknown[] }>('/api/v1/repo/changes')
+    const changes = await api<{ files: Array<{ path: string }> }>('/api/v1/repo/changes')
     if (changes.files.length === 0) {
       browser.waitForFunction(
         `[...document.querySelectorAll('[data-slot="repo-changes"] h2')].some((h) => h.textContent === 'Working tree clean')`,
       )
     } else {
-      browser.waitForFunction(
-        `document.querySelectorAll('[data-slot="diff-file"]').length === ${changes.files.length}`,
-      )
+      browser.waitForFunction(`document.querySelectorAll('[data-slot="tree-file"]').length === ${changes.files.length}`)
+      expect(browser.evaluate(`[...document.querySelectorAll('[data-slot="tree-file"]')].map((file) => file.dataset.path).sort()`)).toEqual(changes.files.map((file) => file.path).sort())
+      assertDiffMatches(changes.files)
       expect(browser.count('[data-slot="changes-tree"]')).toBe(1)
     }
 
@@ -123,10 +151,7 @@ describe('the repo view against the live dry-run server', () => {
     browser.waitForFunction(`document.querySelector('[data-slot="commit-meta"]') !== null`)
     expect(browser.url()).toBe(`${baseUrl}${scoped(`/git/commits/${picked.hash}`)}`)
     expect(browser.text('[data-slot="commit-meta"]')).toContain(picked.subject)
-    // The same <Diff> facade, one card per changed file.
-    browser.waitForFunction(
-      `document.querySelectorAll('[data-slot="diff-file"]').length === ${picked.files.length}`,
-    )
+    assertDiffMatches(picked.files)
     // The way back is a link.
     expect(
       browser.evaluate(`document.querySelector('[data-slot="commit-back"]').getAttribute('href')`),
@@ -161,7 +186,7 @@ describe('the repo view against the live dry-run server', () => {
   it('below md the repo view forces unified+wrap, hides the toggles, and never overflows', async () => {
     browser.setViewport(IPHONE.width, IPHONE.height)
     try {
-      const changes = await api<{ files: unknown[] }>('/api/v1/repo/changes')
+      const changes = await api<{ files: Array<{ path: string }> }>('/api/v1/repo/changes')
       browser.goto(`${baseUrl}${scoped('/git')}`)
       browser.waitForFunction(`document.querySelector('[data-slot="repo-changes"]') !== null`)
 

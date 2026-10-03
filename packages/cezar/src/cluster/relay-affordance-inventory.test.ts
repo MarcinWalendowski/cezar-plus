@@ -593,6 +593,7 @@ const UI_EVENT_SINK_TS = resolve(SRC_ROOT, 'runs/ui-event-sink.ts');
  * in this repo's toolchain. Flagged in the delivery report; not silently papered over.
  */
 const KNOWN_SPREAD_TYPES: ReadonlyArray<{ file: string; type: string }> = [
+  { file: RUN_TS, type: 'RunMarkerNote' },
   { file: RUN_TS, type: 'AgentEvent' }, // `event` — run.ts's v1 `onEvent = (event: AgentEvent) => ...` closures
   { file: UI_EVENT_SINK_TS, type: 'UiEvent' }, // `event` — v2 path, see docblock above
 ];
@@ -624,6 +625,7 @@ type Verdict =
  * references" test — so they carry no verdict here.
  */
 const FIELD_CLASSIFICATION: Record<string, Verdict> = {
+  tone: { verdict: 'safe', why: 'portable danger presentation enum with no host or session coordinates' },
   // ---- already in the denylist, and genuinely produced by a real emitter -------------------
   backend: { verdict: 'risky', why: 'the agent CLI backend a sessionId only resumes against on this host' },
   cwd: { verdict: 'risky', why: 'a filesystem location on the origin host' },
@@ -878,7 +880,7 @@ describe('cluster/relay — LOCAL_AFFORDANCE_KEYS source-derived inventory', () 
     // unrecognized rather than being silently accepted — reintroducing a spread pattern that
     // once carried a local-machine affordance is exactly the kind of change this file exists to
     // force a review of.
-    const knownIdentifiers = new Set(['event']);
+    const knownIdentifiers = new Set(['event', 'note']);
     const unaccounted: string[] = [];
     for (const [exprText, provenances] of spreads) {
       const isKnownIdentifier = knownIdentifiers.has(exprText);

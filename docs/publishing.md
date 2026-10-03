@@ -1,3 +1,7 @@
+> Fork publication status: all publishing jobs are disabled, including nightly, preview,
+> stable and desktop jobs. The upstream setup procedures below require an explicit fork
+> publication decision before they can be activated. CI verification remains enabled.
+
 # Publishing — stable releases and npm previews
 
 How cezar-plus reaches npm. Two paths, deliberately separate
@@ -11,16 +15,17 @@ How cezar-plus reaches npm. Two paths, deliberately separate
   [`ci.yml`](../.github/workflows/ci.yml) publishes a snapshot of every package
   after a fully green `verify` run — on `develop` pushes and same-repo PRs only.
 - **Nightlies** are **clock-driven**: [`nightly.yml`](../.github/workflows/nightly.yml)
-  cuts `main`'s tip every night under the `nightly` dist-tag, so `npx cezar-cli@nightly`
+  cuts `main`'s tip every night under the `nightly` dist-tag, so `npx @loki-labs/cezar-plus-run@nightly`
   is always the trunk. Also runnable on demand from the Actions tab.
 
-Three packages are in the release, always at the same version; two of them ship:
+Four packages are in the release, always at the same version; three of them ship:
 
 | Package | Ships? | What it is |
 |---|---|---|
 | `@loki-labs/cezar-plus-api-client` | **no — `private`** | the typed client and shared contract types (`packages/api-client`) |
 | `@loki-labs/cezar-plus` | yes | the service + CLI, ships the built cockpit (`packages/cezar`) |
-| `cezar-cli` | yes | the unscoped bin alias, so `npx cezar-cli` works (`alias-cezar`) |
+| `@loki-labs/cezar-plus-cli` | yes | the original scoped alias, so `npx @loki-labs/cezar-plus-cli` works (`alias-cezar`) |
+| `@loki-labs/cezar-plus-run` | yes | a second scoped alias, so `npx @loki-labs/cezar-plus-run` works (`alias-cezar-run`) — npx resolves a package name, never a bin name, so each npx spelling is its own package |
 
 That table is also the **publish order**, and it is load-bearing: each package
 depends on the one above it, so publishing a dependent first would briefly
@@ -63,8 +68,8 @@ verifies `main` (typecheck, unit suites, build, packaged-CLI e2e — the same ga
 a release runs) and publishes it under the `nightly` dist-tag:
 
 ```bash
-npx cezar-cli@nightly              # whatever is on main as of last night
-npx cezar-cli@0.1.5-nightly.20260813.126   # that exact night, forever
+npx @loki-labs/cezar-plus-run@nightly              # whatever is on main as of last night
+npx @loki-labs/cezar-plus-run@0.1.5-nightly.20260813.126   # that exact night, forever
 ```
 
 The version is named after the **day it was cut** — `<base>-nightly.<YYYYMMDD>.<run_number>`
@@ -88,16 +93,16 @@ become the default install.
 
 | Event | Version (example) | dist-tag | Install |
 |---|---|---|---|
-| same-repo PR, CI green | `0.1.5-pr482.123` | `pr-482` | `npx cezar-cli@0.1.5-pr482.123` |
-| push to `develop` | `0.1.5-develop.124` | `develop` | `npx cezar-cli@develop` |
-| nightly cut of `main` | `0.1.5-nightly.20260813.126` | `nightly` | `npx cezar-cli@nightly` |
+| same-repo PR, CI green | `0.1.5-pr482.123` | `pr-482` | `npx @loki-labs/cezar-plus-run@0.1.5-pr482.123` |
+| push to `develop` | `0.1.5-develop.124` | `develop` | `npx @loki-labs/cezar-plus-run@develop` |
+| nightly cut of `main` | `0.1.5-nightly.20260813.126` | `nightly` | `npx @loki-labs/cezar-plus-run@nightly` |
 
 A push to `main` publishes **nothing**: the trunk reaches npm through the nightly
 above, or through an owner-driven stable release — never straight off a merge.
 
 Version scheme: `<base>-<channel>.<run_number>`, with `.<run_attempt>` appended
 on re-runs so no publish ever collides. Prerelease versions under explicit
-dist-tags are invisible to a plain `npx cezar-cli`, which keeps resolving
+dist-tags are invisible to a plain `npx @loki-labs/cezar-plus-run`, which keeps resolving
 `latest`.
 
 Every package publishes in lockstep, in dependency order, with each intra-release
@@ -136,15 +141,19 @@ below is done.
 
 ## One-time admin setup
 
-On **npmjs.com** (as an owner of the npm org and of the `cezar-cli` package):
+On **npmjs.com** (as an owner of the npm org and of the `@loki-labs/cezar-plus-cli` and `@loki-labs/cezar-plus-run` packages):
 
 1. Verify the org exists and your user is an **Owner**.
-2. Give the org control of the unscoped alias (unscoped packages attach to
-   orgs via teams) — run as the current `cezar-cli` owner:
-   `npm access grant read-write <org>:developers cezar-cli`.
+2. Give the org control of the unscoped aliases (unscoped packages attach to
+   orgs via teams) — run as their current owner:
+   `npm access grant read-write <org>:developers @loki-labs/cezar-plus-cli` (and the same for `@loki-labs/cezar-plus-run`).
+   An unscoped alias is outside the org scope, so the CI token below cannot create
+   it: the FIRST publish of a new alias is manual
+   (`cd alias-cezar-run && npm publish --access public`), before the release set
+   that includes it reaches CI.
 3. Create a **granular access token**: *Read and write*; packages and scopes =
    the org **scope** (`@loki-labs/*`) rather than a hand-picked package
-   list, **plus** the `cezar-cli` package; set an expiry per your policy (CI
+   list, **plus** the `@loki-labs/cezar-plus-cli` and `@loki-labs/cezar-plus-run` packages; set an expiry per your policy (CI
    fails loudly with `E401`/`E404` when it lapses).
    - Selecting the scope instead of individual packages is load-bearing: a
      token limited to *selected packages* cannot **create** a new one, and npm
@@ -166,13 +175,13 @@ On **GitHub** (this repository):
 After the first stable publish under a new package name (post-rename only):
 
 7. Publish a final forwarding patch of the old scoped package and deprecate
-   it: `npm deprecate <old-name> "moved to <new-name> — npx cezar-cli still works"`.
+   it: `npm deprecate <old-name> "moved to <new-name> — npx @loki-labs/cezar-plus-run still works"`.
 
 ## Verifying a preview
 
 - The PR's sticky comment (or the job's step summary for branch pushes) has
-  the exact command — e.g. `npx cezar-cli@0.1.5-pr482.123`.
-- `npm view cezar-cli dist-tags` shows every active channel.
+  the exact command — e.g. `npx @loki-labs/cezar-plus-run@0.1.5-pr482.123`.
+- `npm view @loki-labs/cezar-plus-run dist-tags` shows every active channel.
 - Server flows accept pinned previews too:
-  `npx cezar-cli@<version> server-deploy --platform <id>`
+  `npx @loki-labs/cezar-plus-run@<version> server-deploy --platform <id>`
   (see [Remote access](server-install/README.md)).

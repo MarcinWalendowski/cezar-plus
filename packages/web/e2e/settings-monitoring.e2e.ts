@@ -74,11 +74,24 @@ afterAll(async () => {
 describe('global Resources monitoring controls', () => {
   it('persists capacity and interval mode through a cold reload', async () => {
     gotoResources()
-    choose('[data-slot="resources-max-monitoring"]', '3')
+    browser.fill('[data-slot="resources-max-monitoring"]', '3')
+    browser.press('Enter')
     await waitForResources((resources) => resources.maxMonitoringSessions === 3)
+    // The API poll can finish before React renders either pending or the saved response.
+    browser.waitForFunction(`(() => {
+      const section = document.querySelector('[data-slot="resources-section"]')
+      return /Capacity:\\s*\\d+ active \\+ 3 monitoring/.test(section?.textContent ?? '')
+        && document.querySelector('[data-slot="resources-monitoring-wake-mode"]')?.disabled === false
+    })()`)
 
     choose('[data-slot="resources-monitoring-wake-mode"]', 'interval')
+    browser.waitForFunction(`document.querySelector('[data-slot="resources-monitoring-wake-interval"]')?.disabled === false`)
     browser.fill('[data-slot="resources-monitoring-wake-interval"]', '7')
+    browser.waitForFunction(`(() => {
+      const interval = document.querySelector('[data-slot="resources-monitoring-wake-interval"]')
+      const save = document.querySelector('[data-action="resources-save-monitoring-wake"]')
+      return interval?.value === '7' && interval.disabled === false && save?.disabled === false
+    })()`)
     browser.click('[data-action="resources-save-monitoring-wake"]')
     await waitForResources((resources) => resources.monitoringWakeIntervalMinutes === 7)
 

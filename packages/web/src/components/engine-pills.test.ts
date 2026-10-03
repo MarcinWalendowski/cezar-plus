@@ -93,8 +93,9 @@ function stubResolverFetch({
       if (path === '/api/v1/config') {
         return jsonResponse({ defaultRunner: projectDefault, defaultModels: {}, modelsLocked: false })
       }
-      if (path === '/api/v1/models?runner=codex') {
-        return jsonResponse({ runner: 'codex', models: [], source: 'live', stale: false })
+      if (path.startsWith('/api/v1/models?runner=')) {
+        const runner = path.includes('cursor') ? 'cursor' : 'codex'
+        return jsonResponse({ runner, models: [], source: 'live', stale: false })
       }
       if (path.endsWith('/workspace/agent-profiles')) {
         return jsonResponse({
@@ -129,6 +130,7 @@ describe('useResolvedEngine provider status', () => {
           { provider: 'claude', status: 'disconnected', enabled: true },
           { provider: 'codex', status: 'connected', enabled: true },
           { provider: 'opencode', status: 'not-installed', enabled: true },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     })
@@ -171,6 +173,7 @@ describe('useResolvedEngine provider status', () => {
           { provider: 'claude', status: 'disconnected', enabled: true },
           { provider: 'codex', status: 'unknown', enabled: true },
           { provider: 'opencode', status: 'not-installed', enabled: true },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     })
@@ -189,6 +192,7 @@ describe('useResolvedEngine provider status', () => {
           { provider: 'claude', status: 'connected', enabled: false },
           { provider: 'codex', status: 'connected', enabled: true },
           { provider: 'opencode', status: 'not-installed', enabled: true },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     })
@@ -209,6 +213,7 @@ describe('useResolvedEngine provider status', () => {
           { provider: 'claude', status: 'connected', enabled: true },
           { provider: 'codex', status: 'connected', enabled: true },
           { provider: 'opencode', status: 'not-installed', enabled: true },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     })
@@ -274,7 +279,7 @@ describe('engineBody', () => {
     expect(body).toEqual({ runner: undefined, model: undefined })
   })
 
-  it.each<Runner>(['claude', 'codex', 'opencode', 'pi'])(
+  it.each<Runner>(['claude', 'codex', 'junie', 'opencode', 'cursor', 'pi', 'copilot'])(
     'is symmetric for %s as the host default',
     (runner) => {
       expect(engineBody(resolved({ runner, defaultRunner: runner })).runner).toBeUndefined()

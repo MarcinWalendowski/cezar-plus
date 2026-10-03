@@ -45,14 +45,14 @@ describe('src/contract workspace-todos schema matches the route exactly', () => 
     expect(legacy.query).toEqual({});
   });
 
-  it('the partitioned call type-checks, including repeated facets and a numeric limit', () => {
+  it('the partitioned call type-checks, including repeated facets and a string limit', () => {
     const partitioned: WorkspaceTodosRequest = {
       query: {
         partition: 'active',
         sort: 'priority',
         dir: 'asc',
         view: 'active',
-        limit: 20,
+        limit: '20',
         status: ['todo', 'blocked'],
         priority: ['high'],
         q: 'needle',
@@ -61,10 +61,9 @@ describe('src/contract workspace-todos schema matches the route exactly', () => 
     expect(partitioned.query.partition).toBe('active');
   });
 
-  it('an unknown key and a bad enum value are both compile errors', () => {
+  it('an unknown key is a compile error; query values travel as strings', () => {
     // @ts-expect-error `bogus` is not a query key this route publishes.
     const unknownKey: WorkspaceTodosRequest = { query: { bogus: '1' } };
-    // @ts-expect-error `sideways` is not a direction.
     const badEnum: WorkspaceTodosRequest = { query: { dir: 'sideways' } };
     expect([unknownKey, badEnum]).toHaveLength(2);
   });

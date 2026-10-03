@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
 
 /**
  * V8 for `.ai/specs/2026-08-23-plain-end-structured-question.md`, made executable
@@ -135,36 +135,20 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   bootProject = await bootProjectId(baseUrl)
 
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 900)
 
-  // A fresh `CEZ_HOME` has no org yet (`onboarding-gate.ts`'s D14 gate: no dashboard element
-  // renders before the first organization exists), so the scoped tasks route redirects to
-  // `/onboarding` on first load. Walk org creation and the team-accept step once, the way
-  // `filed-partitions.e2e.ts` does, before any case below navigates to a task page. The
-  // pre-registered project above means the wizard's project step never has to render.
-  // (The bare, unscoped `/tasks` never mounts a route here — it must be the scoped path.)
-  browser.goto(`${baseUrl}${scoped('/tasks')}`)
-  browser.waitForFunction(`document.querySelector('[data-slot="onboarding-org-name"]') !== null`)
-  browser.fill('[data-slot="onboarding-org-name"]', 'fixture-org')
-  browser.click('[data-slot="onboarding-org-submit"]')
-  browser.waitForFunction(`document.querySelector('[data-slot="onboarding-team-accept"]') !== null`)
-  browser.click('[data-slot="onboarding-team-accept"]')
-
-  // The client's own onboarding-entry-probe cache can still read stale between the click above
-  // and a real navigation — the server itself is already `hasProjects: true` the instant team
-  // creation lands. A fresh full-page `goto` (not a client route push) re-probes cold and
-  // resolves correctly, which is what every case below does anyway for its own task URL.
   browser.goto(`${baseUrl}${scoped('/tasks')}`)
   browser.waitForFunction(`location.pathname.endsWith('/tasks')`)
 }, 180_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('a plain-end turn is never a dead end (#410)', () => {

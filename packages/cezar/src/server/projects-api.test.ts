@@ -17,7 +17,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH } from '@loki-labs/cezar-plus-contract';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
-import { allocateProjectSlug, clearProjectProbeCache, listProjects, registerProject } from '../workspace/projects.ts';
+import {
+  allocateProjectSlug,
+  clearProjectProbeCache,
+  listProjects,
+  registerProject,
+  type ProjectListEntry,
+} from '../workspace/projects.ts';
 import { ProjectContexts } from './project-context.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { loadWorkspaceConfig, mergeWriteWorkspaceConfig } from '../workspace/config.ts';
@@ -116,6 +122,20 @@ describe('workspace projects API', () => {
     return (await res.json()) as ProjectsResponse;
   };
 
+  /**
+   * The REGISTRY rows only. `GET /api/v1/projects` also lists the folder this
+   * server was started in when the registry does not hold it — an
+   * `unregistered: true` row that exists so the cockpit can reach what the
+   * server is serving (its own tests below). Every assertion about what the
+   * registry contains goes through this, so the synthetic row cannot make one
+   * of them accidentally pass.
+   */
+  const registeredProjects = async (over: Partial<ServerDeps> = {}): Promise<ProjectListEntry[]> =>
+    (await getProjects(over)).projects.filter((project) => !project.unregistered);
+
+  const registeredIds = async (over: Partial<ServerDeps> = {}): Promise<string[]> =>
+    (await registeredProjects(over)).map((project) => project.id);
+
   const getHealth = async (over: Partial<ServerDeps> = {}): Promise<HealthBody> => {
     const res = await apiRequest(makeApp(over), '/api/v1/health');
     expect(res.status).toBe(200);
@@ -123,9 +143,9 @@ describe('workspace projects API', () => {
   };
 
   describe('GET /api/v1/projects', () => {
-    it('answers an empty registry with projects:[] and defaults — never a 404', async () => {
+    it('answers an empty registry with no registered projects and defaults — never a 404', async () => {
       const body = await getProjects();
-      expect(body.projects).toEqual([]);
+      expect(body.projects.filter((project) => !project.unregistered)).toEqual([]);
       // Unregistered boot repo (e.g. worktree/$HOME/unreadable workspace):
       // bootProject degrades to the repo's would-be slug, not an error.
       expect(body.bootProject).toBe(allocateProjectSlug(repoRoot, []));
@@ -212,6 +232,165 @@ describe('workspace projects API', () => {
       const byRoot = new Map(body.projects.map((p) => [p.root, p]));
       expect(byRoot.get(realpathSync(otherRoot))?.maxParallel).toBe(3);
       expect(byRoot.get(realpathSync(repoRoot))?.maxParallel).toBeUndefined();
+    });
+  });
+
+  /**
+   * The folder the server was started in, when the registry does not hold it.
+   * Listed only while the registry is EMPTY — there the launch folder is the
+   * cockpit's project, and it is flagged so nothing offers to edit a registry
+   * row that does not exist. Once the user has projects, starting cezar
+   * somewhere neither registers that folder (seed-once) nor lists it; it is
+   * still served under `/p/<bootProject>/` and the unscoped alias.
+   */
+  describe('GET /api/v1/projects — the unregistered boot folder', () => {
+    it('lists the boot folder as unregistered, with its status and no registry timestamps', async () => {
+      const body = await getProjects();
+
+      const boot = body.projects.find((project) => project.id === body.bootProject);
+      expect(boot).toMatchObject({
+        id: allocateProjectSlug(repoRoot, []),
+        root: realpathSync(repoRoot),
+        name: basename(realpathSync(repoRoot)),
+        status: 'not-git', // a real probe, exactly like a registered row
+        unregistered: true,
+        addedAt: '',
+        lastOpenedAt: '',
+      });
+      // Listed, never written: nothing reached the registry.
+      expect((await loadWorkspaceConfig()).projects).toEqual([]);
+    });
+
+    it('omits the boot folder once the registry holds any project, and still names it', async () => {
+      const other = await registerProject(otherRoot);
+      const body = await getProjects();
+
+      // The whole point (#774 follow-up): starting cezar in a folder the user
+      // never added puts no row in their sidebar.
+      expect(body.projects.map((project) => project.id)).toEqual([other.id]);
+      expect(body.projects.some((project) => project.unregistered)).toBe(false);
+      // Still the boot project, so `/p/<bootProject>/` and the legacy flat URLs
+      // it backs keep resolving to the folder this server is serving.
+      expect(body.bootProject).toBe(allocateProjectSlug(repoRoot, [other.id]));
+      expect((await loadWorkspaceConfig()).projects.map((p) => p.root)).toEqual([other.root]);
+    });
+
+    it('comes back when the last project is removed', async () => {
+      const other = await registerProject(otherRoot);
+      expect((await getProjects()).projects.some((p) => p.unregistered)).toBe(false);
+
+      const app = makeApp();
+      const removed = await apiRequest(app, `/api/v1/projects/${other.id}`, { method: 'DELETE' });
+      expect(removed.status).toBe(200);
+
+      const body = await getProjects();
+      expect(body.projects).toMatchObject([{ id: body.bootProject, unregistered: true }]);
+    });
+
+    it('drops the flag once the boot folder is registered, and never duplicates it', async () => {
+      const boot = await registerProject(repoRoot);
+      const body = await getProjects();
+      expect(body.projects.map((project) => project.id)).toEqual([boot.id]);
+      expect(body.projects[0]?.unregistered).toBeUndefined();
+    });
+
+    it('is the whole list when the workspace is unreadable — never an empty sidebar', async () => {
+      // A directory where the config file belongs: every read of it fails, which
+      // is the zero-config "degrade to a smaller cockpit" path. Nothing is
+      // registered as far as this process can tell, and the one folder it can
+      // definitely serve is the one it was started in.
+      mkdirSync(workspaceConfigPath(), { recursive: true });
+      const body = await getProjects();
+      expect(body.projects).toMatchObject([{ id: body.bootProject, unregistered: true }]);
+      expect(body.bootProject).toBe(allocateProjectSlug(repoRoot, []));
+    });
+
+    it('keeps the boot id stable when another project takes its would-be slug', async () => {
+      // One app instance for the whole test: the boot id is a live URL, and it
+      // must not move under an open tab because the registry changed around it.
+      const app = makeApp();
+      const first = (await (await apiRequest(app, '/api/v1/projects')).json()) as ProjectsResponse;
+      const bootId = first.bootProject;
+
+      // A different folder with the SAME basename, added the way the dialog adds one.
+      const twin = join(otherRoot, basename(repoRoot));
+      mkdirSync(twin, { recursive: true });
+      const registered = await apiRequest(app, '/api/v1/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ root: twin }),
+      });
+      expect(registered.status).toBe(200);
+      const { project } = (await registered.json()) as RegisterProjectResponse;
+      // The reservation: the newcomer takes the suffixed slug, not the one the
+      // boot folder is already being served under.
+      expect(project.id).not.toBe(bootId);
+
+      const after = (await (await apiRequest(app, '/api/v1/projects')).json()) as ProjectsResponse;
+      expect(after.bootProject).toBe(bootId);
+      // The registry is no longer empty, so the served folder is not listed —
+      // but the id it is served under did not move under the open tab.
+      expect(after.projects.map((p) => p.id)).toEqual([project.id]);
+    });
+
+    it('hands the boot folder its own slug when the user adds it', async () => {
+      const bus = new WorkspaceEventBus();
+      const seen: string[] = [];
+      bus.on((event) => seen.push(event));
+      const app = makeApp({ workspaceEvents: bus });
+      const before = (await (await apiRequest(app, '/api/v1/projects')).json()) as ProjectsResponse;
+      const added = await apiRequest(app, '/api/v1/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ root: repoRoot }),
+      });
+      expect(added.status).toBe(200);
+      const { project } = (await added.json()) as RegisterProjectResponse;
+      // The reservation is against OTHER roots only — adding the served folder
+      // keeps the id the cockpit is already showing, so no URL moves.
+      expect(project.id).toBe(before.bootProject);
+
+      const after = (await (await apiRequest(app, '/api/v1/projects')).json()) as ProjectsResponse;
+      expect(after.bootProject).toBe(before.bootProject);
+      expect(after.projects.map((p) => p.unregistered)).toEqual([undefined]);
+      expect((await loadWorkspaceConfig()).projects).toMatchObject([{ id: before.bootProject, root: repoRoot }]);
+      const repeated = await apiRequest(app, '/api/v1/projects', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ root: `${repoRoot}/` }),
+      });
+      expect(repeated.status).toBe(409);
+      expect((await repeated.json() as RegisterProjectResponse).project.id).toBe(before.bootProject);
+      expect((await loadWorkspaceConfig()).projects).toHaveLength(1);
+      expect(seen).toEqual(['project-added']);
+    });
+
+    it('yields the slug visibly when another process takes it, rather than shadowing that project', async () => {
+      const app = makeApp();
+      const first = (await (await apiRequest(app, '/api/v1/projects')).json()) as ProjectsResponse;
+      const bootId = first.bootProject;
+
+      // A same-basename folder registered OUT OF BAND — `cezar projects add` in a
+      // terminal, where this server's reservation cannot reach it.
+      const twin = join(otherRoot, basename(repoRoot));
+      mkdirSync(twin, { recursive: true });
+      const stolen = await registerProject(twin);
+      expect(stolen.id).toBe(bootId);
+
+      // The boot project moves to the suffixed slug instead of keeping an id the
+      // registry now points at another repo: the scope resolver binds
+      // `/p/<bootProject>/` to the boot context BEFORE consulting the registry, so
+      // holding on to the stolen slug would serve this folder under the other
+      // project's sidebar row.
+      const after = (await (await apiRequest(app, '/api/v1/projects')).json()) as ProjectsResponse;
+      expect(after.bootProject).not.toBe(bootId);
+      expect(after.projects.map((p) => p.id)).toEqual([stolen.id]);
+
+      // …and the row that DID take the slug resolves to its own root.
+      const contexts = new ProjectContexts({ listProjects });
+      const scoped = await apiRequest(makeApp({ contexts }), `/api/v1/p/${bootId}/repo`);
+      expect(scoped.status).toBe(200);
+      expect(contexts.peek(bootId)?.root).toBe(await realpath(twin));
+      contexts.disposeAll();
     });
   });
 
@@ -336,38 +515,46 @@ describe('workspace projects API', () => {
       expect(body.project.id).toBe(first.id);
       expect(body.error).toContain(first.id);
       expect(seen).toEqual([]);
-      expect((await getProjects()).projects).toHaveLength(1);
+      expect(await registeredIds()).toEqual([first.id]);
     });
 
-    /**
-     * The reported bug, `.ai/specs/2026-08-15-duplicate-project-context-wipes-runs.md`: booting
-     * on `repoRoot` and then registering that SAME root through this route used to find no
-     * registry match (the boot project deliberately carries no row of its own — D3,
-     * `suppressBootRegistration`) and allocate a FRESH slug for it — a second registry row over
-     * the identical `.ai/cezar`. `ProjectContexts.build()` then opens a SECOND `RunStore` over the
-     * same `runs.json` the boot context's own store already owns: two independent in-memory
-     * copies of one file, and whichever flushes last (its own 300ms debounce, or shutdown)
-     * truncates the other's writes away.
-     *
-     * Mutation: drop the boot-root short-circuit in `registerFolder` — this then observes a fresh
-     * slug (and the registry gaining a row) instead of the boot identity.
-     */
-    it("registering the boot repo's own root is idempotent: 200 with the boot identity, no registry write, no event", async () => {
+    it("explicit boot registration writes one row and event while reusing the boot store", async () => {
       const bus = new WorkspaceEventBus();
       const seen: string[] = [];
       bus.on((event) => seen.push(event));
-      const expectedBootId = allocateProjectSlug(repoRoot, []);
+      const contexts = new ProjectContexts({ listProjects });
+      const app = makeApp({ contexts, workspaceEvents: bus });
+      try {
+        const before = await (await apiRequest(app, '/api/v1/projects')).json() as ProjectsResponse;
+        const request = (root: string) => apiRequest(app, '/api/v1/projects', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ root }),
+        });
+        const first = await request(repoRoot);
+        expect(first.status).toBe(200);
+        const body = await first.json() as RegisterProjectResponse;
+        expect(body.project.id).toBe(before.bootProject);
+        expect(body.project.root).toBe(await realpath(repoRoot));
+        expect((await loadWorkspaceConfig()).projects).toMatchObject([{ id: before.bootProject, root: repoRoot }]);
+        expect(seen).toEqual(['project-added']);
 
-      const { status, body } = await post({ root: repoRoot }, { workspaceEvents: bus });
+        const second = await request(`${repoRoot}/`);
+        expect(second.status).toBe(409);
+        expect((await second.json() as RegisterProjectResponse).project.id).toBe(before.bootProject);
+        expect((await loadWorkspaceConfig()).projects).toHaveLength(1);
+        expect(seen).toEqual(['project-added']);
 
-      expect(status).toBe(200);
-      expect(body.project.id).toBe(expectedBootId);
-      expect(body.project.root).toBe(await realpath(repoRoot));
-      expect(body.error).toBeUndefined();
-      // Not a new project — no event, no registry row.
-      expect(seen).toEqual([]);
-      expect((await loadWorkspaceConfig()).projects).toEqual([]);
-      expect((await getProjects()).projects).toEqual([]);
+        const marker = store.createRun({
+          author: localCliAuthor(), title: 'boot-store marker', workflow: '(planned)',
+          task: 'read from the original store', steps: [],
+        });
+        const scoped = await apiRequest(app, `/api/v1/p/${before.bootProject}/runs`);
+        expect(scoped.status).toBe(200);
+        expect(await scoped.json()).toMatchObject([{ id: marker.id }]);
+        expect(contexts.peek(before.bootProject)).toBeUndefined();
+      } finally {
+        contexts.disposeAll();
+      }
     });
 
     it("registering the boot repo's own root normalizes the same way every other dedupe does (trailing slash)", async () => {
@@ -375,7 +562,7 @@ describe('workspace projects API', () => {
       const { status, body } = await post({ root: `${repoRoot}/` });
       expect(status).toBe(200);
       expect(body.project.id).toBe(expectedBootId);
-      expect((await loadWorkspaceConfig()).projects).toEqual([]);
+      expect((await loadWorkspaceConfig()).projects).toMatchObject([{ id: expectedBootId, root: repoRoot }]);
     });
 
     it('400s a non-absolute path, a missing folder, a file, and a malformed body', async () => {
@@ -389,14 +576,14 @@ describe('workspace projects API', () => {
       expect((await post({})).status).toBe(400);
       expect((await post({ root: '   ' })).status).toBe(400);
       // No 400 path may have written anything.
-      expect((await getProjects()).projects).toEqual([]);
+      expect(await registeredProjects()).toEqual([]);
     });
 
     it('refuses $HOME itself — the dialog starts there and could otherwise add it', async () => {
       const { status, body } = await post({ root: '~' });
       expect(status).toBe(400);
       expect(body.error).toContain('home directory');
-      expect((await getProjects()).projects).toEqual([]);
+      expect(await registeredProjects()).toEqual([]);
     });
 
     it('hosted mode: a folder outside browseRoot is refused, one inside is registered', async () => {
@@ -414,7 +601,7 @@ describe('workspace projects API', () => {
       expect(refused.status).toBe(400);
       // The message must not name the root it is protecting (fs-browse's rule).
       expect(refused.body.error).not.toContain(checkoutRoot);
-      expect((await getProjects()).projects).toEqual([]);
+      expect(await registeredProjects()).toEqual([]);
       const allowed = await post({ root: inside });
       expect(allowed.status).toBe(200);
       expect(allowed.body.project.root).toBe(await realpath(inside));
@@ -437,7 +624,7 @@ describe('workspace projects API', () => {
       // …and neither leaks the probed spelling back (the `no such folder`
       // message echoes it; the containment one deliberately does not).
       expect(absent.body.error).not.toContain('nope');
-      expect((await getProjects()).projects).toEqual([]);
+      expect(await registeredProjects()).toEqual([]);
     });
 
     it('hosted mode: a missing folder INSIDE the root still says so, not "outside"', async () => {
@@ -456,7 +643,7 @@ describe('workspace projects API', () => {
       const answer = await post({ root: typo });
       expect(answer.status).toBe(400);
       expect(answer.body.error).toBe(`no such folder: ${typo}`);
-      expect((await getProjects()).projects).toEqual([]);
+      expect(await registeredProjects()).toEqual([]);
     });
 
     it('hosted mode: a symlink inside the root pointing out of it is refused', async () => {
@@ -473,7 +660,7 @@ describe('workspace projects API', () => {
       const answer = await post({ root: escape });
       expect(answer.status).toBe(400);
       expect(answer.body.error).toBe('folder is outside the browsable root');
-      expect((await getProjects()).projects).toEqual([]);
+      expect(await registeredProjects()).toEqual([]);
     });
   });
 
@@ -1341,15 +1528,15 @@ describe('workspace projects API', () => {
         expect(status, id).toBe(404);
         expect(body.error, id).toContain('unknown project');
       }
-      expect((await getProjects()).projects.map((p) => p.id)).toEqual([other.id]);
+      expect(await registeredIds()).toEqual([other.id]);
     });
 
-    it('refuses the boot project (and its `default` alias) — it re-registers itself at every start', async () => {
+    it('refuses the boot project (and its `default` alias) — this server is serving it', async () => {
       const boot = await registerProject(repoRoot);
       for (const id of [boot.id, 'default']) {
         const { status, body } = await del(id);
         expect(status, id).toBe(409);
-        expect(body.error, id).toContain('re-registers');
+        expect(body.error, id).toContain('is serving');
       }
       expect((await getProjects()).projects.map((p) => p.id)).toEqual([boot.id]);
     });
@@ -1602,6 +1789,7 @@ describe('workspace projects API', () => {
         followups: false,
         singleProject: false,
         automations: false,
+        dispatch: true,
         tokenMetrics: true,
         tokenUsageMetrics: true,
         costMetrics: true,

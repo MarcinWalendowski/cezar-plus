@@ -20,15 +20,18 @@ import { applyProviderEnablement } from './core/provider-availability.ts';
 import { accountAuthFromService, assessAccountViability, loadViabilityInput } from './workspace/account-viability.ts';
 import { defaultAgentAccountStore, loadAgentAccounts } from './workspace/agent-accounts.ts';
 import { canonicalPath, pruneOrphans } from './git-worktree.ts';
+import { ensureDataGitignore } from './data-gitignore.ts';
 import { getRepoInfo } from './server/git.ts';
 import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from './config.ts';
 import { reclaimWorktrees } from './runs/retention.ts';
+import { armRepoHandle } from './runs/arm-repo-handle.ts';
 import { RunStore } from './runs/store.ts';
 import { findForeignWorkspaceOwner, loadForeignWorkspaceRunSources } from './runs/worktree-ownership.ts';
 import { runRunStatsCommand } from './runs/stats-cli.ts';
 import { runRunsCommand } from './runs/reopen-cli.ts';
 import { RunManager } from './workflows/run.ts';
 import { recheckManualDeployParksEverywhere } from './workflows/recheck-parks-workspace.ts';
+import { resolveTrackerAgentEnv } from './server/tracker/agent-credentials.ts';
 import { loadWorkflows } from './workflows/load.ts';
 import { DEFAULT_WORKFLOW_NAME } from './workflows/types.ts';
 import { startServer, WorkspaceEventBus, type SessionResolver } from './server/server.ts';
@@ -36,13 +39,17 @@ import type { ProjectContexts } from './server/project-context.ts';
 import { runAuthBootGate } from './auth-boot-gate.ts';
 import { buildLocalModeRoutes } from './local-mode-boot.ts';
 import type { Hono } from 'hono';
+import { resolveCapabilities } from './server/capabilities.ts';
 import {
   ProviderRuntimeAuthObserver,
   recoverWithProviderRuntimeAuthObservation,
 } from './server/provider-auth-runtime.ts';
 import { disabledProviderMessage, requirementsForWorkflowRun, viabilityRefusalMessage } from './server/provider-action-gate.ts';
-import { checkForUpdate } from './update-check.ts';
 import { ensureBootRepo, holdsOnlyRuntimeState } from './workspace/boot-repo.ts';
+import { SelfUpdateService } from './self-update/service.ts';
+import { isSupervised, restartProcess } from './self-update/restart.ts';
+import { runSelfUpdateCommand } from './self-update/cli.ts';
+import { writeLaunchers } from './self-update/launcher.ts';
 import { loadWorkspaceConfig } from './workspace/config.ts';
 import { runMigrations } from './workspace/migrations.ts';
 import { listProjects, shouldRegisterProject } from './workspace/projects.ts';
@@ -89,6 +96,10 @@ import { clusterActiveAsOfFrom, clusterActiveRunsFrom } from './server/cluster-r
 // Aliased: `serverInstallCommand` below already destructures its own `loadServerState` out of a
 // dynamic import, and two bindings of one name in one file is a shadow waiting to be misread.
 import { loadServerState as loadInstalledServerState } from './server-install/state.ts';
+import { runTaskCommand } from './dispatch/task-cli.ts';
+import { runAutomationCommand } from './automations/automation-cli.ts';
+
+import { runTrackerConnectionsCommand } from './server/tracker/connections-cli.ts';
 
 const HELP = `cezar-plus — local cockpit for AI agent tasks in your repo
 
@@ -103,6 +114,8 @@ Usage:
                             [--dry-run] [--limit <n>] [--exclude <runId>] — the
                             running cockpit continues each one (run "cezar runs"
                             for the full usage)
+  cezar task <create|report|list>  dispatch or report from inside a running task (CEZ_DISPATCH=0 turns it off)
+  cezar automation <add|create|check|run|list|…>  create and manage automations (GitHub polls, schedules) on a running cockpit
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
   cezar projects            list the projects this cockpit serves
                             (also: projects add [<dir>] · projects remove <id>)
@@ -127,6 +140,7 @@ Usage:
                             run · snapshots · verify · gc · restore [--snapshot
                             <id>] [--force]
   cezar server-install      interactive wizard to host cezar-plus on a server
+  cezar tracker-connections <list|remove ID>  inspect or delete local project credentials
   cezar server-deploy       redeploy a new version (reload the service) + verify
                               --strategy=blue-green   stage a release, smoke-boot it, flip, probe,
                                                       auto-roll-back (spec 2026-08-19)
@@ -140,6 +154,15 @@ Usage:
   cezar supervisor          run the auth-terminating supervisor process (D4/D10 —
                             per-org process isolation; see the org-team-auth spec).
                             Requires CEZ_AUTH=oidc|google; not the everyday command.
+  cezar install             install THIS cezar permanently under ~/.cezar (a \`cezar\`
+                            command on PATH that updates itself from the cockpit)
+  cezar update              update the managed install to the channel's newest version
+                            (--channel stable|nightly, --version <x> to pin or downgrade)
+  cezar versions            list installed versions and cezar worktrees (\`cezar use <id>\` switches)
+  cezar link [<dir>]        run a cezar checkout/worktree (default: cwd) as a version — a
+                            link, not a copy, so rebuilds are live (--use to switch to it now);
+                            the desktop app runs it after a restart or from Cezar ▸ Versions
+  cezar unlink <id>         forget a linked checkout (the checkout itself is untouched)
 
 Options:
   -p, --port <n>              cockpit port (default 4321; server-install: this
@@ -318,6 +341,21 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (process.argv[2] === 'tracker-connections') {
+    process.exitCode = await runTrackerConnectionsCommand(process.argv.slice(3));
+    return;
+  }
+  // `cez task …` (spec 2026-09-10-dispatch) has its own flags, so it is routed before the
+  // cockpit's parser can refuse them. It only talks to an already-running cockpit.
+  if (process.argv[2] === 'task') {
+    process.exitCode = await runTaskCommand(process.argv.slice(3));
+    return;
+  }
+  // `cez automation …` (spec 2026-09-13-automations-from-prompt): same shape, same reason.
+  if (process.argv[2] === 'automation') {
+    process.exitCode = await runAutomationCommand(process.argv.slice(3));
+    return;
+  }
   const { values, positionals } = parseArgs({
     args: withOptionalFlagValues(rawArgs),
     options: {
@@ -354,6 +392,10 @@ async function main(): Promise<void> {
       'allow-stale-artifact': { type: 'boolean', default: false },
       'refuse-dirty': { type: 'boolean', default: false },
       'allow-unrelated': { type: 'boolean', default: false },
+      channel: { type: 'string' },
+      version: { type: 'string' },
+      'no-modify-path': { type: 'boolean', default: false },
+      use: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowPositionals: true,
@@ -494,6 +536,21 @@ async function main(): Promise<void> {
     // NB no `case 'run-broker'` here. It is dispatched from raw argv above the strict `parseArgs`,
     // because its own flags never survive that parser — and a `case` here that LOOKS live while
     // being unreachable is precisely how the broker shipped broken. See the block above.
+    case 'install':
+    case 'update':
+    case 'versions':
+    case 'use':
+    case 'link':
+    case 'unlink':
+      // Managed install (self-update PoC): no server, no repo — only ~/.cezar and the registry.
+      process.exitCode = await runSelfUpdateCommand(command, positionals.slice(1), {
+        service: buildSelfUpdateService({ restart: () => {} }),
+        channel: values.channel,
+        version: values.version,
+        modifyPath: !values['no-modify-path'],
+        use: Boolean(values.use),
+      });
+      return;
     default:
       console.error(`unknown command: ${command}\n`);
       console.log(HELP);
@@ -793,9 +850,11 @@ async function serveCommand(
   // Built BEFORE the manager so its dispatch pickers can be handed a real credentials read from
   // the moment they exist, rather than the seam's `'unknown'` default
   // (`.ai/specs/2026-08-25-logged-out-account-fallback.md`, Phase 1).
-  const providerAuth = new ProviderAuthService();
+  const providerAuth = new ProviderAuthService({ cwd: repoRoot });
   const manager = new RunManager(store, repoRoot, {
     semaphore,
+    projectId: bootProjectId,
+    resolveTrackerEnv: resolveTrackerAgentEnv,
     bootScratchRoot,
     accountAuth: accountAuthFromService(providerAuth),
   });
@@ -859,18 +918,32 @@ async function serveCommand(
   );
   if (recovered > 0) console.log(`  recovered ${recovered} run(s) from the previous session`);
 
-  // Update discovery (#368) — fire-and-forget; the banner prints whenever the
-  // registry answers and /api/v1/health picks it up for the GUI chip.
-  const pkgName = readOwnName();
-  const update: { latest?: string } = {};
-  void checkForUpdate(pkgName, version).then((latest) => {
-    if (!latest) return;
-    update.latest = latest;
-    console.log(`\n  ⬆ cezar-plus ${latest} is available (running ${version}) — restart with: npx ${pkgName}@latest\n`);
-  });
-
   const drain = new DrainController({ drainMs: resolveDrainMs(process.env) });
   const port = portStrict ? preferredPort : await pickPort(preferredPort);
+
+  // Update discovery (#368) through the self-update service (PoC): the channel's newest
+  // version lands on /api/v1/health as `latestVersion` for the chip, and the dialog behind the
+  // chip can apply it when this cezar runs from the managed layout (`cezar install`).
+  const pkgName = readOwnName();
+  const update: { latest?: string } = {};
+  let httpServer: ReturnType<typeof startServer> | null = null;
+  const selfUpdate = buildSelfUpdateService({
+    activeRuns: () => store.listRuns().filter((r) => ['queued', 'waiting', 'running'].includes(r.status)).length,
+    // The server's own predicate, not a second spelling of it: the `/apply` guard decides hosted
+    // mode through `resolveCapabilities`, and the two must never disagree (they did, on 127.0.0.2).
+    trimPaths: () => !resolveCapabilities(process.env, bindHost).localHandoff,
+    restart: () => {
+      store.flush();
+      restartProcess({ server: httpServer, args: process.argv.slice(2), port, supervised: isSupervised() });
+    },
+  });
+  void selfUpdate.updateAvailable().then((latest) => {
+    if (!latest) return;
+    update.latest = latest;
+    const how = selfUpdate.installKind === 'managed' ? 'update from the cockpit or: cezar update' : `restart with: npx ${pkgName}@latest`;
+    console.log(`\n  ⬆ cezar-plus ${latest} is available (running ${version}) — ${how}\n`);
+  });
+
   // SECURITY: cezar executes agents. A non-loopback bind exposes that box to
   // whatever can reach the interface, and cezar itself has NO auth — it is only
   // for a deliberate hosted setup where a reverse proxy in front provides TLS +
@@ -887,7 +960,12 @@ async function serveCommand(
   // a NON-boot project's manager, which the manual-deploy sweep at the end of this function needs:
   // production's boot project is `workspace` and every cezar deploy park lives in `cezar`.
   let sharedContexts: ProjectContexts | undefined;
-  startServer({
+
+  // Where a dispatched agent's `cez task` CLI reaches this cockpit (spec 2026-09-10-dispatch).
+  // Set before the first run can start, read by every manager's `agentEnv` while dispatch is on.
+  process.env.CEZ_API_URL = `http://127.0.0.1:${port}`;
+  process.env.CEZ_BIN = resolve(process.argv[1] ?? fileURLToPath(import.meta.url));
+  httpServer = startServer({
     repoRoot,
     listenFd,
     onContextsReady: (contexts) => {
@@ -912,6 +990,7 @@ async function serveCommand(
     onboardingRoutes,
     inviteRoutes,
     teamRoutes,
+    selfUpdate,
   }, port);
   const url = `http://localhost:${port}`;
 
@@ -979,6 +1058,54 @@ async function serveCommand(
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  // Under the desktop shell a managed install may exist without launchers (the shell installs
+  // cezar itself on first launch, spec 2026-09-25-desktop-distribution): write them so
+  // `cezar` in a terminal works too. Idempotent; never touches the shell profile.
+  if (process.env.CEZ_DESKTOP === '1' && selfUpdate.installKind === 'managed') {
+    try {
+      writeLaunchers();
+    } catch {
+      // A read-only home is not a reason to refuse to serve.
+    }
+  }
+  // A supervisor that names itself (the desktop shell sets CEZ_SUPERVISOR_PID) may die without
+  // a chance to kill us — a force-quit, a crash. Nobody would find a headless cockpit still
+  // holding the port, so follow the parent down: `kill(pid, 0)` only probes for existence.
+  const supervisorPid = Number(process.env.CEZ_SUPERVISOR_PID);
+  if (Number.isInteger(supervisorPid) && supervisorPid > 0) {
+    // Two independent signals, because either alone has a hole: `kill(pid, 0)` still succeeds
+    // for an unreaped zombie or a reused pid, and the shell exec's us so our parent IS the
+    // supervisor — when it dies we are re-parented to pid 1.
+    //
+    // Re-parenting only speaks when we HAD a parent to lose. A cockpit already at ppid 1 on
+    // boot — a detached launchd/systemd supervisor that still sets CEZ_SUPERVISOR_PID — would
+    // otherwise read its own starting state as "the supervisor is gone" on the first tick and
+    // shut down two seconds after it came up. There, `kill(pid, 0)` is the only honest signal.
+    const initialPpid = process.ppid;
+    const watchesReparenting = initialPpid > 1;
+    setInterval(() => {
+      // `!== initialPpid` already covers re-parenting to 1, because `watchesReparenting` means
+      // we did not start there.
+      let gone = watchesReparenting && process.ppid !== initialPpid;
+      if (!gone) {
+        try {
+          process.kill(supervisorPid, 0);
+        } catch (error) {
+          // Only "no such process" means gone. EPERM is a supervisor that EXISTS under another
+          // uid — reading that as dead would shut a healthy cockpit down.
+          gone = (error as NodeJS.ErrnoException).code === 'ESRCH';
+        }
+      }
+      if (!gone) return;
+      try {
+        process.stderr.write('  supervisor is gone — shutting down\n');
+        store.flush();
+      } catch {
+        // Nothing left to save that is worth staying alive for.
+      }
+      process.exit(0);
+    }, 2_000).unref();
+  }
 
   // Open the browser only once the server actually answers, so the first
   // paint is the cockpit and never a connection error.
@@ -1065,7 +1192,7 @@ async function runCommand(
     return;
   }
 
-  const providerAuth = new ProviderAuthService();
+  const providerAuth = new ProviderAuthService({ cwd: repoRoot });
   // Shares the one module `providerActionError` (server.ts) and the RunManager pickers read too —
   // `.ai/specs/2026-08-25-logged-out-account-fallback.md`, Architecture: `providerActionError` is
   // a closure declared inside `createApp` and this package cannot call it, so the headless
@@ -1436,60 +1563,26 @@ description: House rules the agent should follow in this repo.
 function openStore(repoRoot: string, opts?: { keepLive?: boolean }): RunStore {
   const dataDir = join(repoRoot, '.ai/cezar');
   const store = RunStore.open(dataDir, opts);
+  // Repo-scope the referenced tier (#945) — see `armRepoHandle`. Background, never awaited: a
+  // `gh`-less or offline machine keeps working exactly as it did, just unscoped.
+  armRepoHandle(store, repoRoot);
   ensureDataGitignore(repoRoot);
   return store;
 }
 
-/** Keep run data out of the user's repo history; workflows/skills stay committable. */
-function ensureDataGitignore(repoRoot: string): void {
-  const path = join(repoRoot, '.ai/cezar', '.gitignore');
-  const wanted = [
-    'runs.json',
-    'runs.json.tmp',
-    'runs/',
-    'worktrees/',
-    'tmp/', // per-run agent temp directories (#785)
-    'todos.json',
-    'todos.json.tmp',
-    'launch-key',
-    'automations.json',
-    'automations.json.tmp',
-    'automation-state.json',
-    'automation-state.json.tmp',
-    'automation-receipts.ndjson',
-    'automation-receipts.ndjson.tmp',
-    'automation-log.ndjson',
-    'automation-log.ndjson.tmp',
-    'automation-poll.lock',
-    // Central-hub scaffold (`.ai/runs/2026-08-06-cezar-central-hub/PLAN.md`). Knowledge
-    // documents under `knowledge/` are deliberately NOT listed here — they are committable
-    // content (D16, dispatch contract clause 8), not run state.
-    'knowledge-index/', // F1 — the single derived-artifact dir: catalog cache, manifest, optional
-    // embeddings blob. See `.ai/specs/2026-08-06-knowledge-base-mounts-search.md` Q6/"Catalog cache".
-    'sources.json', // F2 — connection definitions + tombstones (mirrors automations.json's own entry)
-    'sources.json.tmp',
-    'source-state.json',
-    'source-state.json.tmp',
-    'source-log.ndjson',
-    'source-log.ndjson.tmp',
-    'source-comments.ndjson',
-    'source-comments.ndjson.tmp',
-    'sources-poll.lock',
-    'sources-store.lock',
-    'sources/', // the mirror root itself, including its un-indexed conflicts/ and deleted/ subdirs
-  ];
-  try {
-    mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
-    const current = existsSync(path) ? readFileSync(path, 'utf8') : '';
-    const lines = current.split('\n');
-    const missing = wanted.filter((w) => !lines.includes(w));
-    if (missing.length > 0) {
-      const glue = current && !current.endsWith('\n') ? '\n' : '';
-      writeFileSync(path, `${current}${glue}${missing.join('\n')}\n`, 'utf8');
-    }
-  } catch {
-    // non-fatal
-  }
+/** The self-update service over THIS process: its package, version and entry file. */
+function buildSelfUpdateService(
+  overrides: Partial<Pick<ConstructorParameters<typeof SelfUpdateService>[0], 'restart' | 'activeRuns' | 'trimPaths'>> & {
+    restart: () => void;
+  },
+): SelfUpdateService {
+  return new SelfUpdateService({
+    pkgName: readOwnName(),
+    version: readOwnVersion(),
+    entry: resolve(process.argv[1] ?? fileURLToPath(import.meta.url)),
+    supervised: isSupervised(),
+    ...overrides,
+  });
 }
 
 /** Own package name — for the npm-registry update check (#368). */

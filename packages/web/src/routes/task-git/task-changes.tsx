@@ -11,6 +11,7 @@ import { Diff, type DiffHandle, type DiffMode } from '@/components/diff'
 import { toast } from '@/components/ui/toaster'
 import { gitActionPolicy, type GitActionId } from '@/lib/git-actions'
 import { useIsDesktop } from '@/lib/use-desktop'
+import { useDiffTreeHeight } from '@/lib/use-diff-tree-height'
 
 import { isRunActive, lastSessionId } from '../task-thread/run-actions'
 import { RunHeader } from '../task-thread/run-header'
@@ -54,6 +55,7 @@ function ChangesView({ run }: { run: ApiRun }) {
   const [selected, setSelected] = useState<string | null>(null)
   const [commitOpen, setCommitOpen] = useState(false)
   const diffRef = useRef<DiffHandle | null>(null)
+  const treeRef = useDiffTreeHeight()
 
   const queryClient = useQueryClient()
   const invalidateRuns = () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
@@ -191,8 +193,17 @@ function ChangesView({ run }: { run: ApiRun }) {
         />
       ) : (
         <div className="flex min-h-0 flex-1 items-start gap-5 px-4 py-4 [--diff-sticky-top:10rem] md:px-6">
-          {/* The tree column: sticky under the header so long diffs scroll beside it. */}
-          <aside className="sticky top-40 hidden w-60 shrink-0 md:block lg:w-72">
+          {/* The tree column: sticky under the header so long diffs scroll beside it, and its OWN
+              scroller. Sticky alone is not enough — a tree taller than the viewport grows the page
+              instead, so the only way to reach its last file was to drag the shared `main` scroller
+              (and the diff with it) to the bottom. Capping the pane at the space left under the
+              sticky chrome gives the list its own scrollbar; `overscroll-contain` keeps a wheel
+              inside it from chaining into the diff once it bottoms out. */}
+          <aside
+            ref={treeRef}
+            data-slot="changes-tree-pane"
+            className="sticky top-40 hidden max-h-[var(--diff-tree-height,calc(var(--cez-main-height,100dvh)_-_var(--diff-sticky-top)_-_1rem))] w-60 shrink-0 overflow-y-auto overscroll-contain md:block lg:w-72"
+          >
             <ChangesTree root={tree} selected={selected} onSelect={selectFile} />
           </aside>
           <Diff

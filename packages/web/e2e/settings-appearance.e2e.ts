@@ -59,20 +59,14 @@ async function waitForServerAppearance(check: (appearance: Record<string, unknow
 describe('settings → appearance against the live dry-run server', () => {
   it('the shell renders the registry sections — hidden ones absent, active one marked', () => {
     browser.goto(`${baseUrl}/settings/global/appearance`)
-    browser.waitForFunction(`document.querySelector('[data-route="settings-global-appearance"]') !== null`)
+    browser.waitForFunction(`document.querySelector('[data-route="settings-appearance"]') !== null`)
 
-    // The GLOBAL nav: the original four sections, and nothing project-scoped.
-    const nav = '[data-slot="settings-nav"][data-scope="global"]'
-    expect(browser.count(`${nav} [data-section]`)).toBe(4)
-    expect(browser.count(`${nav} [data-section="appearance"]`)).toBe(1)
-    expect(browser.count(`${nav} [data-section="notifications"]`)).toBe(1)
-    expect(browser.count(`${nav} [data-section="resources"]`)).toBe(1)
-    expect(browser.count(`${nav} [data-section="projects"]`)).toBe(1)
-    // Project sections live in the OTHER area; hidden registry entries are nowhere at all.
-    expect(browser.count(`${nav} [data-section="agents"]`)).toBe(0)
-    expect(browser.count(`${nav} [data-section="bookmarklets"]`)).toBe(0)
-    expect(browser.count(`${nav} [data-section="mcp"]`)).toBe(0)
+    const nav = '[data-slot="settings-nav"]'
+    const sections = browser.evaluate(`[...document.querySelectorAll('${nav} [data-section]')].map((el) => el.dataset.section)`) as string[]
+    expect(sections).toEqual(['project', 'tracker', 'agents', 'providers', 'agent-config', 'worktrees', 'bookmarklets', 'prompt-templates', 'appearance', 'notifications', 'resources', 'accounts', 'projects', 'teams', 'account', 'backup'])
+    expect(browser.count(`${nav} [data-section="keyboard"]`)).toBe(0)
     expect(browser.count(`${nav} [aria-current="page"][data-section="appearance"]`)).toBe(1)
+
   })
 
   it('flipping the theme flips the root class and persists across a reload', () => {
@@ -105,7 +99,7 @@ describe('settings → appearance against the live dry-run server', () => {
 
   it('compact density measurably tightens the spacing scale', async () => {
     // h-14 header: 14 spacing units. Comfortable = 4px/unit → 56px.
-    const header = `document.querySelector('[data-route="settings-global-appearance"] header')`
+    const header = `document.querySelector('[data-route="settings-appearance"] header')`
     expect(Number(browser.evaluate(`${header}.offsetHeight`))).toBe(56)
 
     browser.click('[data-slot="appearance-density"] [data-value="compact"]')

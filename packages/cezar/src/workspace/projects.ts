@@ -1,9 +1,15 @@
 import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
-import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH } from '@loki-labs/cezar-plus-contract';
+import {
+  PROJECT_TAGS_MAX,
+  PROJECT_TAG_MAX_LENGTH,
+  type TrackerKind,
+} from '@loki-labs/cezar-plus-contract';
 import { forgeKindOfRemote, forgeWebRoot, type ForgeKind } from '../server/forge/index.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
+import { readTrackerAssociation } from '../tracker-association.ts';
+import { TrackerConnections } from '../server/tracker/connections.ts';
 import {
   mergeWriteWorkspaceConfig,
   loadWorkspaceConfig,
@@ -14,6 +20,9 @@ import {
  * Project registry operations over `~/.cezar/config.json` (spec
  * 2026-07-20-multi-project-workspace, "Project identity" + "Boot flow"):
  *
+ * - `shouldRegisterProject(root)` / `shouldAutoRegisterProject(root)` — the
+ *   path-shape guard every registration passes, and the stricter boot-time
+ *   guard that only seeds the registry while it is still empty.
  * - `registerProject(root)` — realpath-normalize, dedupe by realpath, allocate
  *   a human-readable slug from `basename(root)`. Registration is additive and
  *   goes through the read-modify-write merge, so the worst race outcome
@@ -207,11 +216,43 @@ function isInsideTaskWorktree(path: string): boolean {
  * - the user's home directory itself (realpath-compared, so a symlinked
  *   `$HOME` still matches).
  */
-export async function shouldRegisterProject(repoRoot: string): Promise<boolean> {
-  const real = await normalizeRoot(repoRoot);
-  if (isInsideTaskWorktree(real) || isInsideTaskWorktree(resolve(repoRoot))) return false;
+async function isRegistrableRoot(real: string, spelled: string): Promise<boolean> {
+  if (isInsideTaskWorktree(real) || isInsideTaskWorktree(resolve(spelled))) return false;
   const home = await normalizeRoot(homedir());
   return real !== home;
+}
+
+export async function shouldRegisterProject(repoRoot: string): Promise<boolean> {
+  return isRegistrableRoot(await normalizeRoot(repoRoot), repoRoot);
+}
+
+/**
+ * The BOOT-time guard: `shouldRegisterProject` plus the "seed once" rule.
+ * Starting cezar inside a folder is only an implicit "this is my project"
+ * when the user has no projects yet — once the registry has any entry, the
+ * cwd is a place the cockpit is being *opened from*, not a project the user
+ * asked to add. Booting in an unregistered repo then serves it exactly as
+ * before; it just never lands in the sidebar behind the user's back. Adding
+ * a project stays an explicit gesture (`cezar projects add`, the cockpit's
+ * Add project dialog) — both go through `shouldRegisterProject` directly.
+ *
+ * An already-registered root still passes, so booting a known project keeps
+ * bumping its `lastOpenedAt` and keeps handing the server its registry id.
+ *
+ * Single-project mode is exempt: there the launch context IS the project
+ * (`cezar projects list` reads its identity back out of the registry), so
+ * suppressing the boot write would leave that deployment with no project at
+ * all.
+ */
+export async function shouldAutoRegisterProject(
+  repoRoot: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  const real = await normalizeRoot(repoRoot);
+  if (!(await isRegistrableRoot(real, repoRoot))) return false;
+  if (env.CEZ_SINGLE_PROJECT === '1') return true;
+  const { projects } = await loadWorkspaceConfig();
+  return projects.length === 0 || projects.some((project) => project.root === real);
 }
 
 /**
@@ -228,19 +269,34 @@ export async function shouldRegisterProject(repoRoot: string): Promise<boolean> 
  * later resolves each registry row to its own `RunStore.open(dataDir)` — two independent
  * in-memory copies of the SAME `runs.json`, neither aware of the other's writes, and whichever
  * flushes last (its own 300ms debounce, or process shutdown) truncates the other's away. This
- * check makes the boot root idempotent the same way an already-registered root already is: no
- * registry write, just the existing identity handed back.
+ * The default descriptor only returns the served identity without writing. Explicit HTTP
+ * registration opts into `persist: true`, preserving that identity in one registry row while
+ * the server keeps using its original boot context. A different root cannot own the same id.
+ * `reservedIds` keeps slugs the registry does not (yet) contain out of the
+ * allocator. A running server hands it the id its UNREGISTERED boot folder is
+ * being served under: that id is a live URL and the boot context answers it,
+ * so handing the same slug to a newly added `~/other/beta` would silently
+ * shadow the served folder. The registry file is the only cross-process truth,
+ * so this closes the collision for the server that knows about it, not for a
+ * concurrent `cezar projects add` — which is the same last-writer-wins window
+ * every registry write already lives with.
  */
 export async function registerProject(
   root: string,
   source: 'local' | 'checkout' = 'local',
-  bootProject?: { id: string; root: string },
+  bootProjectOrReservedIds?: { id: string; root: string; persist?: true } | Iterable<string>,
+  additionalReservedIds: Iterable<string> = [],
 ): Promise<WorkspaceProject> {
+  const bootProject = bootProjectOrReservedIds && 'id' in bootProjectOrReservedIds
+    ? bootProjectOrReservedIds : undefined;
+  const reservedIds = bootProject ? [bootProject.id, ...additionalReservedIds]
+    : bootProjectOrReservedIds as Iterable<string> | undefined ?? additionalReservedIds;
   const real = await normalizeRoot(root);
   const now = new Date().toISOString();
-  if (bootProject && bootProject.root === real) {
+  const matchingBoot = bootProject?.root === real ? bootProject : undefined;
+  if (matchingBoot && !matchingBoot.persist) {
     return {
-      id: bootProject.id,
+      id: matchingBoot.id,
       root: real,
       name: basename(real),
       addedAt: '',
@@ -250,6 +306,9 @@ export async function registerProject(
   }
   let entry: WorkspaceProject | undefined;
   await mergeWriteWorkspaceConfig((config) => {
+    if (matchingBoot && config.projects.some((project) => project.id === matchingBoot.id && project.root !== real)) {
+      throw new Error(`project id "${matchingBoot.id}" is already registered to another root`);
+    }
     const existing = config.projects.find((p) => p.root === real);
     if (existing) {
       existing.lastOpenedAt = now;
@@ -257,7 +316,7 @@ export async function registerProject(
       return;
     }
     entry = {
-      id: allocateProjectSlug(real, config.projects.map((p) => p.id)),
+      id: matchingBoot ? matchingBoot.id : allocateProjectSlug(real, [...config.projects.map((p) => p.id), ...reservedIds]),
       root: real,
       name: basename(real),
       addedAt: now,
@@ -325,11 +384,17 @@ export interface ProjectListEntry extends WorkspaceProject {
    *  reason (see `projectListEntrySchema.teamName` in `packages/contract/src/projects.ts`). Also
    *  never populated by this module. */
   teamName?: string;
+  /** Only ever set by `GET /api/v1/projects` on the synthetic entry for an
+   *  unregistered boot folder (see the route). Nothing in this module writes
+   *  it: a row that came out of the registry is registered by definition. */
+  unregistered?: true;
   /** The remote's web root (`https://github.com/owner/repo`), rebuilt from the
    *  parsed remote so it can never carry credentials. What lets a cross-project
    *  surface link a reference the run knows only by NUMBER — the global Tasks
    *  page has one row per project and so cannot use any single repo's base. */
   repoUrl?: string;
+  /** Saved read-only issue tracker association, classified from local state only. */
+  tracker?: TrackerKind;
 }
 
 interface RootProbe {
@@ -385,12 +450,23 @@ async function computeProbe(root: string): Promise<RootProbe> {
   };
 }
 
-async function probeRoot(root: string): Promise<RootProbe> {
+async function probeRoot(root: string): Promise<RootProbe & { tracker?: TrackerKind }> {
   const cached = probeCache.get(root);
-  if (cached && Date.now() - cached.at < PROBE_TTL_MS) return cached.probe;
-  const probe = await computeProbe(root);
-  probeCache.set(root, { at: Date.now(), probe });
-  return probe;
+  let probe: RootProbe;
+  if (cached && Date.now() - cached.at < PROBE_TTL_MS) {
+    probe = cached.probe;
+  } else {
+    probe = await computeProbe(root);
+    probeCache.set(root, { at: Date.now(), probe });
+  }
+  const association = await readTrackerAssociation(join(root, '.ai/cezar'));
+  const connection = association && process.env.CEZ_DRY_RUN !== '1'
+    ? await new TrackerConnections().read(root) : null;
+  const connected = process.env.CEZ_DRY_RUN === '1' || (connection
+    && connection.credentials.kind === association?.kind
+    && (!association.connectionId || association.connectionId === connection.id));
+  const tracker = connected ? association?.kind : undefined;
+  return { ...probe, ...(tracker === undefined ? {} : { tracker }) };
 }
 
 /**
@@ -402,7 +478,7 @@ async function probeRoot(root: string): Promise<RootProbe> {
  */
 export async function probeProjectStatus(
   root: string,
-): Promise<Pick<ProjectListEntry, 'status' | 'branch' | 'forge' | 'repoUrl'>> {
+): Promise<Pick<ProjectListEntry, 'status' | 'branch' | 'forge' | 'repoUrl' | 'tracker'>> {
   return probeRoot(root);
 }
 

@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link as WorkspaceLink } from 'react-router'
 
-import { useSendMessage } from '@/api/queries'
 import type { ApiRun } from '@loki-labs/cezar-plus-api-client'
 import { Composer } from '@/components/composer/composer'
 
-import { useContinueAction } from './follow-up-engine'
+import type { ContinueAction } from './follow-up-engine'
+import { useDeliverPrompt } from './deliver-prompt'
+import { useDraft } from './thread-draft'
 import { reapTaskDrafts, readTaskDraft, writeTaskDraft } from './task-drafts'
 
 /**
@@ -27,17 +28,18 @@ export function ThreadComposer({
   sessionOpen,
   queued,
   getMentionCandidates,
+  continueAction,
 }: {
   run: ApiRun
   /** running | waiting — the engine owns a live session, so the composer can deliver to it. */
   sessionOpen: boolean
   /** #472 — a queued run has not started, so its prompt is still authorable. */
   queued: boolean
+  continueAction: ContinueAction
   getMentionCandidates: () => string[]
 }) {
   // The fourth authorable state: a closed run whose last session can be reopened. Continue takes a
   // prompt, so the composer stays live and its send IS that Continue.
-  const continueAction = useContinueAction(run)
   // Reroutable (site 3 for a live/queued send, site 4/5 for a continuation): the CLIENT cannot see
   // the accounts store or the project route, so no client-side predicate over provider status is
   // right — the server's answer to the submission is authoritative
@@ -45,21 +47,37 @@ export function ThreadComposer({
   // recorded session to reopen stays continuable regardless of what provider discovery currently
   // reports; the composer attempts the submission and renders the server's own refusal, if any.
   const continuable = !sessionOpen && !queued && continueAction.available
-  const sendMessage = useSendMessage(run.id)
-
+  const deliverPrompt = useDeliverPrompt(run, continueAction)
   // Mount-time read: this component is keyed by run id, so a task switch is a real mount and the
   // first painted frame already carries the right task's words.
   const [text, setText] = useState(() => readTaskDraft('prompt', run.id))
+  const initialText = useRef(text).current
+  const draft = useDraft(run.id, 'composer', { initialText })
+  const edited = useRef(false)
+  const seeded = useRef(false)
+
   const onValueChange = useCallback(
     (next: string) => {
+      edited.current = true
       setText(next)
+      draft.setText(next)
       // Every internal edit flows through here — typing, `/` completions, dictation, the optimistic
       // clear on send (which REMOVES the entry) and the restore after a rejected send (which puts
       // the words back, in the store as well as the box).
       writeTaskDraft('prompt', run.id, next)
     },
-    [run.id],
+    [run.id, draft.setText],
   )
+  useEffect(() => {
+    if (!draft.ready || edited.current) return
+    if (!seeded.current && text !== '') {
+      seeded.current = true
+    } else if (!seeded.current && draft.text !== '') {
+      seeded.current = true
+      setText(draft.text)
+      writeTaskDraft('prompt', run.id, draft.text)
+    }
+  }, [draft.ready, draft.text, draft.setText, text, run.id])
   // One bounded pass per thread open. The composer is the box that mounts on every thread.
   useEffect(() => reapTaskDrafts(), [])
 
@@ -67,11 +85,9 @@ export function ThreadComposer({
     <Composer
       value={text}
       onValueChange={onValueChange}
-      onSubmit={
-        continuable
-          ? (submitted, images) => continueAction.continueWith(submitted, images)
-          : (submitted, images) => sendMessage.mutateAsync({ text: submitted, images })
-      }
+      images={draft.images}
+      onImagesChange={draft.setImages}
+      onSubmit={(submitted, images) => draft.submit(() => deliverPrompt(submitted, images))}
       disabled={!sessionOpen && !queued && !continuable}
       // Only reachable now by a closed run with NO session to resume — which is exactly the one
       // case where Continue is not on offer either. Left honest rather than rewritten: "closed" is

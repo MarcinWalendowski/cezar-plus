@@ -71,9 +71,13 @@ function serve(uiState: Record<string, unknown> = {}) {
             { provider: 'claude', status: 'connected', enabled: true },
             { provider: 'codex', status: 'connected', enabled: true },
             { provider: 'opencode', status: 'connected', enabled: true },
-          ],
+            { provider: 'cursor', status: 'connected', enabled: true },
+        ],
         })
-      if (url === '/api/v1/models?runner=codex') return json({ runner: 'codex', models: [], source: 'unavailable', stale: false })
+      if (url.startsWith('/api/v1/models?runner=')) {
+        const runner = url.includes('cursor') ? 'cursor' : 'codex'
+        return json({ runner, models: [], source: 'unavailable', stale: false })
+      }
       return new Promise<never>(() => {})
     }),
   )
@@ -171,6 +175,7 @@ afterEach(() => {
  */
 const ALL_SECTIONS = [
   'project',
+  'tracker',
   'agents',
   'providers',
   'agent-config',
@@ -200,7 +205,7 @@ const ALL_SECTIONS = [
 
 /** The half that answers per repo. Every one of these was unreachable from the address the
  *  sidebar pointed at — which is the whole report. */
-const PER_PROJECT = ['project', 'agents', 'agent-config', 'worktrees', 'bookmarklets', 'prompt-templates']
+const PER_PROJECT = ['project', 'tracker', 'agents', 'agent-config', 'worktrees', 'bookmarklets', 'prompt-templates']
 
 describe('the section registry', () => {
   it('declares every spec §Settings section, later ones hidden', () => {

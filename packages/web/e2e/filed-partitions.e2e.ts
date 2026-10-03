@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, cezarCli, fixtureServeEnv } from './agent-browser'
 
 /**
  * The Filed board's Active/Backlog split, in a real browser against a real server
@@ -176,30 +176,19 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
 
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 1400)
 
-  // The fixture writes a `projects` entry straight into `config.json` (above) with no org
-  // adoption — exactly the state `hasProjects === false` fires on
-  // (`onboarding-gate.ts:101-106`, `onboarding-routes.ts:319-320`), so `/tasks` redirects to
-  // `/onboarding` on first load. Walk it before any table assertion runs, waiting on
-  // post-creation STATE rather than a timer (Risk 4).
-  browser.goto(`${baseUrl}/tasks`)
-  browser.waitForFunction(`document.querySelector('[data-slot="onboarding-org-name"]') !== null`)
-  browser.fill('[data-slot="onboarding-org-name"]', 'fixture-org')
-  browser.click('[data-slot="onboarding-org-submit"]')
-  browser.waitForFunction(
-    `document.querySelector('[data-slot="onboarding-team-accept"]') !== null || !location.pathname.startsWith('/onboarding')`,
-  )
   browser.goto(`${baseUrl}/tasks`)
   browser.waitForFunction(`location.pathname.endsWith('/tasks')`)
 }, 180_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 /** Every rendered row key of one partition's table, in DOM order, as the composite

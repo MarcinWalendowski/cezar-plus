@@ -240,3 +240,14 @@ describe('getRepoSummary', () => {
     });
   });
 });
+
+it('preserves the default non-isolated path for repositories before their first commit', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cez-unborn-'));
+  try {
+    g(dir, 'init', '-q', '-b', 'main');
+    // RunManager uses this null result to select serial in-place execution.
+    expect(await getRepoInfo(dir)).toBeNull();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -3,6 +3,7 @@ import { LoaderCircleIcon } from 'lucide-react'
 import type { RunActivity, RunEvent } from '@loki-labs/cezar-plus-api-client'
 import { formatDuration } from '@/lib/format'
 import { useNow } from '@/lib/use-now'
+import { clockLabel, elapsedSince, exactLabel } from './thread-time'
 import { cn } from '@/lib/utils'
 
 import { IDLE_TIMEOUT_MS, liveStatus } from './live-status'
@@ -35,15 +36,20 @@ export function RunStatusLine({
   state,
   events,
   activity,
+  since,
 }: {
   /** The reduced thread — its newest item is what the agent is doing. */
   state: ThreadState
   /** The same run's raw frames, for the two clocks (`item.started` ts, newest ts). */
   events: RunEvent[]
   /** `monitoring` suppresses the quiet escalation: that run is quiet by design. */
+  since?: string
   activity?: RunActivity
 }) {
   const now = useNow(1000)
+  const elapsed = elapsedSince(since, now)
+  const quiet = elapsedSince(state.lastEventAt, now)
+  const lastClock = clockLabel(state.lastEventAt)
   const status = liveStatus({ state, events, now, activity })
   const idleMinutes = Math.round(IDLE_TIMEOUT_MS / 60_000)
   return (
@@ -62,6 +68,12 @@ export function RunStatusLine({
           </span>
         ) : null}
         <span className="shimmer min-w-0 truncate font-medium">{status.headline}</span>
+        {elapsed !== undefined ? (
+          <span data-slot="working-elapsed" title={`Started ${exactLabel(since)}`} className="shrink-0 font-mono text-xs tabular-nums">{elapsed}</span>
+        ) : null}
+        {quiet !== undefined && lastClock !== undefined ? (
+          <span data-slot="working-last-activity" title={exactLabel(state.lastEventAt)} className="text-xs">· last activity {lastClock} ({quiet} ago)</span>
+        ) : null}
         {status.itemMs !== undefined ? (
           <span data-slot="status-item-clock" className="shrink-0 tabular-nums">
             {formatDuration(status.itemMs)}

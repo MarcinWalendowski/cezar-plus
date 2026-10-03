@@ -7,7 +7,7 @@ import { jsonZodValidator } from './validators.ts';
 import type { ProjectApiEnv } from './server.ts';
 import type { RunRecord } from '../runs/store.ts';
 import { INPUT_TO_TASKS_NAME, inputToTasksPlan, type WorkflowDef } from '../workflows/types.ts';
-import type { StartRunInput } from '../workflows/run.ts';
+import { toPastedContent, type StartRunInput } from '../workflows/run.ts';
 import { loadWorkspaceGrant, type WorkspaceGrant } from '../workspace/granted-roots.ts';
 import { authorOf } from './request-author.ts';
 
@@ -101,6 +101,9 @@ export function createWorkspaceRunRoutes(deps: WorkspaceRunRouteDeps) {
     jsonZodValidator(workspaceRunStartInputSchema),
     async (c) => {
       const body = c.req.valid('json');
+      if (body.dispatch) {
+        return c.json({ error: 'Dispatch is available for project tasks; workspace tasks route work to projects.' }, 400);
+      }
 
       // Workspace scope defaults to `input-to-tasks`
       // (`.ai/specs/2026-08-25-workspace-scope-routes-tasks.md`): a workspace run routes work into
@@ -153,10 +156,7 @@ export function createWorkspaceRunRoutes(deps: WorkspaceRunRouteDeps) {
         ...(body.images === undefined
           ? {}
           : {
-              images: body.images.map((img) => ({
-                type: 'image' as const,
-                source: { type: 'base64' as const, media_type: img.mediaType, data: img.data },
-              })),
+              images: body.images.map(toPastedContent),
             }),
         // Who asked (spec 2026-08-21-task-author-provenance) — the same request-derived answer
         // `POST /runs` gives, through the same helper, so the two composer submits can never

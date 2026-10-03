@@ -120,6 +120,8 @@ describe('workflow builder against the live dry-run server', () => {
   })
 
   it('Save writes a real portable workflow file the server round-trips', () => {
+    browser.evaluate(`document.querySelector('main').scrollTop = 0`)
+    browser.waitForFunction(`document.querySelector('main').scrollTop === 0`)
     browser.fill('[data-slot="wb-name"]', FLOW)
     browser.click('[data-slot="wb-save"]')
     browser.waitForFunction(
@@ -149,6 +151,8 @@ describe('workflow builder against the live dry-run server', () => {
       '      retry: fix',
       '      max: 2',
     ].join('\n')
+    browser.evaluate(`document.querySelector('main').scrollTop = 0`)
+    browser.waitForFunction(`document.querySelector('main').scrollTop === 0`)
     browser.click('[data-slot="wb-import"]')
     browser.waitForFunction(`document.querySelector('[data-slot="wb-import-text"]') !== null`)
     browser.fill('[data-slot="wb-import-text"]', pasted)

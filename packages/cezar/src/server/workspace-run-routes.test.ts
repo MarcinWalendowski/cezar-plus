@@ -84,6 +84,20 @@ const post = (app: Hono<ProjectApiEnv>, body: unknown) =>
   });
 
 describe('POST /api/v1/workspace/runs', () => {
+  it('keeps PDF attachments on the workspace submit path', async () => {
+    const { app, started } = harness();
+    const attachment = { mediaType: 'application/pdf', data: 'cGRm', name: 'brief.pdf' };
+    const res = await post(app, { task: 'read brief', images: [attachment] });
+    expect(res.status).toBe(201);
+    expect(started[0]!.input.images).toEqual([{ type: 'file', mediaType: attachment.mediaType, data: attachment.data, name: attachment.name }]);
+  });
+
+  it('refuses dispatch at workspace scope before a run starts', async () => {
+    const { app, started } = harness();
+    const res = await post(app, { task: 'route projects', dispatch: { inFlight: 2, maxSubtasks: 4 } });
+    expect(res.status).toBe(400);
+    expect(started).toHaveLength(0);
+  });
   it('starts exactly one run, in place, with the whole grant', async () => {
     const { app, started } = harness();
     const res = await post(app, { task: 'touch every project' });

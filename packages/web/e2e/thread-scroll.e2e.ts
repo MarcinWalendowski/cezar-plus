@@ -5,14 +5,14 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
-import { expectedRowCount, largeThreadEvents } from './fixtures/make-large-thread'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
+import { largeThreadEvents } from './fixtures/make-large-thread'
 import record from './fixtures/thread-run.record.json'
 
 /**
  * R3 Step 2.4 in a real browser: virtualization on a LARGE transcript (the synthetic
  * 250-turn NDJSON from make-large-thread.ts — real wire shapes, >2,000 events, >1,000
- * rendered rows), the stick/jump behavior, the per-run scroll cache across a client-side
+ * logical rows, hydrated in a bounded five-page window), the stick/jump behavior, the per-run scroll cache across a client-side
  * round trip, and the iPhone-viewport composer.
  *
  * HONESTY NOTES on what a headless browser can and cannot prove:
@@ -29,7 +29,7 @@ const artifactsDir = resolve(import.meta.dirname, '../../../.ai/qa/artifacts_e2e
 const sessionId = `e2e-thread-scroll-${process.pid}`
 
 const TURNS = 250
-const ROWS = expectedRowCount(TURNS) // 1002 — comfortably past the ~300 threshold
+const HISTORY_PAGES = 5
 
 const RUN_ID = 'aaaaaaaa-1111-4222-8333-bbbbbbbbcccc'
 /** The real record fixture, re-ided for the synthetic transcript; the untouched fields keep
@@ -107,13 +107,20 @@ function parkAt(target: string) {
   })()`)
 }
 
-/** Load the thread and wait until the SSE replay has finished growing it (the last turn's
- *  note is rendered) — every measurement below is over the complete transcript. */
+/** Hydrate the latest tail plus four real history pages in each render mode, so both
+ * measurements cover the same bounded window rather than the entire stored archive. */
 function openThread(query = '') {
   browser.goto(`${baseUrl}${scoped(`/tasks/${RUN_ID}`)}${query}`)
   browser.waitForFunction(
     `document.querySelector('[data-slot="thread-rows"]') !== null && document.body.textContent.includes('goal achieved — session closed')`,
   )
+  for (let page = 2; page <= HISTORY_PAGES; page += 1) {
+    browser.evaluate(`document.querySelector('[data-slot="history-boundary"] button').focus()`)
+    browser.press('Enter')
+    browser.waitForFunction(`document.querySelector('[data-slot="history-boundary"]')?.dataset.retainedPages === '${page}' && document.querySelector('[data-slot="history-boundary"] button:not([disabled])') !== null`)
+  }
+  browser.evaluate(`(() => { const m = ${MAIN}; m.dispatchEvent(new WheelEvent('wheel', {deltaY:120,bubbles:true})); m.scrollTop = m.scrollHeight - m.clientHeight })()`)
+  browser.waitForFunction(nearBottom)
 }
 
 beforeAll(async () => {
@@ -136,37 +143,41 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   bootProject = await bootProjectId(baseUrl)
 
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 900)
 }, 120_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
+  await stopFixtureServer(server)
   // The killed server may still be flushing its NDJSON into dataRoot, which races rmSync and
   // throws ENOTEMPTY — a suite-level failure on a run whose every test passed. A temp dir that
   // outlives the run is litter, not a failure; the OS reaps it.
   try {
-    if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+    if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
   } catch {
     /* the OS reaps it */
   }
 })
 
-describe('thread virtualization on a 1,000-row transcript', () => {
+describe('thread virtualization on a bounded window of a 1,000-row transcript', () => {
   let flatRows = 0
+  let flatRowKeys: string[] = []
   let flatDom = 0
   let flatAssistantWidth = 0
 
-  it('force-flat renders every row (the before measurement)', () => {
+  it('force-flat renders every retained row (the before measurement)', () => {
     openThread('?thread=flat')
     expect(browser.evaluate(`document.querySelector('[data-slot="thread-rows"]').dataset.virtualized`)).toBe('false')
     flatRows = rowCount()
+    flatRowKeys = browser.evaluate(`[...document.querySelectorAll('[data-slot="thread-row"]')].map((row) => row.dataset.rowKey)`) as string[]
     flatDom = domSize()
     flatAssistantWidth = assistantWidth()
-    expect(flatRows).toBe(ROWS) // the generator's own arithmetic, end to end
+    expect(flatRows).toBeGreaterThan(300)
+    expect(flatRows).toBeLessThan(TURNS * 4) // bounded hydration keeps the oldest archive off the page
     expect(flatAssistantWidth).toBeGreaterThan(200)
   }, 90_000)
 
@@ -176,6 +187,10 @@ describe('thread virtualization on a 1,000-row transcript', () => {
 
     const virtualRows = rowCount()
     const virtualDom = domSize()
+    const virtualRowKeys = browser.evaluate(`[...document.querySelectorAll('[data-slot="thread-row"]')].map((row) => row.dataset.rowKey)`) as string[]
+    expect(virtualRowKeys.every((key) => flatRowKeys.includes(key))).toBe(true)
+    expect(new Set(virtualRowKeys).size).toBe(virtualRows)
+    expect(browser.evaluate(`document.querySelector('[data-slot="history-boundary"]').dataset.retainedPages`)).toBe(String(HISTORY_PAGES))
     // The honest metric, same transcript, same browser: virtua holds a viewport window plus
     // overscan, not the list. The exact window varies with row heights — the bound is what
     // matters: an order of magnitude fewer live rows than flat mode.
@@ -189,7 +204,7 @@ describe('thread virtualization on a 1,000-row transcript', () => {
     mkdirSync(artifactsDir, { recursive: true })
     writeFileSync(
       join(artifactsDir, 'thread-scroll-metrics.json'),
-      JSON.stringify({ transcriptEvents: largeThreadEvents(TURNS).length, rows: { flat: flatRows, virtualized: virtualRows }, domElements: { flat: flatDom, virtualized: virtualDom } }, null, 2),
+      JSON.stringify({ transcriptEvents: largeThreadEvents(TURNS).length, rows: { flat: flatRows, virtualized: virtualRows }, retainedPages: HISTORY_PAGES, rowKeys: {flat:flatRowKeys,virtualized:virtualRowKeys}, domElements: { flat: flatDom, virtualized: virtualDom } }, null, 2),
       'utf8',
     )
   }, 90_000)
@@ -201,7 +216,7 @@ describe('thread virtualization on a 1,000-row transcript', () => {
   })
 
   it('scrolling up shows the jump pill; clicking it returns to the tail', () => {
-    parkAt('0')
+    parkAt('Math.round((m.scrollHeight - m.clientHeight) / 2)')
     browser.waitForFunction(`document.querySelector('[data-slot="jump-to-latest"]') !== null`)
     // Viewport shot: full-page capture scroll-stitches 48k px and re-pins the thread,
     // unmounting the very pill this is photographing.

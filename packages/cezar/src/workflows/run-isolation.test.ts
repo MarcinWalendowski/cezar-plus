@@ -19,6 +19,12 @@ import { localCliAuthor } from '../runs/task-author.ts';
 
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
 const roots: string[] = [];
+const managers: RunManager[] = [];
+function fixtureManager(store: RunStore, root: string): RunManager {
+  const manager = new RunManager(store, root);
+  managers.push(manager);
+  return manager;
+}
 
 function fixtureRepo(): string {
   const root = mkdtempSync(join(tmpdir(), 'cez-root-isolation-'));
@@ -49,14 +55,52 @@ async function waitFor(predicate: () => boolean, what: string): Promise<void> {
 }
 
 afterEach(() => {
+  for (const manager of managers.splice(0)) manager.dispose();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('RunManager repository-root isolation', () => {
+  it('reaps a cancelled session when disposed before its cancellation grace timer fires', () => {
+    const root = fixtureRepo();
+    const store = RunStore.open(join(root, '.ai/cezar'));
+    const manager = fixtureManager(store, root);
+    const cancelledStop = vi.fn();
+    const liveStop = vi.fn();
+    const active = (manager as unknown as { active: Map<string, unknown> }).active;
+    active.set('cancelled', { cancelled: true, session: { hardStop: cancelledStop } });
+    active.set('live', { cancelled: false, session: { hardStop: liveStop } });
+    manager.dispose();
+    expect(cancelledStop).toHaveBeenCalledOnce();
+    expect(liveStop).not.toHaveBeenCalled();
+  });
+
+
+  it('runs the first task in place with the root lease before a repository has a commit', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cez-unborn-isolation-'));
+    roots.push(root);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+    const store = RunStore.open(join(root, '.ai/cezar'));
+    const manager = fixtureManager(store, root);
+    try {
+      const record = manager.startRun({
+        name: 'first-task', source: 'built-in',
+        steps: [{ id: 'check', command: 'node -e "process.exit(0)"' }],
+      }, { author: localCliAuthor(), task: 'first task' });
+      await waitForRuns(store, [record.id]);
+      expect(store.getRun(record.id)?.status).toBe('done');
+      expect(store.getRun(record.id)?.worktreePath).toBeUndefined();
+      const notes = store.readEvents(record.id).filter((event) => event.type === 'note');
+      expect(notes.some((event) => String(event.message).includes('exclusive access'))).toBe(true);
+    } finally {
+      manager.dispose();
+      store.flush();
+    }
+  });
+
   it('fails closed without executing a workflow step when worktree creation fails', async () => {
     const root = fixtureRepo();
     const store = RunStore.open(join(root, '.ai/cezar'));
-    const manager = new RunManager(store, root);
+    const manager = fixtureManager(store, root);
     const workflow: WorkflowDef = {
       name: 'must-not-run-in-root',
       source: 'built-in',
@@ -79,7 +123,7 @@ describe('RunManager repository-root isolation', () => {
   it('serializes parallel runs that explicitly opt out of worktrees', async () => {
     const root = fixtureRepo();
     const store = RunStore.open(join(root, '.ai/cezar'));
-    const manager = new RunManager(store, root);
+    const manager = fixtureManager(store, root);
     const workflow: WorkflowDef = {
       name: 'root-lock-check',
       source: 'built-in',
@@ -111,7 +155,7 @@ describe('RunManager repository-root isolation', () => {
     try {
       const root = fixtureRepo();
       const store = RunStore.open(join(root, '.ai/cezar'));
-      const manager = new RunManager(store, root);
+      const manager = fixtureManager(store, root);
       const workflow: WorkflowDef = {
         name: 'root-lock-bypass-check',
         source: 'built-in',

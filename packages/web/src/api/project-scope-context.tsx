@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from 'react'
+import { createContext, useContext, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react'
 
 import {
   API_PREFIX,
@@ -61,6 +61,23 @@ export function useProjectScope(): ProjectScope {
  * module variable re-renders nothing, so the keys stay cached under `'default'` until a reload.
  * So the token below is the instance's identity: it claims the slot during render (which always
  * precedes any commit, hence any cleanup) and releases only what it still owns.
+ * Both are LAYOUT effects, and that is the second half of the same rule (#task-detail-404). Every
+ * request in this app goes out from a passive effect — TanStack's mount fetch, the EventSource
+ * hooks — and React runs every layout effect in a commit (destroys in the mutation phase, creates
+ * in the layout phase) before any passive one. Passive effects here would leave two windows where
+ * a child fetches with the scope this provider's own cleanup nulled, because a child's create runs
+ * BEFORE its ancestor's:
+ *
+ *   - StrictMode's simulated remount, where the whole subtree's destroys (this reset among them)
+ *     run and then its creates — so a thread mounted in the SAME commit as this provider re-fires
+ *     its query unprefixed. That is a soft navigation into another project's task: 404, cached
+ *     under the correctly-scoped key, and only a reload (where the provider commits with the lazy
+ *     route's Suspense fallback, a commit earlier than the route's own) clears it.
+ *   - a real unmount+mount of two providers in ONE commit (leaving a project area for another),
+ *     where the departing provider's cleanup would land between the arriving one's render and its
+ *     children's fetches.
+ *
+ * As layout effects, the whole dance finishes before the first request of the commit is made.
  */
 export function ProjectScopeProvider({
   projectId,
@@ -78,14 +95,14 @@ export function ProjectScopeProvider({
   // instance would still hold the slot and its cleanup would null it.
   if (getApiScope() !== projectId || !ownsApiScope(owner)) setApiScope(projectId, owner)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setApiScope(projectId, owner)
   }, [projectId, owner])
 
   // Unmount only — see the note above on why this cannot be the cleanup of the effect above.
   // Ordering still holds for StrictMode's simulated remount: destroys run before creates, so
   // the re-created `[projectId]` effect re-asserts the scope after this one nulled it.
-  useEffect(() => () => releaseApiScope(owner), [owner])
+  useLayoutEffect(() => () => releaseApiScope(owner), [owner])
 
   const value = useMemo<ProjectScope>(
     // Built from the same prefix the request path uses — the version is one fact, not two.

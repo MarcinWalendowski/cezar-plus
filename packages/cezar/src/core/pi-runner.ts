@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { disclaimedCommand } from './disclaim-spawn.ts';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve as resolvePath } from 'node:path';
 import type {
@@ -16,6 +17,7 @@ import { defaultIdleTimeoutMs } from './claude-cli-runner.js';
 import { buildChildEnv } from './agent-env.js';
 import { readNdjson } from './ndjson.js';
 import { createPiUiState, mapPiRpcMessage, piTurnStarted } from './pi-ui-mapper.js';
+import { V1TextCoalescer } from './v1-text-coalescer.js';
 
 /*
  * The inactivity cap comes from the shared `defaultIdleTimeoutMs()` seam, not a local constant.
@@ -66,17 +68,23 @@ export class PiRunner implements AgentRunner {
     onEvent?: (event: AgentEvent) => void,
     opts: SessionOptions = {},
   ): AgentSession {
-    const child = nodeSpawn(this.bin, buildPiArgs(spec), {
-      cwd: spec.cwd,
-      env: buildChildEnv({ backend: this.backend, extraEnv: spec.env }),
-    });
+    const env = buildChildEnv({ backend: this.backend, extraEnv: spec.env });
+    const [file, argv] = disclaimedCommand(this.bin, buildPiArgs(spec), env);
+    const child = nodeSpawn(file, argv, { cwd: spec.cwd, env });
     let open = true;
     let settled = true;
     let timedOut = false;
     let autoEndTimer: NodeJS.Timeout | undefined;
     let killTimer: NodeJS.Timeout | undefined;
+    let hardKillTimer: NodeJS.Timeout | undefined;
     let piUi = createPiUiState();
     const textChunks: string[] = [];
+    // Pi streams one assistant message at a time, without a stable message id.
+    // Keep v1 whole-message (including for redaction); v2 still streams deltas.
+    const textCoalescer = new V1TextCoalescer((text) => {
+      textChunks.push(text);
+      onEvent?.({ type: 'text', text });
+    });
     const toolCalls: AgentToolCallRecord[] = [];
     let sessionId = spec.sessionId;
     let tokensUsed = 0;
@@ -153,6 +161,14 @@ export class PiRunner implements AgentRunner {
       open = false;
       if (!hasExited()) signalChild('SIGTERM');
     };
+    const hardStop = (): void => {
+      interrupt();
+      if (hardKillTimer || hasExited()) return;
+      hardKillTimer = setTimeout(() => {
+        if (!hasExited()) signalChild('SIGKILL');
+      }, KILL_GRACE_MS);
+      hardKillTimer.unref?.();
+    };
 
     write({ id: 'cezar-state', type: 'get_state' });
     sendMessage([
@@ -203,15 +219,15 @@ export class PiRunner implements AgentRunner {
           } else if (value.type === 'message_update' && isRecord(value.assistantMessageEvent)) {
             const update = value.assistantMessageEvent;
             if (update.type === 'text_delta' && typeof update.delta === 'string') {
-              textChunks.push(update.delta);
-              onEvent?.({ type: 'text', text: update.delta });
+              textCoalescer.append(undefined, update.delta);
             }
           } else if (value.type === 'message_end' && isRecord(value.message) && value.message.role === 'assistant') {
+            textCoalescer.complete(undefined, contentText(value.message.content));
             const usage = usageValues(value.message.usage);
             if (usage) {
               tokensUsed += usage.weighted;
               onEvent?.({ type: 'token-usage', tokensUsed });
-              if (usage.cost > 0) onEvent?.({ type: 'cost', usd: usage.cost });
+              if (usage.cost !== undefined && usage.cost >= 0) onEvent?.({ type: 'cost', usd: usage.cost });
             }
           } else if (value.type === 'tool_execution_start') {
             const id = string(value.toolCallId);
@@ -232,6 +248,7 @@ export class PiRunner implements AgentRunner {
               emitImages(isRecord(value.result) ? value.result.content : undefined, onEvent);
             }
           } else if (value.type === 'agent_settled') {
+            textCoalescer.flush();
             settled = true;
             onEvent?.({ type: 'turn-end' });
             if (opts.autoEndAfterFirstTurn && open && !autoEndTimer) {
@@ -246,7 +263,10 @@ export class PiRunner implements AgentRunner {
         if (deadline) clearTimeout(deadline);
         if (autoEndTimer) clearTimeout(autoEndTimer);
         if (killTimer) clearTimeout(killTimer);
+        if (hardKillTimer) clearTimeout(hardKillTimer);
         open = false;
+        // EOF, abort and timeout may leave a message without message_end.
+        textCoalescer.flush();
       }
 
       const { code: exitCode, signal: exitSignal } = await waitForExit(child);
@@ -256,7 +276,7 @@ export class PiRunner implements AgentRunner {
         const message = stopMessage('inactivity', limitMs);
         onEvent?.({ type: 'error', message, reason: 'inactivity' });
         onEvent?.({ type: 'done' });
-        return { text: textChunks.join('').trim(), toolCalls, tokensUsed, sessionId };
+        return { text: textChunks.join('\n').trim(), toolCalls, tokensUsed, sessionId };
       }
 
       // A session cezar itself tore down (`end()`'s grace-period timer, or a cancel) that pi
@@ -295,7 +315,7 @@ export class PiRunner implements AgentRunner {
       if (tokensUsed === 0) onEvent?.({ type: 'note', message: 'token usage not reported by pi CLI' });
       opts.onUiEvent?.({ type: 'session.ended', reason: piUi.stopReason });
       onEvent?.({ type: 'done' });
-      return { text: textChunks.join('').trim(), toolCalls, tokensUsed, sessionId };
+      return { text: textChunks.join('\n').trim(), toolCalls, tokensUsed, sessionId };
     })();
 
     const session: AgentSession = {
@@ -303,6 +323,7 @@ export class PiRunner implements AgentRunner {
       sendMessage,
       end,
       interrupt,
+      hardStop,
       pid: child.pid,
       get open() {
         return open;
@@ -356,13 +377,13 @@ function toPiPrompt(content: ContentBlock[]): {
   return { message: text.join('\n'), images };
 }
 
-function usageValues(value: unknown): { weighted: number; cost: number } | undefined {
+function usageValues(value: unknown): { weighted: number; cost: number | undefined } | undefined {
   if (!isRecord(value)) return undefined;
   const input = number(value.input) ?? 0;
   const output = number(value.output) ?? 0;
   const cacheRead = number(value.cacheRead) ?? 0;
   const cacheWrite = number(value.cacheWrite) ?? 0;
-  const cost = isRecord(value.cost) ? number(value.cost.total) ?? 0 : 0;
+  const cost = isRecord(value.cost) ? number(value.cost.total) : undefined;
   return { weighted: Math.round(input + output + cacheRead * 0.1 + cacheWrite * 1.25), cost };
 }
 

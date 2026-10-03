@@ -96,6 +96,28 @@ describe('RunManager — a workspace run hands its grant to the spawn', () => {
     return specs[0]!;
   };
 
+  it('rejects project dispatch on a workspace router before creating a run', () => {
+    expect(() => manager.startRun(WORKFLOW, {
+      author: localCliAuthor(), task: 'fan out', workspaceProjects: GRANT,
+      dispatchIntent: { maxSubtasks: 2 },
+    })).toThrow('Dispatch is available for project tasks');
+    expect(store.listRuns()).toEqual([]);
+    expect(specs).toEqual([]);
+  });
+
+  it('refuses dispatch from a persisted workspace router without creating children', () => {
+    const parent = store.createRun({
+      author: localCliAuthor(), title: 'router', workflow: 'quick-task', task: 'route work',
+      steps: [], workspaceProjects: GRANT,
+    });
+    store.updateRun(parent.id, { status: 'running', dispatch: { rootRunId: parent.id } });
+    expect(manager.dispatch(parent.id, { objective: 'implement in a project' })).toEqual({
+      refused: 'Dispatch is available for project tasks; workspace tasks route work to projects.',
+    });
+    expect(store.listRuns()).toHaveLength(1);
+    expect(specs).toEqual([]);
+  });
+
   it('grants the deduped project roots as additional directories', async () => {
     manager.startRun(WORKFLOW, { author: localCliAuthor(), task: 'touch every project', worktree: false, workspaceProjects: GRANT });
     const spec = await spawned();

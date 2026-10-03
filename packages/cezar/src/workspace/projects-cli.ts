@@ -178,11 +178,13 @@ async function removeCommand(id: string | undefined, io: ProjectsCommandIo): Pro
   } catch {
     // unreadable workspace — `removeProject` below reports the real reason
   }
-  // Unlike `DELETE /api/projects/:projectId`, there is no boot-project refusal
+  // Unlike `DELETE /api/v1/projects/:projectId`, there is no boot-project refusal
   // here: that rule exists because a running server would break its own
   // sidebar, and the CLI runs with no server and no boot project. Removing the
-  // repo you normally serve is therefore allowed — and self-healing, since the
-  // next `cezar serve` in it registers it again (said in the note below).
+  // repo you normally serve is therefore allowed — and, since boot registration
+  // became seed-once (`shouldAutoRegisterProject`), it STAYS removed: the next
+  // `cezar serve` in it will serve the folder without re-registering it. The
+  // line below says what was and was not touched; `add` puts it back.
   if (!(await removeProject(id))) {
     io.error(`unknown project: ${id}`);
     return 1;

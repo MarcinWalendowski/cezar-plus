@@ -1,10 +1,10 @@
-import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { useState, type ReactNode } from 'react'
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { Profiler, useState, type ReactNode } from 'react'
 import { Link as RouterLink, MemoryRouter, useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { AppShell, routeOwnsScrollArrival, type AppShellProps } from './app-shell'
-import { NAV_ITEMS } from './nav-items'
+import { NAV_ITEMS, visibleNavItems } from './nav-items'
 import { ThemeProvider } from './theme-provider'
 
 afterEach(() => {
@@ -12,6 +12,8 @@ afterEach(() => {
   // The sidebar width is a real localStorage preference (#788) — one test's drag must not be the
   // next test's starting width.
   localStorage.clear()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 // jsdom ships no `matchMedia`; the ThemeProvider wrapping the footer toggle needs one.
@@ -76,6 +78,65 @@ describe('AppShell', () => {
   it('renders the routed view in the main region', () => {
     renderShell('/', {}, <p>route content</p>)
     expect(within(screen.getByRole('main')).getByText('route content')).toBeTruthy()
+  })
+
+  it('publishes the main scrollport height on mount and resize without React commits', () => {
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(880)
+    const observe = vi.fn()
+    const disconnect = vi.fn()
+    let notifyResize = () => {}
+    vi.stubGlobal('ResizeObserver', class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        notifyResize = () => callback([], this)
+      }
+      observe = observe
+      disconnect = disconnect
+      unobserve = vi.fn()
+    })
+    const commits = vi.fn()
+    const { unmount } = render(
+      <Profiler id="shell" onRender={commits}>
+        <ThemeProvider>
+          <MemoryRouter>
+            <AppShell><p>route content</p></AppShell>
+          </MemoryRouter>
+        </ThemeProvider>
+      </Profiler>,
+    )
+    const main = screen.getByRole('main')
+    expect(observe).toHaveBeenCalledWith(main)
+    expect(main.style.getPropertyValue('--cez-main-height')).toBe('880px')
+    const initialCommits = commits.mock.calls.length
+
+    height.mockReturnValue(860)
+    act(() => notifyResize())
+    expect(main.style.getPropertyValue('--cez-main-height')).toBe('860px')
+    expect(commits.mock.calls.length).toBe(initialCommits)
+
+    height.mockReturnValue(0)
+    act(() => notifyResize())
+    expect(main.style.getPropertyValue('--cez-main-height')).toBe('860px')
+    unmount()
+    expect(disconnect).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the viewport fallback when the main region has no measured height', () => {
+    vi.stubGlobal('ResizeObserver', undefined)
+    renderShell()
+    expect(screen.getByRole('main').style.getPropertyValue('--cez-main-height')).toBe('')
+  })
+
+  it('publishes the initial measured height without ResizeObserver support', () => {
+    vi.stubGlobal('ResizeObserver', undefined)
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(880)
+    renderShell()
+    expect(screen.getByRole('main').style.getPropertyValue('--cez-main-height')).toBe('880px')
+  })
+
+  it('renders the fork brand and favicon asset', () => {
+    renderShell('/')
+    expect(sidebar().querySelector('img[src="/cezar.svg"]')).toBeTruthy()
+    expect(within(sidebar()).getByText('cezar-plus')).toBeTruthy()
   })
 
   it('resets the main scroller to the top on navigation (#mobile-scroll-top)', () => {
@@ -187,7 +248,7 @@ describe('AppShell', () => {
     renderShell('/', { automationsAvailable: false })
     const links = within(nav()).getAllByRole('link')
     expect(links.map((a) => a.getAttribute('href'))).not.toContain('/automations')
-    expect(links).toHaveLength(NAV_ITEMS.filter((item) => !item.automations).length)
+    expect(links).toHaveLength(NAV_ITEMS.filter((item) => !item.automations && !item.tracker).length)
   })
 
   it('shows the Automations item once the capability is on', () => {
@@ -257,8 +318,10 @@ describe('AppShell', () => {
 
   /* The footer used to be one wrapping row that overflowed the 264px column, so the theme toggle
    * silently fell onto a line of its own (#702). jsdom cannot measure that — but it can pin the
-   * structure that makes the wrap impossible: two rows, by construction, not by luck. */
-  describe('sidebar footer is two intentional rows (#702)', () => {
+   * structure that makes the wrap impossible: deliberate rows, by construction, not by luck. The
+   * machine glance is one more of them when it is mounted, which is why it is passed as a slot and
+   * asserted first in the list below. */
+  describe('sidebar footer rows are intentional (#702)', () => {
     const controls = () =>
       document.querySelector('[data-slot="sidebar-footer-controls"]') as HTMLElement
 
@@ -268,10 +331,20 @@ describe('AppShell', () => {
       expect(footer().className).not.toContain('flex-wrap')
     })
 
-    it('has exactly two children: the search bar, then the controls row', () => {
+    it('has exactly two children without the machine glance: the search bar, then the controls', () => {
       renderShell('/', { version: '1.2.3' })
       const children = Array.from(footer().children) as HTMLElement[]
       expect(children.map((child) => child.dataset.slot)).toEqual([
+        'command-palette-hint',
+        'sidebar-footer-controls',
+      ])
+    })
+
+    it('puts the machine glance above both, as its own row', () => {
+      renderShell('/', { version: '1.2.3', hostWidget: <span data-slot="host-widget-stub" /> })
+      const children = Array.from(footer().children) as HTMLElement[]
+      expect(children.map((child) => child.dataset.slot)).toEqual([
+        'host-widget-stub',
         'command-palette-hint',
         'sidebar-footer-controls',
       ])
@@ -347,6 +420,7 @@ describe('AppShell', () => {
       expect(document.querySelector('[data-slot="repo-chip"]')).toBeNull()
       expect(document.querySelector('[data-slot="nav-badge"]')).toBeNull()
       expect(document.querySelector('[data-slot="version-chip"]')).toBeNull()
+      expect(document.querySelector('[data-slot="star-chip"]')).toBeNull()
     })
 
     it('renders the repo chip and version chip from props', () => {
@@ -354,6 +428,11 @@ describe('AppShell', () => {
       expect(screen.getByText('cezar / main')).toBeTruthy()
       // The chip prefixes the raw semver from /api/v1/health — `v1.2.3`, mono, muted.
       expect(within(footer()).getByText('v1.2.3')).toBeTruthy()
+    })
+
+    it('does not render a vendor star prompt', () => {
+      renderShell('/', { version: '1.2.3' })
+      expect(document.querySelector('[data-slot="star-chip"]')).toBeNull()
     })
 
     describe('version chip update affordance (#368)', () => {
@@ -534,6 +613,51 @@ describe('AppShell', () => {
     })
   })
 
+  /**
+   * Dashboard and All tasks stack directly against each other, so they are peers: one row
+   * height, one type scale, one violet icon. Dashboard shipped with its own inline class string
+   * and drifted to a taller row with a grey icon; these pin the pair together.
+   */
+  describe('top-level doors read as peers', () => {
+    const dashboard = () => document.querySelector('[data-slot="dashboard-link"]') as HTMLElement
+    const allTasks = () => document.querySelector('[data-slot="workspace-nav-item"][href="/tasks"]') as HTMLElement
+
+    /** The shared skin, minus the active-state background either row adds on its own page. */
+    const skin = (el: HTMLElement) => [...el.classList].filter(c => c !== 'bg-muted').sort()
+
+    it('paints both rows from the same class string', () => {
+      renderShell('/', { projectGroups: <p>groups</p> })
+      expect(skin(dashboard())).toEqual(skin(allTasks()))
+    })
+
+    it('gives both rows the touch height that relaxes to 36px on desktop', () => {
+      renderShell('/', { projectGroups: <p>groups</p> })
+      for (const row of [dashboard(), allTasks()]) {
+        expect(row.classList.contains('h-11')).toBe(true)
+        expect(row.classList.contains('md:h-9')).toBe(true)
+        // The drifted Dashboard row was `min-h-11` with no desktop override — 8px taller than
+        // the row beneath it at every width above `md`.
+        expect(row.classList.contains('min-h-11')).toBe(false)
+      }
+    })
+
+    it('gives both icons the violet accent', () => {
+      renderShell('/', { projectGroups: <p>groups</p> })
+      for (const row of [dashboard(), allTasks()]) {
+        const icon = row.querySelector('svg') as SVGElement
+        expect(icon).not.toBeNull()
+        expect(icon.getAttribute('class')).toContain('text-violet/70')
+      }
+    })
+
+    it('brings its own icon to full strength on its own page', () => {
+      renderShell('/dashboard', { projectGroups: <p>groups</p> })
+      const icon = dashboard().querySelector('svg') as SVGElement
+      expect(icon.getAttribute('class')).toContain('text-violet')
+      expect(icon.getAttribute('class')).not.toContain('text-violet/70')
+    })
+  })
+
   describe('banner slot', () => {
     it('renders the banner when one is passed', () => {
       renderShell('/', { banner: <p>banner content</p> })
@@ -586,6 +710,9 @@ describe('AppShell', () => {
       const bar = document.querySelector('[data-slot="mobile-top-bar"]') as HTMLElement
       expect(bar).not.toBeNull()
       expect(bar.className).toContain('md:hidden')
+      // The row is exactly the 44px touch baseline; its menu button keeps that same target.
+      expect(bar.firstElementChild?.className).toContain('h-11')
+      expect(within(bar).getByRole('button', { name: 'Open menu' }).className).toContain('size-11')
     })
 
     it('titles the mobile bar from the active route', () => {
@@ -904,8 +1031,9 @@ describe('AppShell', () => {
 
       // Asserted against NAV_ITEMS, not a copy of it: the point of this test is that the drawer
       // reuses the sidebar's content, so adding a nav item must not need a second edit here.
-      expect(links.map((a) => a.getAttribute('href'))).toEqual(NAV_ITEMS.map((item) => item.to))
-      expect(links.map((a) => a.textContent)).toEqual(NAV_ITEMS.map((item) => item.label))
+      const visible = visibleNavItems({ forge: true, inbox: true, automations: true, knowledge: true, notes: true })
+      expect(links.map((a) => a.getAttribute('href'))).toEqual(visible.map((item) => item.to))
+      expect(links.map((a) => a.textContent)).toEqual(visible.map((item) => item.label))
 
       // …and the rest of the sidebar came along, not just the nav.
       expect(within(drawer() as HTMLElement).getByRole('link', { name: /New task/ })).toBeTruthy()
@@ -1053,5 +1181,21 @@ describe('AppShell', () => {
       // `children` never left its position in the tree.
       expect(statefulChild().textContent).toBe('1')
     })
+  })
+})
+
+
+describe('Dashboard active navigation', () => {
+  it.each(['/dashboard', '/dashboard?view=costs', '/dashboard?period=30d'])('highlights %s beyond hover', entry => {
+    renderShell(entry)
+    const link = screen.getByRole('link', { name: 'Dashboard' })
+    expect(link.getAttribute('aria-current')).toBe('page')
+    expect(link.classList.contains('bg-muted')).toBe(true)
+  })
+  it('does not remain highlighted on another page', () => {
+    renderShell('/tasks')
+    const link = screen.getByRole('link', { name: 'Dashboard' })
+    expect(link.getAttribute('aria-current')).toBeNull()
+    expect(link.classList.contains('bg-muted')).toBe(false)
   })
 })

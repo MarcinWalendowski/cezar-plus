@@ -8,8 +8,13 @@ import {
   SettingsIcon,
   SparklesIcon,
   ZapIcon,
+  TicketIcon,
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
+import type { TrackerKind } from '@loki-labs/cezar-plus-api-client'
+
+import { TRACKER_PROVIDERS } from '@/lib/tracker-providers'
+import { GithubIcon } from '@/components/icons'
 
 export type NavItem = {
   /** Where the item navigates. Also its identity — `activeNavPath` returns this. */
@@ -74,9 +79,9 @@ export type NavItem = {
   workspaceTo?: string
   /** Automations-gated (#801): the item exists only while `/api/health` reports
    *  `capabilities.automations` — GitHub automations are opt-in via `CEZ_AUTOMATIONS=1`.
-   *  Independent of `forge`: the Automations item carries BOTH, because the feature needs a
-   *  forge to poll AND the operator's opt-in to exist at all. See `visibleNavItems`. */
+   *  Scheduled automations need no forge; the operator opt-in gates this surface. */
   automations?: boolean
+  tracker?: boolean
 }
 
 /** The sidebar nav from the spec's "App shell & navigation" section, in mockup order.
@@ -96,7 +101,7 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare', '/todos'], badge: 'tasks-unread', workspaceTo: '/tasks' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: 'inbox-count', inbox: true },
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'], workspaceTo: '/workspace/git' },
-  { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], forge: true, automations: true },
+  { to: '/automations', label: 'Automations', icon: ZapIcon, match: ['/automations'], automations: true },
   { to: '/knowledge', label: 'Knowledge', icon: BookOpenIcon, match: ['/knowledge'], knowledge: true, workspaceTo: '/workspace/knowledge' },
   // Report triage (`.ai/specs/2026-08-19-reports-triage-approve-dismiss.md`, "Reports is a
   // workspace tab" amendment, 2026-08-19). Carries the SAME `knowledge` gate as the item above
@@ -127,6 +132,7 @@ export const NAV_ITEMS: NavItem[] = [
   // flat -> boot-project redirect (`LegacyPathRedirect`, routes.tsx) instead of a dedicated
   // `/workspace/skills` route, so the band row lands on the boot project's skills. Still
   // project-scoped, so it ALSO renders inside each project group via `to` (no `workspace: true`).
+  { to: '/tracker', label: 'Tracker', icon: TicketIcon, match: ['/tracker'], tracker: true },
   { to: '/skills', label: 'Skills', icon: SparklesIcon, match: ['/skills'], skills: true, workspaceTo: '/skills' },
   { to: '/notes', label: 'Notes', icon: NotebookPenIcon, match: ['/notes'], notes: true, workspace: true, workspaceTo: '/notes' },
   // ONE Settings area (`.ai/specs/2026-08-21-one-settings-area.md`). `workspace: true` is what
@@ -173,17 +179,18 @@ export type NavAvailability = {
   automations?: boolean
   /** `capabilities.notes` — the opt-in capture inbox (`CEZ_NOTES=1`). */
   notes?: boolean
+  tracker?: TrackerKind
 }
 
 /**
  * The nav items a surface should actually render: a gated item drops out — nav item AND tab —
  * unless the health payload says its feature is there. The forge-gated GitHub item needs the
  * forge driver (spec §"GitHub tab (forge tab)"); the Inbox item needs `capabilities.followups`,
- * which is off unless `CEZ_FOLLOWUPS=1` (#471); the Automations item needs a forge AND
- * `capabilities.automations`, which is off unless `CEZ_AUTOMATIONS=1` (#801).
+ * which is off unless `CEZ_FOLLOWUPS=1` (#471); the Automations item needs
+ * `capabilities.automations` alone (fork opt-in CEZ_AUTOMATIONS=1, and a schedule needs no
+ * forge — the page itself disables the poll kind when there is no GitHub remote).
  *
- * Gates are ANDed per item, never ORed, which is what lets one item carry two of them: an
- * automations opt-in on a repo with no GitHub remote still has nothing to poll.
+ * Gates are ANDed per item, never ORed, which is what would let one item carry two of them.
  *
  * Everything defaults to absent while health is still unknown, on the shell's honesty rule: the
  * nav must not claim a tab exists before the server has said so (the Tools menu's forge note
@@ -197,6 +204,7 @@ export function visibleNavItems({
   skills = true,
   automations = false,
   notes = false,
+  tracker,
 }: NavAvailability = {}): NavItem[] {
   return NAV_ITEMS.filter(
     (item) =>
@@ -208,8 +216,8 @@ export function visibleNavItems({
       // `skills: false` from health.
       (item.skills ? skills : true) &&
       (item.automations ? automations : true) &&
-      (item.notes ? notes : true),
-  )
+      (item.notes ? notes : true) && (item.tracker ? tracker !== undefined : true),
+  ).map((item) => item.tracker ? { ...item, label: tracker ? TRACKER_PROVIDERS[tracker].label : item.label } : item)
 }
 
 /** Does `pathname` sit inside the area rooted at `prefix`?

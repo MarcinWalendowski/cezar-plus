@@ -62,17 +62,10 @@ afterAll(() => {
 })
 
 describe('the GitHub tab against the live dry-run server', () => {
-  it('the nav gates on the live forge payload — item present iff the driver is available', () => {
+  it('keeps GitHub navigation hidden while the typed route remains available', () => {
     browser.goto(`${baseUrl}${scoped('/')}`)
-    browser.waitForFunction(`document.querySelector('[data-slot="sidebar"] nav') !== null`)
-    if (forgeAvailable) {
-      // The item waits on the health answer — poll rather than sample.
-      browser.waitForFunction(`document.querySelector('nav a[href="${scoped('/github')}"]') !== null`)
-    } else {
-      // Health has answered (other chips render from it) and still no GitHub item.
-      browser.waitForFunction(`document.querySelector('[data-slot="version-chip"]') !== null`)
-      expect(browser.count(`nav a[href="${scoped('/github')}"]`)).toBe(0)
-    }
+    browser.waitForFunction(`document.querySelector('[data-slot="version-chip"]') !== null`)
+    expect(browser.count(`nav a[href="${scoped('/github')}"]`)).toBe(0)
   })
 
   it('/github lists the real issues and PRs with honest counts', async () => {
@@ -102,7 +95,7 @@ describe('the GitHub tab against the live dry-run server', () => {
 
     // Health answers after the github payload on this box — settle the forge-gated nav item
     // (an assertion of the gate on the tab's own page, and an honest screenshot).
-    browser.waitForFunction(`document.querySelector('nav a[href="${scoped('/github')}"]') !== null`)
+    expect(browser.count(`nav a[href="${scoped('/github')}"]`)).toBe(0)
     browser.screenshot(`${artifactsDir}/github-desktop.png`)
   })
 
@@ -148,7 +141,7 @@ describe('the GitHub tab against the live dry-run server', () => {
     )
 
     // Same settle rule as above: the screenshot must show the whole truth, nav item included.
-    browser.waitForFunction(`document.querySelector('nav a[href="${scoped('/github')}"]') !== null`)
+    expect(browser.count(`nav a[href="${scoped('/github')}"]`)).toBe(0)
     browser.screenshot(`${artifactsDir}/github-detail.png`)
     browser.press('Escape')
   })
@@ -202,7 +195,7 @@ describe('the GitHub tab against the live dry-run server', () => {
       `document.querySelector('[data-slot="gh-event-row"][data-kind="labeled"]') !== null`,
     )
 
-    browser.waitForFunction(`document.querySelector('nav a[href="${scoped('/github')}"]') !== null`)
+    expect(browser.count(`nav a[href="${scoped('/github')}"]`)).toBe(0)
     browser.screenshot(`${artifactsDir}/github-thread-timeline.png`)
   })
 

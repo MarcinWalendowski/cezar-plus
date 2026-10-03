@@ -45,6 +45,7 @@ export const taskAuthorViaSchema = z.enum([
    *  (Milestone C, `cluster/spoke-runtime.ts#handleDispatch`) — the hub already granted the claim
    *  before sending the frame, so no human and no local watcher caused this run. */
   'cluster-dispatch',
+  'task-dispatch',
 ]);
 export type TaskAuthorVia = z.infer<typeof taskAuthorViaSchema>;
 

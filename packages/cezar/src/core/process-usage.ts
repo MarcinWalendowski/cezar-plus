@@ -25,6 +25,7 @@ import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 import { RUNS_SLICE } from './broker-isolation.ts';
+import type { DashboardTelemetrySample } from '@loki-labs/cezar-plus-contract';
 
 /** One aggregated sample for a run's process tree. */
 export interface ProcessUsage {
@@ -195,6 +196,7 @@ export const SAMPLE_INTERVAL_MS = 2_000;
 interface Entry {
   pid: number;
   last?: ProcessUsage;
+  sampledAt?: string;
   peakRssBytes: number;
   peakProcCount: number;
   /** High-water mark of the `ps`-summed `cpuPct`, the same way `peakRssBytes` tracks
@@ -286,6 +288,13 @@ export function currentUsage(runId: string): ProcessUsage | undefined {
   return entries.get(runId)?.last;
 }
 
+/** Timestamp belongs to successful sampling, never to a later HTTP/SSE read. */
+export function currentTimedUsage(runId: string): Omit<DashboardTelemetrySample, 'projectId' | 'runId'> | undefined {
+  const entry = entries.get(runId);
+  if (!entry?.last || !entry.sampledAt) return undefined;
+  return { ...entry.last, sampledAt: entry.sampledAt, cpuPct: process.platform === 'win32' ? null : entry.last.cpuPct };
+}
+
 /** Latest samples for every registered run that has data. */
 export function allUsage(): Record<string, ProcessUsage> {
   const out: Record<string, ProcessUsage> = {};
@@ -321,9 +330,11 @@ async function sample(): Promise<void> {
     const text = await runPs();
     if (text === null) return; // ps unavailable — degrade to no data
     const procs = parsePsOutput(text);
+    const sampledAt = new Date().toISOString();
     for (const entry of entries.values()) {
       const usage = aggregateTreeUsage(procs, entry.pid);
       entry.last = usage ?? undefined;
+      entry.sampledAt = usage ? sampledAt : undefined;
       if (usage) {
         entry.peakRssBytes = Math.max(entry.peakRssBytes, usage.rssBytes);
         entry.peakProcCount = Math.max(entry.peakProcCount, usage.procCount);

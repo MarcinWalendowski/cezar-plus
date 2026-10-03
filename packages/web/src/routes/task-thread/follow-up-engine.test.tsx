@@ -5,6 +5,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import { createQueryClient } from '@/api/query-client'
 import type {
+  AgentProfilesResponse,
   ApiRun,
   HealthResponse,
   LockableRunner,
@@ -63,14 +64,14 @@ const HEALTH_MULTI: HealthResponse = {
   forge: null,
   // `followups` became a required capability in #471 (merged from main): irrelevant to the
   // Continue pills these tests drive, but the shape must be whole.
-  capabilities: { cluster: false, localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: true, singleProject: false, knowledge: false, sources: false, notes: false, workspaceViews: false, notify: false, accountUsage: false, autoAccounts: false, skills: true, automations: false },
+  capabilities: { cluster: false, localHandoff: true, tokenMetrics: true, tokenUsageMetrics: true, costMetrics: true, followups: true, singleProject: false, knowledge: false, sources: false, notes: false, workspaceViews: false, notify: false, accountUsage: false, autoAccounts: false, skills: true, automations: false, dispatch: false },
 }
 
 type Recorded = { method: string; url: string; body?: unknown }
 let requests: Recorded[]
 
 const providersForHealth = (health: HealthResponse): ProviderStatusResponse => ({
-  providers: (['claude', 'codex', 'opencode'] as const).map((provider) => ({
+  providers: (['claude', 'codex', 'opencode', 'cursor'] as const).map((provider) => ({
     provider,
     status: health.checks.some((check) => check.name === provider && check.available)
       ? 'connected' as const
@@ -88,7 +89,7 @@ function serve(
   /** `resources.fallbackAcrossAccountsWhenLimited` on the WORKSPACE config — what makes the engine
    *  picker advisory (`2026-08-23-never-block-a-task.md`). Defaults to absent, i.e. the shape this
    *  file served before the setting existed. */
-  accountFallback: boolean | undefined = undefined,
+  accountFallback: boolean | AgentProfilesResponse | undefined = undefined,
   /** `runnerLock` on the WORKSPACE config — the global engine lock
    *  (`.ai/specs/2026-08-29-global-provider-toggle.md`). `undefined` omits the key entirely, which
    *  is the older-server shape; `null` is Auto, served explicitly. */
@@ -107,6 +108,8 @@ function serve(
       if (url === '/api/v1/health') return json(health)
       if (url === '/api/v1/providers/status') return json(providerStatus, providerStatusCode)
       if (url === '/api/v1/models?runner=codex') return json({ runner: 'codex', models: [{ id: 'gpt-future', label: 'gpt-future', description: 'Newest' }], source: 'live', stale: false })
+      if (url === '/api/v1/models?runner=claude') return json({ runner: 'claude', models: [{ id: 'opus', label: 'opus', description: 'Opus 5' }, { id: 'sonnet', label: 'sonnet', description: 'Sonnet 5' }], source: 'live', stale: false })
+      if (url === '/api/v1/models?runner=cursor') return json({ runner: 'cursor', models: [{ id: 'composer-2.5', label: 'Composer 2.5', description: '' }], source: 'live', stale: false })
       if (url === '/api/v1/config' && method === 'GET')
         return json({
           baseBranch: null,
@@ -122,12 +125,16 @@ function serve(
         // server sends and the shape most of this repo's fetch stubs return, and it is what broke:
         // `data?.resources.x` throws from inside the hook and takes the whole React tree with it.
         return json({
-          ...(accountFallback === undefined
+          ...(typeof accountFallback !== 'boolean'
             ? {}
             : { resources: { fallbackAcrossAccountsWhenLimited: accountFallback } }),
           ...(runnerLock === undefined ? {} : { runnerLock }),
         })
       if (url === '/api/v1/runs' && method === 'GET') return json([])
+      if (url === '/api/v1/workspace/agent-profiles' && method === 'GET')
+        return typeof accountFallback === 'object' ? json(accountFallback) : json({ error: 'not found' }, 404)
+      if (url === '/api/v1/repo' && method === 'GET')
+        return json({ info: { root: '/repo', branch: 'main' } })
       if (url.endsWith('/continue') && method === 'POST') return json({ continued: true })
       return json({}, 200)
     }),
@@ -237,6 +244,27 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
     expect(continueBody()).toEqual({ runner: 'codex', model: 'gpt-future' })
   })
 
+  it('leaves runner and model picks with the task they belong to', async () => {
+    serve()
+    const client = createQueryClient()
+    const view = (record: ApiRun) => (
+      <QueryClientProvider client={client}>
+        <MemoryRouter><Harness run={record} /></MemoryRouter>
+      </QueryClientProvider>
+    )
+    const { rerender } = render(view(makeRun()))
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Runner' }))
+    fireEvent.click((await screen.findAllByRole('menuitemradio')).find((o) => o.textContent?.includes('codex'))!)
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Model' }))
+    await waitFor(() => expect(screen.getAllByRole('menuitemradio').find((o) => o.textContent?.includes('gpt-future'))).toBeDefined())
+    fireEvent.click(screen.getAllByRole('menuitemradio').find((o) => o.textContent?.includes('gpt-future'))!)
+
+    rerender(view(makeRun({ id: 'r2' })))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Runner' }).textContent).toBe('claude'))
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }))
+    await waitFor(() => expect(requests.find((r) => r.url === '/api/v1/runs/r2/continue')?.body).toEqual({}))
+  })
+
   it('shows a read-only native model while locked and still permits switching runners', async () => {
     serve(
       HEALTH_MULTI,
@@ -310,6 +338,7 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
           { provider: 'claude', status: 'connected', enabled: true },
           { provider: 'codex', status: 'disconnected', enabled: true },
           { provider: 'opencode', status: 'not-installed', enabled: true },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     )
@@ -329,6 +358,7 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
           { provider: 'claude', status: 'disconnected', enabled: true },
           { provider: 'codex', status: 'connected', enabled: true },
           { provider: 'opencode', status: 'not-installed', enabled: true },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     )
@@ -351,6 +381,7 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
           { provider: 'claude', status: 'connected', enabled: false },
           { provider: 'codex', status: 'connected', enabled: true },
           { provider: 'opencode', status: 'not-installed', enabled: true },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     )
@@ -373,6 +404,7 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
           { provider: 'claude', status: 'disconnected', enabled: true },
           { provider: 'codex', status: 'unknown', enabled: true },
           { provider: 'opencode', status: 'not-installed', enabled: true },
+          { provider: 'cursor', status: 'disconnected', enabled: true },
         ],
       },
     )
@@ -402,7 +434,8 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
         { provider: 'claude', status: 'connected', enabled: true },
         { provider: 'codex', status: 'disconnected', enabled: true },
         { provider: 'opencode', status: 'connected', enabled: true },
-      ],
+        { provider: 'cursor', status: 'connected', enabled: true },
+        ],
     }
     serve(HEALTH_MULTI, {}, providers)
     renderAction(makeRun({ runner: 'claude' }))
@@ -492,9 +525,179 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
     // right only because something else is also right is the shape this spec exists to remove.
     serve(HEALTH_MULTI, {}, providersForHealth(HEALTH_MULTI), 200, false, undefined, 'codex')
     renderAction(makeRun({ runner: 'claude' }))
+    await waitFor(() => expect(document.querySelector('[data-slot="follow-up-engine"]')?.textContent).toContain('codex'))
 
     fireEvent.click(await screen.findByRole('button', { name: /continue/i }))
     await waitFor(() => expect(continueBody()).toBeDefined())
     expect(continueBody()).toEqual({ runner: 'codex' })
+  })
+})
+
+// ---- agent accounts (spec 2026-07-29-agent-profiles) ------------------------------------------
+
+/** One extra Claude login beside the discovered defaults. */
+const ACCOUNTS: AgentProfilesResponse = {
+  defaults: {},
+  editable: true,
+  profileCapableProviders: ['claude', 'codex'],
+  selections: {},
+  profiles: [
+    {
+      id: 'default',
+      provider: 'claude',
+      label: 'Default',
+      configDir: '/home/u/.claude',
+      path: '/home/u/.claude',
+      exists: true,
+      looksValid: true,
+      isDefault: true,
+      status: { provider: 'claude', status: 'connected' },
+      files: [],
+    },
+    {
+      id: 'klaudiusz',
+      provider: 'claude',
+      label: 'Klaudiusz',
+      configDir: '~/.claude-klaudiusz',
+      path: '/home/u/.claude-klaudiusz',
+      exists: true,
+      looksValid: true,
+      isDefault: false,
+      status: { provider: 'claude', status: 'connected' },
+      files: [],
+    },
+  ],
+}
+
+const runnerPill = () => document.querySelector('[data-slot="runner-pill"]') as HTMLElement | null
+
+/** Open the runner pill and click the row whose label contains `match`. */
+const pickFrom = async (pill: HTMLElement, match: string) => {
+  fireEvent.pointerDown(pill)
+  const options = await screen.findAllByRole('menuitemradio')
+  fireEvent.click(options.find((o) => o.textContent?.includes(match)) as HTMLElement)
+}
+
+const serveAccounts = (
+  accounts: AgentProfilesResponse = ACCOUNTS,
+  health: HealthResponse = HEALTH_MULTI,
+) => serve(health, {}, providersForHealth(health), 200, false, accounts)
+
+/**
+ * The thread's Continue carries the SAME flat runner pill the /new composer does — `claude ·
+ * Default` / `claude · Klaudiusz` / `codex` — so "continue this on my other Claude login" is
+ * sayable after the task has started, not only when it is created.
+ */
+describe('the follow-up runner pill carries the account', () => {
+  it('lists every agent-and-login as one flat row, on a single-backend host too', async () => {
+    serveAccounts(ACCOUNTS, {
+      ...HEALTH_MULTI,
+      checks: [
+        { name: 'claude', available: true },
+        { name: 'git', available: true },
+      ],
+    })
+    renderAction(makeRun())
+    // One runner is not a choice, but a second login is — so the pill appears where it used to be
+    // hidden entirely.
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+
+    fireEvent.pointerDown(runnerPill()!)
+    const options = await screen.findAllByRole('menuitemradio')
+    expect(options.map((o) => o.textContent)).toEqual([
+      'claude · Default/home/u/.claude',
+      'claude · Klaudiusz~/.claude-klaudiusz',
+    ])
+  })
+
+  it('starts on the account the run is actually on, not the project selection', async () => {
+    // The step that spawned is what a Continue reattaches to; the project has since been switched
+    // to Klaudiusz, and that must not relabel a run that ran on the discovered account.
+    serveAccounts({ ...ACCOUNTS, selections: { '/repo': { claude: 'klaudiusz' } } })
+    renderAction(makeRun({ steps: [step({ sessionId: 'sess-1', profileId: 'default' })] }))
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('claude · Default'))
+
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }))
+    // Untouched, the Continue says nothing about the account — the run keeps the one it is on.
+    await waitFor(() => expect(continueBody()).toEqual({}))
+  })
+
+  it('shows the account the run recorded even when it is not the discovered one', async () => {
+    serveAccounts()
+    renderAction(makeRun({ steps: [step({ sessionId: 'sess-1', profileId: 'klaudiusz' })] }))
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('claude · Klaudiusz'))
+  })
+
+  it('sends the picked account through to /continue', async () => {
+    serveAccounts()
+    renderAction(makeRun({ steps: [step({ sessionId: 'sess-1', profileId: 'default' })] }))
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+
+    await pickFrom(runnerPill()!, 'Klaudiusz')
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('claude · Klaudiusz'))
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }))
+
+    // The runner did not change, so only the account rides the request.
+    await waitFor(() => expect(continueBody()).toEqual({ agentProfile: 'klaudiusz' }))
+  })
+
+  it('leaves the picked login with its original task', async () => {
+    serveAccounts()
+    const client = createQueryClient()
+    const view = (record: ApiRun) => (
+      <QueryClientProvider client={client}>
+        <MemoryRouter><Harness run={record} /></MemoryRouter>
+      </QueryClientProvider>
+    )
+    const { rerender } = render(view(makeRun()))
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+    await pickFrom(runnerPill()!, 'Klaudiusz')
+    rerender(view(makeRun({ id: 'r2' })))
+
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('claude · Default'))
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }))
+    await waitFor(() => expect(requests.find((r) => r.url === '/api/v1/runs/r2/continue')?.body).toEqual({}))
+  })
+
+  it('keeps the model pin when only the account changes', async () => {
+    serveAccounts()
+    renderAction(makeRun({ model: 'opus', steps: [step({ sessionId: 'sess-1', profileId: 'default' })] }))
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+    // The catalog is identical across logins of one agent, so the pin survives the switch.
+    expect(screen.getByRole('button', { name: 'Model' }).textContent).toContain('opus')
+
+    await pickFrom(runnerPill()!, 'Klaudiusz')
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('Klaudiusz'))
+    expect(screen.getByRole('button', { name: 'Model' }).textContent).toContain('opus')
+  })
+
+  it('drops a claude account when the continuation switches to another agent', async () => {
+    serveAccounts()
+    renderAction(makeRun({ steps: [step({ sessionId: 'sess-1', profileId: 'default' })] }))
+    await waitFor(() => expect(runnerPill()).not.toBeNull())
+
+    await pickFrom(runnerPill()!, 'Klaudiusz')
+    await waitFor(() => expect(runnerPill()?.textContent).toContain('Klaudiusz'))
+    await pickFrom(runnerPill()!, 'codex')
+    await waitFor(() => expect(runnerPill()?.textContent?.trim()).toBe('codex'))
+
+    fireEvent.click(screen.getByRole('button', { name: /continue/i }))
+    // A Claude login means nothing to codex, so it must not ride along.
+    await waitFor(() => expect(continueBody()).toEqual({ runner: 'codex' }))
+  })
+
+  it('leaves the zero-config thread exactly as it was', async () => {
+    serve(
+      {
+        ...HEALTH_MULTI,
+        checks: [
+          { name: 'claude', available: true },
+          { name: 'git', available: true },
+        ],
+      },
+    )
+    renderAction(makeRun())
+    await screen.findByRole('button', { name: 'Model' })
+    expect(runnerPill()).toBeNull()
   })
 })

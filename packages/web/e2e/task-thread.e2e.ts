@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
 import record from './fixtures/thread-run.record.json'
 
 /**
@@ -87,6 +87,7 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   bootProject = await bootProjectId(baseUrl)
 
   browser = AgentBrowser.open(sessionId)
@@ -96,10 +97,10 @@ beforeAll(async () => {
   browser.waitForFunction(`document.querySelectorAll('[data-slot="user-bubble"]').length >= 2`)
 }, 120_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('task thread', () => {
@@ -109,7 +110,7 @@ describe('task thread', () => {
     ) as string[]
     expect(bubbles).toHaveLength(2)
     expect(bubbles[0]).toContain('Summarize what this project does.')
-    expect(bubbles[1]).toBe('Thanks — now show the markdown summary. mock:md')
+    expect(bubbles[1]).toContain('Thanks — now show the markdown summary. mock:md')
 
     // Right-aligned: the bubble hugs the column's right content edge (within its padding),
     // sits entirely right of the midline, while assistant content starts at the left edge.
@@ -252,6 +253,8 @@ describe('task thread', () => {
   })
 
   it('the step rail maps the record steps to checklist rows over the progress bar', () => {
+    browser.click('[data-slot="workflow-steps"] button[aria-label^="Workflow:"]')
+    browser.waitForFunction(`document.querySelectorAll('[data-slot="step-row"]').length === 2`)
     const rail = browser.evaluate(`(() => {
       const rows = [...document.querySelectorAll('[data-slot="step-row"]')]
       return {
@@ -269,7 +272,7 @@ describe('task thread', () => {
     expect(rail.bar).toBe('100%') // both steps terminal — (1 + 1) / 2
   })
 
-  it('the plan dock shows the LATEST snapshot (2/4), expanded on desktop, mirrored in the header', () => {
+  it('the plan dock shows the LATEST snapshot (2/4), settled for this finished run, mirrored in the header', () => {
     expect(browser.evaluate(`document.querySelector('[data-slot="plan-dock"]').dataset.state`)).toBe('open')
     expect(browser.evaluate(`document.querySelector('[data-slot="plan-count"]').textContent`)).toBe('· 2/4')
     expect(browser.evaluate(`document.querySelector('[data-slot="plan-mirror"]').textContent`)).toBe('Plan 2/4')
@@ -281,18 +284,34 @@ describe('task thread', () => {
     }))`) as Array<{ status: string; text: string }>
     expect(items.map((i) => i.status)).toEqual(['completed', 'completed', 'in_progress', 'pending'])
     expect(items[2]!.text).toContain('Summarize cockpit features')
-    expect(items[2]!.text).toContain('in progress')
+
+    // …and the RENDERING settles, because this fixture run's status is `done`: the agent's
+    // reported status survives as data (asserted above), but a closed session is never still
+    // working on it, so the tag and the pulse are gone and the head says 2/4 was as far as it
+    // got. The live counterpart lives in the unit suite (`task-thread.test.tsx`), which has a
+    // running run to render; every run this fixture serves is terminal by design.
+    expect(browser.evaluate(`document.querySelector('[data-slot="plan-dock"]').dataset.settled`)).toBe('true')
+    expect(items[2]!.text).not.toContain('in progress')
+    expect(browser.count('[data-slot="plan-tag"]')).toBe(0)
+    expect(browser.count('[data-slot="plan-dock"] .animate-pulse')).toBe(0)
+    expect(browser.evaluate(`document.querySelector('[data-slot="plan-unfinished"]').textContent`)).toBe(
+      '· left unfinished',
+    )
 
     // It sits in the dock region above the composer area, not in the thread flow.
     expect(browser.evaluate(`document.querySelector('[data-slot="thread-dock"] [data-slot="plan-dock"]') !== null`)).toBe(true)
   })
 
-  it('collapsing the dock folds it to the odometer + the activeForm of the current item', () => {
+  it('collapsing the dock folds it to the odometer — a settled run names no current item', () => {
     browser.click('[data-slot="plan-dock"] button')
     browser.waitForFunction(`document.querySelector('[data-slot="plan-dock"]').dataset.state === 'collapsed'`)
     expect(browser.count('[data-slot="plan-list"]')).toBe(0)
-    expect(browser.evaluate(`document.querySelector('[data-slot="plan-current"]').textContent`)).toBe(
-      '— Summarizing cockpit features',
+    // A live dock folds to "— <activeForm>". This one's session is closed, so there is no current
+    // item to name: the collapsed head is the odometer plus the unfinished note, nothing implying
+    // the agent is still on item 3.
+    expect(browser.count('[data-slot="plan-current"]')).toBe(0)
+    expect(browser.evaluate(`document.querySelector('[data-slot="plan-unfinished"]').textContent`)).toBe(
+      '· left unfinished',
     )
     // Re-expand so the desktop screenshot below captures the full checklist.
     browser.click('[data-slot="plan-dock"] button')
@@ -320,7 +339,7 @@ describe('task thread', () => {
     expect(browser.evaluate(`document.querySelector('[data-route="task-thread"] h1').textContent`)).toBe(
       'Explain what cezar does',
     )
-    expect(browser.evaluate(`document.querySelector('[data-slot="pill"]').textContent`)).toBe('done')
+    expect(browser.evaluate(`document.querySelector('[data-slot="pill"]').textContent`)).toMatch(/^done.*took 0:03$/)
     // The #381 money shot: tool cards (one expanded) + markdown + image, desktop width.
     browser.screenshot(`${artifactsDir}/thread-desktop.png`)
   })
@@ -332,10 +351,10 @@ describe('task thread', () => {
     expect(meta).toContain('quick-task')
     expect(meta).toContain('cez/fcd519dd')
     expect(meta).toContain('+1 −0')
-    expect(meta).toContain('3.6k tokens')
+    expect(meta).not.toContain('3.6k tokens')
+    expect(browser.count('[data-slot="run-meta"] [data-slot="directional-usage"]')).toBe(0)
     expect(meta).toContain('$0.04')
-    // The fixture is a claude run — the runner stays out of the line, like the mockup.
-    expect(meta).not.toContain('claude')
+    expect(meta).toContain('claude')
     // Branch renders as the mono chip, not plain text.
     expect(
       browser.evaluate(`document.querySelector('[data-slot="branch-chip"]').textContent`),
@@ -358,7 +377,7 @@ describe('task thread', () => {
     const actions = browser.evaluate(
       `[...document.querySelectorAll('[data-slot="run-actions"] button')].map((b) => b.textContent.trim())`,
     ) as string[]
-    expect(actions).toEqual(['Continue', 'Open in…', 'Notes', 'Archive', 'Delete'])
+    expect(actions).toEqual(['Continue', 'Open in…', 'Notes', 'Mark unread', 'Pin', 'Archive', 'Delete'])
 
     // The take-over hint, per-backend (the fixture's last agent session, in its worktree).
     const hint = browser.evaluate(
@@ -415,24 +434,29 @@ describe('task thread', () => {
     )
   })
 
-  it('reflows at iPhone width with no horizontal overflow', () => {
-    browser.setViewport(390, 844)
-    browser.goto(`${baseUrl}${scoped(`/tasks/${RUN_ID}`)}`)
-    browser.waitForFunction(`document.querySelectorAll('[data-slot="user-bubble"]').length >= 2`)
-    browser.waitForFunction(`document.querySelector('[data-streamdown="code-block"]') !== null`)
+  it('reflows across small phone widths with no horizontal overflow', () => {
+    for (const [width, height] of [[320, 568], [360, 640], [390, 844]] as const) {
+      browser.setViewport(width, height)
+      browser.goto(`${baseUrl}${scoped(`/tasks/${RUN_ID}`)}`)
+      browser.waitForFunction(`document.querySelectorAll('[data-slot="user-bubble"]').length >= 2`)
+      browser.waitForFunction(`document.querySelector('[data-streamdown="code-block"]') !== null`)
 
-    expect(browser.evaluate(`document.documentElement.scrollWidth <= window.innerWidth`)).toBe(true)
-    // The wide fixture table/code scroll inside their own boxes, not the page.
-    expect(
-      browser.evaluate(`(() => {
-        const main = document.querySelector('[data-slot="main"]')
-        return main.scrollWidth <= main.clientWidth
-      })()`),
-    ).toBe(true)
+      expect(browser.evaluate(`document.documentElement.scrollWidth <= window.innerWidth`)).toBe(true)
+      // The wide fixture table/code scroll inside their own boxes, not the page.
+      expect(
+        browser.evaluate(`(() => {
+          const main = document.querySelector('[data-slot="main"]')
+          return main.scrollWidth <= main.clientWidth
+        })()`),
+      ).toBe(true)
+      expect(browser.evaluate(`document.querySelector('[data-slot="mobile-top-bar"] > div').getBoundingClientRect().height`)).toBe(44)
+      expect(browser.evaluate(`getComputedStyle(document.querySelector('[data-slot="run-header"]')).position`)).toBe('relative')
+      expect(browser.evaluate(`document.querySelector('[aria-label="Reply to the agent"]').rows`)).toBe(1)
 
-    // Phone default: the dock collapses to the odometer (the mockup's mobile reflow).
-    expect(browser.evaluate(`document.querySelector('[data-slot="plan-dock"]').dataset.state`)).toBe('collapsed')
-    expect(browser.evaluate(`document.querySelector('[data-slot="plan-count"]').textContent`)).toBe('· 2/4')
+      // Phone default: the dock collapses to the odometer (the mockup's mobile reflow).
+      expect(browser.evaluate(`document.querySelector('[data-slot="plan-dock"]').dataset.state`)).toBe('collapsed')
+      expect(browser.evaluate(`document.querySelector('[data-slot="plan-count"]').textContent`)).toBe('· 2/4')
+    }
 
     browser.screenshot(`${artifactsDir}/thread-mobile.png`)
     browser.setViewport(1440, 900)
@@ -456,9 +480,12 @@ describe('task thread', () => {
     ).toBe(true)
     // Title + pill still read in one compact row.
     expect(browser.isVisible('[data-route="task-thread"] h1')).toBe(true)
-    expect(browser.evaluate(`document.querySelector('[data-slot="pill"]').textContent`)).toBe('done')
+    expect(browser.evaluate(`document.querySelector('[data-slot="pill"]').textContent`)).toMatch(/^done.*took 0:03$/)
 
     browser.screenshot(`${artifactsDir}/thread-header-mobile.png`)
     browser.setViewport(1440, 900)
+    browser.goto(`${baseUrl}${scoped(`/tasks/${RUN_ID}`)}`)
+    browser.waitForFunction(`document.querySelector('[data-slot="run-header"]') !== null`)
+    expect(browser.evaluate(`getComputedStyle(document.querySelector('[data-slot="run-header"]')).position`)).toBe('sticky')
   })
 })

@@ -8,6 +8,8 @@
 #             terminate the healthy server immediately after the script exits.
 #   2026-07-21 start a new session when setsid is available; some task runners reap
 #             every process left in the bootstrap shell's process group despite nohup.
+#   2026-10-03 use Node detached spawn on every platform so captured bootstrap shells
+#             cannot reap the app, including macOS without setsid.
 #   2026-07-30 stop requiring packages/api-client/dist after the contract-workspace
 #             migration made the client typecheck-only; server + web are the runtime artifacts.
 #   2026-07-30 run npm ci before building and cache-check installed runtime dependencies;
@@ -462,25 +464,25 @@ start_app() {
   # instance into hosted mode (AGENTS.md § auth-boot-gate), which is exactly the class of
   # inherited variable this exists to strip.
   SINGLE_PROJECT_RESTORE="${CEZ_SINGLE_PROJECT:-}"
-  # --no-open: a test boot must never hijack the operator's browser.
-  (
-    cd "$REPO_ROOT"
-    for cez_var in $(env | grep -E '^(CEZ_[A-Za-z0-9_]*|NODE_ENV)=' | cut -d= -f1); do
-      unset "$cez_var" 2>/dev/null || true
-    done
-    export CEZ_DRY_RUN=1
-    export CEZ_HOME="$QA_DIR/cez-home"
-    export CEZ_ANALYTICS=1
-    [ -n "$SINGLE_PROJECT_RESTORE" ] && export CEZ_SINGLE_PROJECT="$SINGLE_PROJECT_RESTORE"
-    if command -v setsid >/dev/null 2>&1; then
-      exec setsid nohup node packages/cezar/dist/index.js --port "$PORT" --no-open --repo "$REPO_ROOT" \
-        >"$APP_LOG" 2>&1 </dev/null
-    else
-      exec nohup node packages/cezar/dist/index.js --port "$PORT" --no-open --repo "$REPO_ROOT" \
-        >"$APP_LOG" 2>&1 </dev/null
-    fi
-  ) &
-  APP_PID=$!
+  # detached gives the server its own process session on Unix, including macOS without setsid.
+  # Capture the server PID itself, not the short-lived launcher; inherited pipes are closed.
+  APP_PID=$(node -e '
+    const fs = require("node:fs"), { spawn } = require("node:child_process");
+    const [root, logPath, port, singleProject] = process.argv.slice(1);
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+      !key.startsWith("CEZ_") && key !== "NODE_ENV"));
+    env.CEZ_DRY_RUN = "1";
+    env.CEZ_HOME = root + "/.ai/qa/cez-home";
+    env.CEZ_ANALYTICS = "1";
+    if (singleProject) env.CEZ_SINGLE_PROJECT = singleProject;
+    const logFd = fs.openSync(logPath, "w");
+    const child = spawn(process.execPath, ["packages/cezar/dist/index.js", "--port", port,
+      "--no-open", "--repo", root], { cwd: root, env, detached: true,
+      stdio: ["ignore", logFd, logFd] });
+    fs.closeSync(logFd);
+    child.once("error", (error) => { console.error(error.message); process.exitCode = 1; });
+    child.once("spawn", () => { process.stdout.write(String(child.pid)); child.unref(); });
+  ' "$REPO_ROOT" "$APP_LOG" "$PORT" "$SINGLE_PROJECT_RESTORE")
 
   waited=0
   while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do

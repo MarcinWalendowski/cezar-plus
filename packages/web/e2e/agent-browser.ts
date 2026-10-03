@@ -1,6 +1,7 @@
-import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { execFileSync, type ChildProcess } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
 
 /**
  * The agent-browser provider seam. Every e2e spec drives the app through this module and
@@ -50,10 +51,9 @@ export function readTestEnv(): EnvDescriptor {
   try {
     return JSON.parse(readFileSync(descriptorPath, 'utf8')) as EnvDescriptor
   } catch (cause) {
-    throw new Error(
-      `cezar e2e: cannot read ${descriptorPath}. Run \`npm run test:e2e\`, which boots the env first.`,
-      { cause },
-    )
+    throw new Error(`cezar e2e: cannot read ${descriptorPath}. Run \`npm run test:e2e\`, which boots the env first.`, {
+      cause,
+    })
   }
 }
 
@@ -81,10 +81,19 @@ export function readTestEnv(): EnvDescriptor {
  * `analytics-log.ts` disables the sink on the exact string `'0'` and leaving that to chance
  * would make the analytics assertion in `filed-partitions.e2e.ts` non-deterministic.
  */
-export function fixtureServeEnv(
-  dataRoot: string,
-  extra: Record<string, string> = {},
-): NodeJS.ProcessEnv {
+const fixtureRoots = new Map<string, string>()
+
+export function fixtureServeEnv(dataRoot: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const home = resolve(dataRoot, '.cez-home')
+  const root = realpathSync(dataRoot)
+  if (!root.startsWith(realpathSync(tmpdir()) + '/') || !/cezar-e2e-/.test(root)) {
+    throw new Error(`cezar e2e: refusing non-disposable fixture root ${root}`)
+  }
+  if (home.startsWith(resolve(homedir(), '.cezar'))) throw new Error('cezar e2e: refusing real workspace home')
+  if (extra.CEZ_HOME !== undefined && resolve(extra.CEZ_HOME) !== home) {
+    throw new Error('cezar e2e: fixture CEZ_HOME cannot escape its disposable root')
+  }
+  fixtureRoots.set(root, home)
   const base: NodeJS.ProcessEnv = {}
   for (const [key, value] of Object.entries(process.env)) {
     if (key === 'NODE_ENV' || key.startsWith('CEZ_')) continue
@@ -93,27 +102,183 @@ export function fixtureServeEnv(
   return {
     ...base,
     CEZ_DRY_RUN: '1', CEZ_HOME: resolve(dataRoot, '.cez-home'), // guardian: same line, always paired
+    CEZ_SKILLS_AUTO_UPDATE: '0',
     CEZ_ANALYTICS: '1',
     ...extra,
   }
 }
 
 /**
- * The id of the project a server booted in — the `/p/<projectId>` prefix every cockpit URL
- * carries since the multi-project spec's step 3.2.
+ * A JSON GET that survives a RESET idle connection.
  *
- * Specs resolve it from the live server rather than deriving it from the fixture's folder name:
- * the slug is allocated by the registry (lowercased, deduplicated), so only the server knows it.
+ * Specs boot a server, drive the browser for tens of seconds, then read the API back. Node's
+ * fetch pools the connection opened during the health probe, and reusing a socket the server has
+ * since closed surfaces as `ECONNRESET` — a dead connection, never a dead server (the process is
+ * still answering the browser at that moment). One retry opens a fresh one.
  */
-export async function bootProjectId(baseUrl: string): Promise<string> {
-  const { bootProject } = (await (await fetch(`${baseUrl}/api/v1/projects`)).json()) as {
-    bootProject: string
+export async function getJson<T>(url: string): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return (await (await fetch(url)).json()) as T
+    } catch (error) {
+      if (attempt >= 2) throw error
+      await new Promise((r) => setTimeout(r, 250))
+    }
   }
-  if (!bootProject) throw new Error(`cezar e2e: ${baseUrl}/api/v1/projects named no boot project`)
-  return bootProject
+}
+
+/** Initialize only attested scratch servers through the same onboarding and registration APIs
+ * a local user uses. Readiness is explicit: org gates and seed-once registry behavior stay real. */
+export async function ensureFixtureReady(baseUrl: string): Promise<string> {
+  const url = new URL(baseUrl)
+  if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))
+    throw new Error('cezar e2e: refusing non-loopback fixture')
+  const health = await getJson<{ repoRoot: string }>(baseUrl + '/api/v1/health')
+  const root = realpathSync(health.repoRoot)
+  const descriptor = readTestEnv()
+  const shared = baseUrl === descriptor.baseUrl && root === realpathSync(repoRoot)
+  const fixtureRoot = [...fixtureRoots.keys()].find((fixture) => root === fixture || root.startsWith(fixture + '/'))
+  const owned = fixtureRoot !== undefined
+  if (!shared && !owned) throw new Error(`cezar e2e: server root is not an attested fixture: ${root}`)
+  async function write(path: string, method: string, body: unknown) {
+    const response = await fetch(baseUrl + path, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (response.status === 409 && path === '/api/v1/projects') {
+      const existing = await response.json() as {project?: {root:string}}
+      const wantedRoot = (body as {root: string}).root
+      if (existing.project && realpathSync(existing.project.root) === realpathSync(wantedRoot)) return existing
+      throw new Error('cezar e2e: registration conflict names a different fixture root')
+    }
+    if (!response.ok)
+      throw new Error(`cezar e2e: ${method} ${path} failed (${response.status}): ${await response.text()}`)
+    return response.json()
+  }
+  let onboarding = await getJson<{
+    state: string
+    bootstrapTokenRequired?: boolean
+    team?: { name: string }
+  }>(baseUrl + '/auth/onboarding')
+  if (onboarding.state === 'needs-org' && onboarding.bootstrapTokenRequired === false) {
+    await write('/auth/onboarding/org', 'POST', {
+      name: 'Disposable E2E workspace',
+    })
+    onboarding = await getJson<typeof onboarding>(baseUrl + '/auth/onboarding')
+    await write('/auth/onboarding/team', 'PATCH', {
+      name: onboarding.team?.name ?? 'Default',
+    })
+  }
+  if (onboarding.state !== 'ready') throw new Error(`cezar e2e: fixture onboarding is ${onboarding.state}`)
+  const before = await getJson<{ bootProject: string }>(baseUrl + '/api/v1/projects')
+  const configPath = fixtureRoot ? resolve(fixtureRoots.get(fixtureRoot)!, 'config.json') : undefined
+  const seeded = configPath && existsSync(configPath)
+    ? (JSON.parse(readFileSync(configPath, 'utf8')) as {projects?: Array<{id:string;root:string}>}).projects ?? []
+    : []
+  for (const project of seeded) {
+    const projectRoot = realpathSync(project.root)
+    if (!fixtureRoot || !(projectRoot === fixtureRoot || projectRoot.startsWith(fixtureRoot + '/'))) {
+      throw new Error('cezar e2e: seeded project escapes its disposable fixture')
+    }
+    const registered = await write('/api/v1/projects', 'POST', {root:projectRoot}) as {project:{id:string}}
+    if (registered.project.id !== project.id) throw new Error('cezar e2e: seeded registration changed project id')
+  }
+  await write('/api/v1/projects', 'POST', { root })
+  const after = await getJson<{
+    bootProject: string
+    projects: Array<{ id: string; root: string; unregistered?: boolean }>
+  }>(baseUrl + '/api/v1/projects')
+  if (
+    after.bootProject !== before.bootProject ||
+    !after.projects.some((project) => project.id === before.bootProject && !project.unregistered)
+  ) {
+    throw new Error('cezar e2e: fixture boot registration must preserve its served project id')
+  }
+  return after.bootProject
+}
+
+/** Resolve the served project's real slug after explicit fixture readiness. */
+export async function bootProjectId(baseUrl: string): Promise<string> {
+  return ensureFixtureReady(baseUrl)
+}
+
+/** Wait for the owned HTTP process to exit before removing its home; otherwise shutdown writes
+ * can recreate files during rmSync and make cleanup race with the next spec. */
+export async function stopFixtureServer(server: ChildProcess | undefined): Promise<void> {
+  if (!server) return
+  const repoIndex = server.spawnargs.indexOf('--repo')
+  const servedRoot = repoIndex >= 0 ? server.spawnargs[repoIndex + 1] : undefined
+  const ownedRoot = servedRoot && existsSync(servedRoot)
+    ? [...fixtureRoots.keys()].find((root) => { const served = realpathSync(servedRoot); return served === root || served.startsWith(root + '/') })
+    : undefined
+  const snapshot = () => execFileSync('ps', ['-axo', 'pid=,ppid=,lstart='], {encoding:'utf8'})
+    .trim().split('\n').map((line) => {
+      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/)
+      const [,pid,parent,started] = match ?? []
+      if (!pid || !parent || !started) throw new Error('cezar e2e: invalid process snapshot row')
+      return {pid:Number(pid), parent:Number(parent), started:started.trim()}
+    })
+  const starts = new Map<number, string>()
+  const descendants = new Set<number>()
+  const captureOwned = () => {
+    const processRows = snapshot()
+    for (const {pid,started} of processRows) if (!starts.has(pid)) starts.set(pid,started)
+    if (ownedRoot) {
+      const commands = execFileSync('ps', ['-axo', 'pid=,command='], {encoding:'utf8'}).split('\n')
+      for (const line of commands) {
+        const match = line.trim().match(/^(\d+)\s+(.+)$/)
+        if (!match?.[1] || !match[2]) continue
+        const pid = Number(match[1])
+        const command = match[2]
+        const spool = command.match(/(?:^|\s)--spool\s+(\S+)/)?.[1]
+        if (starts.has(pid) && command.includes(`${cezarCli} run-broker `) && spool?.startsWith(ownedRoot + '/')) {
+          descendants.add(pid)
+        }
+      }
+    }
+    let discovered = true
+    while (discovered) {
+      discovered = false
+      for (const {pid, parent} of processRows) {
+        if (pid !== server.pid && (parent === server.pid || descendants.has(parent)) && !descendants.has(pid)) {
+          descendants.add(pid)
+          discovered = true
+        }
+      }
+    }
+  }
+  captureOwned()
+  if (server.exitCode === null && server.signalCode === null) await new Promise<void>((done) => {
+    const timeout = setTimeout(() => server.kill('SIGKILL'), 5000)
+    server.once('exit', () => { clearTimeout(timeout); done() })
+    server.kill('SIGTERM')
+  })
+  captureOwned()
+  const alive = (pid: number): boolean => {
+    try {
+      const started = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {encoding:'utf8'}).trim()
+      return started === starts.get(pid)
+    } catch (error) {
+      if ((error as {status?:number}).status === 1 || (error as NodeJS.ErrnoException).code === 'ESRCH') return false
+      throw error
+    }
+  }
+  for (const pid of [...descendants].reverse()) {
+    try { if (alive(pid)) process.kill(pid, 'SIGTERM') } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+    }
+  }
+  for (let attempt = 0; [...descendants].some(alive) && attempt < 20; attempt += 1) {
+    await new Promise((done) => setTimeout(done, 100))
+  }
+  for (const pid of descendants) {
+    if (alive(pid)) process.kill(pid, 'SIGKILL')
+  }
 }
 
 export class AgentBrowser {
+  private activeRecording: string | undefined
   // A unique session per run, per the descriptor's rules — never attach to a user's profile.
   private constructor(
     private readonly bin: string,
@@ -128,7 +293,17 @@ export class AgentBrowser {
     if (!env.browser.installed) {
       throw new Error(`cezar e2e: the ${provider} provider is not installed (${env.browser.notes})`)
     }
-    return new AgentBrowser(env.browser.command, session, provider, env.browser.env ?? {})
+    const browser = new AgentBrowser(env.browser.command, session, provider, env.browser.env ?? {})
+    if (process.env.CEZ_E2E_RECORD === '1') {
+      try {
+        browser.run(['open', 'about:blank'])
+        browser.startRecording(resolve(repoRoot, '.ai/qa/artifacts_e2e', `${session}-${Date.now()}.webm`))
+      } catch (error) {
+        browser.close()
+        throw error
+      }
+    }
+    return browser
   }
 
   /** One provider invocation. `--json` on every call so results are parsed, not scraped. The
@@ -147,9 +322,15 @@ export class AgentBrowser {
         env: { ...process.env, ...this.launchEnv },
       })
     } catch (cause) {
-      throw new Error(`cezar e2e: ${this.provider} ${args.join(' ')} failed`, { cause })
+      throw new Error(`cezar e2e: ${this.provider} ${args.join(' ')} failed`, {
+        cause,
+      })
     }
-    const parsed = JSON.parse(stdout) as { success: boolean; data?: unknown; error?: unknown }
+    const parsed = JSON.parse(stdout) as {
+      success: boolean
+      data?: unknown
+      error?: unknown
+    }
     if (!parsed.success) {
       throw new Error(`cezar e2e: ${this.provider} ${args.join(' ')} → ${JSON.stringify(parsed.error)}`)
     }
@@ -285,11 +466,14 @@ export class AgentBrowser {
    *  because no e2e spec in this repository could retain video before it. Call AFTER the first
    *  `goto`, never right after `open()`: `open()` starts no browser, it only reads
    *  `.ai/qa/test-env.json` and returns this wrapper, so a `record start` issued before the first
-   *  real page load has nothing to record. */
+   *  real page load has nothing to record. CEZ_E2E_RECORD primes an empty about:blank context
+   *  before returning from open, so recording starts before the test sets viewport or navigates. */
   startRecording(path: string): void {
+    if (this.activeRecording) this.stopRecording(this.activeRecording)
     const absolute = resolve(path)
     mkdirSync(dirname(absolute), { recursive: true })
     this.run(['record', 'start', absolute])
+    this.activeRecording = absolute
   }
 
   /** operation: record (stop). Gates on a non-empty file, the same discipline `screenshot`
@@ -299,18 +483,23 @@ export class AgentBrowser {
   stopRecording(path: string): string {
     const absolute = resolve(path)
     this.run(['record', 'stop'])
+    this.activeRecording = undefined
     if (!existsSync(absolute) || statSync(absolute).size === 0) {
       throw new Error(`cezar e2e: empty or missing recording at ${absolute}`)
     }
     return absolute
   }
 
-  /** operation: close. Never throws — teardown must not mask a real failure. */
+  /** Finalize required evidence even on a failed spec, then always release its browser. */
   close(): void {
     try {
-      this.run(['close'])
-    } catch {
-      /* already closed */
+      if (this.activeRecording) this.stopRecording(this.activeRecording)
+    } finally {
+      try {
+        this.run(['close'])
+      } catch {
+        /* already closed */
+      }
     }
   }
 }

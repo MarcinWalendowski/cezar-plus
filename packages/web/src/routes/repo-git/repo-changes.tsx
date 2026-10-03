@@ -6,6 +6,7 @@ import { useRepoChanges } from '@/api/queries'
 import { CenteredState } from '@/components/centered-state'
 import { Diff, type DiffHandle, type DiffMode } from '@/components/diff'
 import { useIsDesktop } from '@/lib/use-desktop'
+import { useDiffTreeHeight } from '@/lib/use-diff-tree-height'
 
 import { ChangesTree } from '../task-git/changes-tree'
 import { DiffViewToggles } from '../task-git/diff-controls'
@@ -30,6 +31,7 @@ export function RepoChangesSection() {
   const [wrap, setWrap] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const diffRef = useRef<DiffHandle | null>(null)
+  const treeRef = useDiffTreeHeight()
 
   // A 409 is the server's answer ("not a git repository"), not an outage.
   const refused = changes.isError && changes.error instanceof ApiError && changes.error.status === 409
@@ -82,7 +84,13 @@ export function RepoChangesSection() {
         />
       ) : (
         <div className="flex min-h-0 flex-1 items-start gap-5 px-4 py-4 [--diff-sticky-top:7rem] md:px-6">
-          <aside className="sticky top-28 hidden w-60 shrink-0 md:block lg:w-72">
+          {/* Same deal as the task Changes tab: sticky AND its own scroller, so a long file list
+              never has to drag the diff to the bottom to show its last row. */}
+          <aside
+            ref={treeRef}
+            data-slot="changes-tree-pane"
+            className="sticky top-28 hidden max-h-[var(--diff-tree-height,calc(var(--cez-main-height,100dvh)_-_var(--diff-sticky-top)_-_1rem))] w-60 shrink-0 overflow-y-auto overscroll-contain md:block lg:w-72"
+          >
             <ChangesTree root={tree} selected={selected} onSelect={selectFile} />
           </aside>
           <Diff files={files} viewRef={diffRef} mode={effectiveMode} wrap={effectiveWrap} className="min-w-0 flex-1" />

@@ -25,7 +25,7 @@ const CAPABILITIES_ON: HealthResponse['capabilities'] = {
   localHandoff: true,
   followups: true,
   singleProject: false,
-  automations: false,
+  automations: false, dispatch: false,
   tokenMetrics: true,
   tokenUsageMetrics: true,
   costMetrics: true,

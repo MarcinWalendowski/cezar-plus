@@ -54,10 +54,8 @@ function expectedNavLabels(): string[] {
     'Tasks',
     ...(followupsAvailable ? ['Inbox'] : []),
     'Git',
-    ...(forgeAvailable ? ['GitHub'] : []),
-    ...(forgeAvailable && automationsAvailable ? ['Automations'] : []),
+    ...(automationsAvailable ? ['Automations'] : []),
     'Skills',
-    'Workflows',
     'Settings',
   ]
 }
@@ -112,10 +110,9 @@ describe('cockpit app shell', () => {
     expect(browser.isVisible('[data-slot="brand-tile"]')).toBe(true)
     expect(browser.text('[data-slot="sidebar"] nav')).toContain('Tasks')
 
-    // The GitHub item waits on the health answer — settle it before sampling the nav.
-    if (forgeAvailable) {
-      browser.waitForFunction(`document.querySelector('[data-slot="sidebar"] nav a[href="${scoped('/github')}"]') !== null`)
-    }
+    browser.waitForFunction(`document.querySelector('[data-slot="version-chip"]') !== null`)
+    expect(browser.count(`[data-slot="sidebar"] nav a[href="${scoped('/github')}"]`)).toBe(0)
+    expect(browser.count(`[data-slot="sidebar"] nav a[href="${scoped('/workflows')}"]`)).toBe(0)
     // Read the label without the inbox badge — a populated shared env legitimately has todos,
     // and the badge digit must not leak into the nav-label assertion.
     const labels = browser.evaluate(
@@ -129,8 +126,8 @@ describe('cockpit app shell', () => {
 
     // The "New task" CTA and its browser-usable accelerator hint. The desktop shell also
     // registers ⌘N, but browsers reserve that chord for opening a window.
-    expect(browser.text(`[data-slot="sidebar"] a[href="${scoped('/new')}"]`)).toContain('New task')
-    expect(browser.text(`[data-slot="sidebar"] a[href="${scoped('/new')}"] kbd`)).toBe('C')
+    expect(browser.text(`[data-slot="sidebar"] a[href="${scoped('/new')}?scope=auto"]`)).toContain('New task')
+    expect(browser.text(`[data-slot="sidebar"] a[href="${scoped('/new')}?scope=auto"] kbd`)).toBe('C')
 
     // The theme toggle lives in the footer.
     expect(browser.isVisible('[data-slot="sidebar-footer"] [data-slot="theme-toggle"]')).toBe(true)
@@ -363,11 +360,7 @@ describe('mobile shell', () => {
       expect(browser.isVisible(DRAWER)).toBe(true)
       expect(browser.isVisible('[data-slot="sheet-overlay"]')).toBe(true)
 
-      // The drawer nav mirrors the desktop one, including the forge-gated GitHub item — settle
-      // the health answer before sampling the labels.
-      if (forgeAvailable) {
-        browser.waitForFunction(`document.querySelector('${DRAWER} nav a[href="${scoped('/github')}"]') !== null`)
-      }
+      browser.waitForFunction(`document.querySelector('[data-slot="version-chip"]') !== null`)
 
       const box = browser.evaluate(`(() => {
         const rect = document.querySelector('${DRAWER}').getBoundingClientRect()
@@ -560,7 +553,7 @@ describe('global SSE stream', () => {
 describe('legacy cockpit retirement (R7)', () => {
   it('the React shell New task CTA stays in the SPA — the React composer, not legacy (R4 1.1)', () => {
     browser.goto(baseUrl + scoped('/'))
-    browser.click(`[data-slot="sidebar"] a[href="${scoped('/new')}"]`)
+    browser.click(`[data-slot="sidebar"] a[href="${scoped('/new')}?scope=auto"]`)
     // Client-side navigation: the React /new hero renders and no legacy markup ever loads.
     browser.waitForFunction(`document.querySelector('[data-route="new"]') !== null`)
 

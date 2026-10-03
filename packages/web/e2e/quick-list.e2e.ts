@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
 
 /**
  * The task quick-list, in a real browser, against a real cezar serving real runs.
@@ -190,16 +190,17 @@ beforeAll(async () => {
     stdio: 'ignore',
   })
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   bootProject = await bootProjectId(baseUrl)
 
   browser = AgentBrowser.open(runId)
   browser.setViewport(1440, 900)
 }, 90_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('task quick-list', () => {
@@ -230,7 +231,7 @@ describe('task quick-list', () => {
     // fixture title), then its `+128 −14` diff pair, then the PR chip.
     expect(rowsIn('Needs you')).toEqual([
       'Add skills autocomplete to composer×2',
-      'Structured changes endpoint for the git view+128 −14PR',
+      '#396Structured changes endpoint for the git view+128 −14',
     ])
     // fix-done recorded a diff on its last turn; fix-failed predates diffStat and shows none.
     expect(rowsIn('Recent')).toEqual(['README parallel-agents tagline+9 −22h', 'Bump zod to v43h'])
@@ -299,8 +300,8 @@ describe('task quick-list', () => {
     browser.click(TILE)
     browser.waitForFunction(`document.querySelector('${ROW}[data-run-id="fix-var-a"]') !== null`)
     // What actually differs between A and B — the backend and the spend.
-    expect(textOf(`${ROW}[data-run-id="fix-var-a"]`)).toBe('Aclaude · 96.2k')
-    expect(textOf(`${ROW}[data-run-id="fix-var-b"]`)).toBe('Bcodex · 41.8k')
+    expect(textOf(`${ROW}[data-run-id="fix-var-a"]`)).toBe('Aclaude')
+    expect(textOf(`${ROW}[data-run-id="fix-var-b"]`)).toBe('Bcodex')
     // Each variant is still its own deep link.
     expect(
       browser.evaluate(`document.querySelector('${ROW}[data-run-id="fix-var-b"] a').getAttribute('href')`)
@@ -385,7 +386,8 @@ describe('tasks table overview', () => {
       const pr = tr.querySelector('[data-slot="pr-chip"]')
       return { text: tr.textContent, prHref: pr.href, prTarget: pr.target }
     })()`) as { text: string; prHref: string; prTarget: string }
-    expect(reviewRow.text).toContain('128.4k')
+    expect(reviewRow.text).not.toContain('128.4k')
+    expect(browser.text('[data-slot="task-table-row"][data-run-id="fix-review-pr"] [data-slot="directional-usage"]')).toContain('— / —')
     expect(reviewRow.text).toContain('Structured changes endpoint for the git view')
     expect(reviewRow.text).not.toContain('add a structured changes endpoint plz')
     expect(reviewRow.prHref).toBe('https://github.com/open-mercato/cezar/pull/396')
@@ -493,7 +495,7 @@ describe('tasks table overview', () => {
     expect(browser.isVisible('[data-slot="new-task-fab"]')).toBe(true)
     expect(
       browser.evaluate(`document.querySelector('[data-slot="new-task-fab"]').getAttribute('href')`)
-    ).toBe(scoped('/new'))
+    ).toBe(scoped('/new') + '?scope=auto')
     // The table is the desktop framing — at phone width the cards replace it, not join it.
     expect(
       browser.evaluate(`getComputedStyle(document.querySelector('[data-slot="tasks-table"]')).display`)
@@ -608,12 +610,13 @@ describe('a row under width contention, in a column the user can widen', () => {
       { env: fixtureServeEnv(wideRoot), stdio: 'ignore' }
     )
     await waitForHealth(wideUrl)
+    await ensureFixtureReady(wideUrl)
     wideProject = await bootProjectId(wideUrl)
   }, 90_000)
 
-  afterAll(() => {
-    wideServer?.kill()
-    if (wideRoot) rmSync(wideRoot, { recursive: true, force: true })
+  afterAll(async () => {
+    await stopFixtureServer(wideServer)
+    if (wideRoot) rmSync(wideRoot, { recursive: true, force: true, maxRetries: 5 })
   })
 
   beforeEach(() => {
@@ -776,12 +779,13 @@ describe('empty quick-list', () => {
       { env: fixtureServeEnv(emptyRoot), stdio: 'ignore' }
     )
     await waitForHealth(emptyUrl)
+    await ensureFixtureReady(emptyUrl)
     emptyProject = await bootProjectId(emptyUrl)
   }, 60_000)
 
-  afterAll(() => {
-    emptyServer?.kill()
-    if (emptyRoot) rmSync(emptyRoot, { recursive: true, force: true })
+  afterAll(async () => {
+    await stopFixtureServer(emptyServer)
+    if (emptyRoot) rmSync(emptyRoot, { recursive: true, force: true, maxRetries: 5 })
   })
 
   it('shows the honest empty state — a fresh cezar has nothing to list', () => {

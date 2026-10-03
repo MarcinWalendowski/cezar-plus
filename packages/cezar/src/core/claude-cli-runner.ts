@@ -28,6 +28,8 @@ import type {
 export type { AgentSession, SessionOptions } from './agent-runner.ts';
 import { isSignalTerminationExit, stopMessage, trackChildExit } from './agent-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
+import { disclaimedCommand } from './disclaim-spawn.ts';
+import { resolveClaudeBin } from './claude-bin.ts';
 import { costWeightedTokens, type RawUsage } from './usage.ts';
 import { readNdjson } from './ndjson.ts';
 import type { UiEvent } from './ui-events.ts';
@@ -101,6 +103,23 @@ export interface ClaudeCliRunnerOptions {
 }
 
 /**
+ * The claude binary a spawn should use: an explicit override, else `CEZ_CLAUDE_BIN`, else the
+ * bundled mock under `CEZ_DRY_RUN`, else `claude` on PATH or at a known install location
+ * (`resolveClaudeBin`).
+ *
+ * Exported so model discovery (`claude-model-catalog.ts`) resolves the executable exactly the
+ * way execution does — the catalog and the runs it feeds cannot disagree about which CLI, and
+ * therefore which account and which model list, is authoritative.
+ */
+export function resolveClaudeExecutable(override?: string): string {
+  if (override) return override;
+  // CEZ_DRY_RUN=1 swaps in the bundled mock so the cockpit / store /
+  // GUI can be exercised without a logged-in claude or burning tokens.
+  if (process.env.CEZ_CLAUDE_BIN) return process.env.CEZ_CLAUDE_BIN;
+  return process.env.CEZ_DRY_RUN === '1' ? mockClaudePath() : resolveClaudeBin();
+}
+
+/**
  * `AgentRunner` over the Claude Code CLI in headless stream-json mode. Auth =
  * the host's logged-in Pro/Max subscription (no API key needed).
  *
@@ -130,12 +149,7 @@ export class ClaudeCliRunner implements AgentRunner {
   private lastSession: AgentSession | null = null;
 
   constructor(opts: ClaudeCliRunnerOptions = {}) {
-    // CEZ_DRY_RUN=1 swaps in the bundled mock so the cockpit / store /
-    // GUI can be exercised without a logged-in claude or burning tokens.
-    const defaultBin =
-      process.env.CEZ_CLAUDE_BIN ??
-      (process.env.CEZ_DRY_RUN === '1' ? mockClaudePath() : 'claude');
-    this.bin = opts.bin ?? defaultBin;
+    this.bin = resolveClaudeExecutable(opts.bin);
     this.timeoutMs = opts.timeoutMs ?? defaultIdleTimeoutMs();
   }
 
@@ -165,10 +179,9 @@ export class ClaudeCliRunner implements AgentRunner {
 
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = nodeSpawn(this.bin, args, {
-        cwd: spec.cwd,
-        env: buildChildEnv({ backend: this.backend, extraEnv: spec.env }),
-      });
+      const env = buildChildEnv({ backend: this.backend, extraEnv: spec.env });
+      const [file, argv] = disclaimedCommand(this.bin, args, env);
+      child = nodeSpawn(file, argv, { cwd: spec.cwd, env });
     } catch (err) {
       throw wrapSpawnError(err, this.bin);
     }
@@ -177,6 +190,7 @@ export class ClaudeCliRunner implements AgentRunner {
     let autoEndTimer: NodeJS.Timeout | undefined;
     let eofTermTimer: NodeJS.Timeout | undefined;
     let eofKillTimer: NodeJS.Timeout | undefined;
+    let hardKillTimer: NodeJS.Timeout | undefined;
 
     const sendMessage = (content: ContentBlock[]): boolean => {
       if (!stdinOpen) return false;
@@ -249,6 +263,14 @@ export class ClaudeCliRunner implements AgentRunner {
         }
       },
     });
+    const hardStop = (): void => {
+      interrupt();
+      if (hardKillTimer || hasExited()) return;
+      hardKillTimer = setTimeout(() => {
+        if (!hasExited()) signalChild('SIGKILL');
+      }, 1_000);
+      hardKillTimer.unref?.();
+    };
 
     // Seed the first user message — the same path every follow-up takes.
     // Pasted task screenshots (spec.images) ride along as leading blocks.
@@ -305,6 +327,7 @@ export class ClaudeCliRunner implements AgentRunner {
       } finally {
         if (deadline) clearTimeout(deadline);
         if (killTimer) clearTimeout(killTimer);
+        if (hardKillTimer) clearTimeout(hardKillTimer);
         if (autoEndTimer) clearTimeout(autoEndTimer);
         stdinOpen = false;
       }
@@ -368,6 +391,7 @@ export class ClaudeCliRunner implements AgentRunner {
       sendMessage,
       end,
       interrupt,
+      hardStop,
       pid: child.pid,
       get open() {
         return stdinOpen;
@@ -753,7 +777,7 @@ export function createClaudeConsumer(opts: ClaudeConsumerOptions): ClaudeConsume
       }
 
       if (msg.type === 'result') {
-        if (typeof msg.total_cost_usd === 'number' && msg.total_cost_usd > 0) {
+        if (typeof msg.total_cost_usd === 'number' && Number.isFinite(msg.total_cost_usd) && msg.total_cost_usd >= 0) {
           onEvent?.({ type: 'cost', usd: msg.total_cost_usd });
         }
         onEvent?.({ type: 'turn-end' });
@@ -775,6 +799,8 @@ export function encodeClaudeUserMessage(content: ContentBlock[], sessionId?: str
 }
 
 /**
+ * Build the headless argv with `--print` and `--include-partial-messages` so
+ * stream-json text deltas reach the cockpit live.
  * Build the headless argv. `--input-format stream-json` reads user messages
  * from stdin; `--output-format stream-json --verbose` gives per-event NDJSON;
  * `--permission-mode bypassPermissions` matches what cezar actually is —
@@ -798,11 +824,13 @@ export function buildClaudeArgs(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const args: string[] = [
+    '--print',
     '--input-format',
     'stream-json',
     '--output-format',
     'stream-json',
     '--verbose',
+    '--include-partial-messages',
     '--permission-mode',
     'bypassPermissions',
   ];

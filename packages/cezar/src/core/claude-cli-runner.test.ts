@@ -53,6 +53,18 @@ describe('buildClaudeArgs systemPrompt', () => {
   });
 });
 
+describe('buildClaudeArgs output mode', () => {
+  const spec = { userPrompt: 'do it', cwd: '/tmp' };
+
+  it('runs in print mode, which both stream-json formats require', () => {
+    expect(buildClaudeArgs(spec)).toContain('--print');
+  });
+
+  it('asks for partial messages so text streams as deltas', () => {
+    expect(buildClaudeArgs(spec)).toContain('--include-partial-messages');
+  });
+});
+
 /**
  * `.ai/specs/2026-08-21-run-tests-reasoning-ceiling.md`, Phase 1 — the per-step `effort` knob,
  * mirroring `--model`. No env-side mirror: the CLI does not read `CLAUDE_EFFORT` as input

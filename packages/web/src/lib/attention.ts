@@ -75,10 +75,22 @@ function isUnseen(_run: AttentionInput): boolean {
 /** What attention derivation actually reads. `Pick`ed rather than the full `RunRecord` so
  *  surfaces that only have a status — the compare view's `GroupVariant` columns — can use the
  *  same canonical function instead of inventing a second status-to-tone mapping. `activity` is
- *  optional (#490), so status-only callers keep working unchanged. `stopReason` is optional too
- *  (D27 Phase 1) — a caller whose type lacks the field entirely (`RunIndexEntry`,
- *  `WorkspaceRunSummary`) stays assignable, it just cannot distinguish a budget stop (see below). */
-export type AttentionInput = Pick<RunRecord, 'status' | 'activity' | 'autoResumeAt' | 'stopReason'>
+ *  optional (#490), so status-only callers keep working unchanged. */
+export type AttentionInput = Pick<RunRecord, 'status' | 'activity' | 'autoResumeAt' | 'stopReason' | 'dispatch' | 'costUsd'>
+
+export type BudgetStop = {
+  spent: number
+  ceiling: number
+}
+
+/** The dispatch brake is intentionally still an attention state: the user must decide whether
+ * to send a message after spending reaches the child's ceiling. This helper only explains the
+ * existing persisted brake; it does not alter the engine's stop or resume behavior. */
+export function budgetStop(run: Pick<RunRecord, 'status' | 'dispatch' | 'costUsd'>): BudgetStop | undefined {
+  const ceiling = run.dispatch?.overBudget ? run.dispatch.budgetUsd : undefined
+  if (run.status !== 'waiting' || ceiling === undefined) return undefined
+  return { spent: run.costUsd ?? 0, ceiling }
+}
 
 /**
  * `RunRecord` → attention.
@@ -118,7 +130,12 @@ export function deriveAttention(run: AttentionInput): Attention {
     return { bucket: 'error', tone: 'danger', pulse: false, label: 'failed' }
   }
   if (run.status === 'waiting') {
-    return { bucket: 'waiting', tone: 'pending', pulse: true, label: 'needs you' }
+    return {
+      bucket: 'waiting',
+      tone: 'pending',
+      pulse: true,
+      label: budgetStop(run)?.ceiling !== undefined ? 'budget reached' : 'needs you',
+    }
   }
   if (run.status === 'review' && run.stopReason === 'budget') {
     return { bucket: 'waiting', tone: 'pending', pulse: true, label: 'budget stopped' }

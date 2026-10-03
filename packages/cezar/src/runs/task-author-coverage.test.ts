@@ -1,3 +1,4 @@
+import { localCliAuthor } from './task-author.ts';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -99,7 +100,7 @@ describe('every task-creation site in src/ names an author', () => {
     // The negative control on the control: if `forwardsATypedInput` ever widened to the point of
     // accepting a plain object literal, the case above would pass while proving nothing.
     expect(forwardsATypedInput("manager.startRun(workflow, { task: 'x' })")).toBe(false);
-    expect(forwardsATypedInput('store.createRun({ title: 1, steps: [] })')).toBe(false);
+    expect(forwardsATypedInput('store.createRun({ author: localCliAuthor(), title: 1, steps: [] })')).toBe(false);
   });
 
   it('every `createTodo(` call passes an author as its third argument', () => {

@@ -10,6 +10,7 @@ import {
   isRunActive,
   lastSessionId,
   queuePosition,
+  resolveConflictsPrompt,
   resumeCommand,
   resumeHint,
   runActionFlags,
@@ -52,21 +53,21 @@ describe('runActionFlags — the visibility matrix, all 7 statuses × archived',
   // `finishedAt` — a record with no finish instant can never wear the unread marker, whatever
   // its status says. The flag's real matrix is the FINISHED one in its own describe below.
   const matrix: Array<{ status: RunStatus; expected: Omit<ReturnType<typeof runActionFlags>, 'notes'> }> = [
-    { status: 'queued', expected: { finish: false, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false, retarget: true } },
-    { status: 'running', expected: { finish: false, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false, retarget: false } },
-    { status: 'waiting', expected: { finish: true, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false, retarget: false } },
-    { status: 'review', expected: { finish: true, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
-    { status: 'done', expected: { finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
-    { status: 'failed', expected: { finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
-    { status: 'cancelled', expected: { finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
+    { status: 'queued', expected: { pin: true, finish: false, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false, retarget: true } },
+    { status: 'running', expected: { pin: true, finish: false, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false, retarget: false } },
+    { status: 'waiting', expected: { pin: true, finish: true, continueRun: false, terminal: false, archive: false, markUnread: false, cancel: true, deleteRun: false, retarget: false } },
+    { status: 'review', expected: { pin: true, finish: true, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
+    { status: 'done', expected: { pin: true, finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
+    { status: 'failed', expected: { pin: true, finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
+    { status: 'cancelled', expected: { pin: true, finish: false, continueRun: true, terminal: true, archive: true, markUnread: false, cancel: false, deleteRun: true, retarget: false } },
   ]
 
   it.each(matrix)('$status (live)', ({ status, expected }) => {
     expect(runActionFlags(run(status))).toEqual({ ...expected, notes: true })
   })
 
-  it.each(matrix)('$status (archived — same flags, only the Archive label flips)', ({ status, expected }) => {
-    expect(runActionFlags(run(status, { archived: true }))).toEqual({ ...expected, notes: true })
+  it.each(matrix)('$status (archived — same flags but the pin, and the Archive label flips)', ({ status, expected }) => {
+    expect(runActionFlags(run(status, { archived: true }))).toEqual({ ...expected, notes: true, pin: false })
   })
 
   it('cancel and delete are mutually exclusive in every cell', () => {
@@ -185,6 +186,8 @@ describe('resumeCommand — per backend, mirroring the server', () => {
     [undefined, 'claude --resume s1'], // legacy records predate the runner choice
     ['codex', 'codex resume s1'],
     ['opencode', 'opencode --session s1'],
+    ['junie', 'junie --resume --session-id=s1'],
+    ['cursor', 'agent --resume s1'],
   ] as Array<[RunRecord['runner'], string]>)('%s → %s', (runner, expected) => {
     expect(resumeCommand(runner, 's1')).toBe(expected)
   })
@@ -246,6 +249,7 @@ describe('cliTargetResumes — Open in… menu labeling (#402)', () => {
     ['claude', 'cli:claude'],
     ['codex', 'cli:codex'],
     ['opencode', 'cli:opencode'],
+    ['cursor', 'cli:cursor'],
   ] as Array<[RunRecord['runner'], string]>)('%s CLI resumes a %s run with a session', (runner, target) => {
     expect(cliTargetResumes(run('done', { runner }), target)).toBe(true)
   })
@@ -291,6 +295,21 @@ describe('finishTitle', () => {
   it('review reads as accepting, everything else as closing the session', () => {
     expect(finishTitle('review')).toBe('Accept the changes without a PR')
     expect(finishTitle('waiting')).toBe('Close the session')
+  })
+})
+
+describe('resolveConflictsPrompt', () => {
+  it('names the pull request, because a task can point at more than one', () => {
+    // The reason the number is in the words at all (#901: the PR a task opened AND the PR it is
+    // about both get chips). Told to "resolve the conflicts" with no number, the agent picks one
+    // at even odds — and half the time it is not the chip the user pressed.
+    expect(resolveConflictsPrompt(534)).toBe('Merge head branch and resolve conflicts in PR number 534')
+    expect(resolveConflictsPrompt(902)).toContain('PR number 902')
+  })
+
+  it('still reads as a sentence for a reference with no number', () => {
+    // `taskPrUrl`'s tolerance: a forge whose PR URLs do not end in a number still gets a chip.
+    expect(resolveConflictsPrompt()).toBe('Merge head branch and resolve conflicts in this pull request')
   })
 })
 

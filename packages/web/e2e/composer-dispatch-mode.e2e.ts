@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, bootProjectId, cezarCli, fixtureServeEnv } from './agent-browser'
 
 /** Browser proof for the frozen input-to-tasks plan and its global filed-task receipt. */
 const artifactId = randomUUID().slice(0, 8)
-const artifactsDir = resolve('/var/lib/cezar/e2e-artifacts', `composer-dispatch-${artifactId}`)
+const artifactsDir = resolve(import.meta.dirname, '../../../.ai/qa/artifacts_e2e', `composer-dispatch-${artifactId}`)
 const sessionId = `e2e-composer-dispatch-${process.pid}`
 const fixtureRunId = 'composer-dispatch-fixture'
 const projectA = 'fixture-a'
@@ -54,6 +54,8 @@ function initRepo(path: string, readme: string): void {
 }
 
 function writeTodos(rootA: string, rootB: string): void {
+  mkdirSync(join(rootA, '.ai', 'cezar'), { recursive: true })
+  mkdirSync(join(rootB, '.ai', 'cezar'), { recursive: true })
   const at = new Date().toISOString()
   const author = {
     kind: 'agent',
@@ -179,19 +181,20 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   bootProject = await bootProjectId(baseUrl)
   browser = AgentBrowser.open(sessionId)
   browser.setViewport(1440, 900)
 }, 180_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+  await stopFixtureServer(server)
+  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
 })
 
 describe('composer dispatch mode', () => {
-  it('links the persisted receipt to the second registered project on the global board', async () => {
+  it('links the persisted receipt to the second registered project’s filed-task detail', async () => {
     const empty = (await (await fetch(`${baseUrl}/api/v1/workspace/todos`)).json()) as {
       todos: unknown[]
       projects?: Array<{ id: string; ok?: boolean }>
@@ -205,7 +208,7 @@ describe('composer dispatch mode', () => {
       projects?: Array<{ id: string; ok?: boolean }>
     }
     writeFileSync(join(artifactsDir, 'workspace-todos-populated.json'), `${JSON.stringify(populated, null, 2)}\n`, 'utf8')
-    expect(populated.projects?.filter((project) => project.ok).map((project) => project.id).sort()).toEqual([projectA, projectB])
+    expect(populated.projects?.filter((project) => project.ok).map((project) => project.id).sort()).toEqual([bootProject, projectA, projectB].sort())
     expect(populated.todos.map((entry) => `${entry.project}:${entry.todo.id}`).sort()).toEqual([
       `${projectA}:${todoA}`,
       `${projectB}:${todoB}`,
@@ -217,20 +220,21 @@ describe('composer dispatch mode', () => {
     expect(browser.evaluate(`
       [...document.querySelectorAll('[data-slot="filed-todo-link"]')].map((link) => link.getAttribute('href'))
     `)).toEqual([
-      `/tasks?fdetail=${encodeURIComponent(`${projectA}:${todoA}`)}`,
-      `/tasks?fdetail=${encodeURIComponent(`${projectB}:${todoB}`)}`,
+      `/p/${projectA}/todos/${todoA}`,
+      `/p/${projectB}/todos/${todoB}`,
     ])
     browser.screenshot(join(artifactsDir, 'receipt-links.png'))
 
     browser.click(`[data-slot="filed-todo"][data-todo-id="${todoB}"] [data-slot="filed-todo-link"]`)
     browser.waitForFunction(
-      `location.pathname === '/tasks' && new URLSearchParams(location.search).get('fdetail') === ${JSON.stringify(`${projectB}:${todoB}`)}`,
+      `location.pathname === ${JSON.stringify(`/p/${projectB}/todos/${todoB}`)}`,
     )
     const landed = new URL(browser.url())
-    expect(landed.pathname).toBe('/tasks')
-    expect(landed.searchParams.get('fdetail')).toBe(`${projectB}:${todoB}`)
+    expect(landed.pathname).toBe(`/p/${projectB}/todos/${todoB}`)
     browser.waitForFunction(`document.querySelector('[data-slot="filed-task-detail"]') !== null`)
-    expect(browser.text('[data-slot="filed-task-id"]')).toBe(todoB)
+    browser.waitForFunction(`document.querySelector('[data-slot="filed-task-detail"] h1')?.textContent === 'Update the web project'`)
+    expect(browser.text('[data-slot="filed-task-detail"] h1')).toBe('Update the web project')
+    expect(browser.evaluate(`document.querySelector('[data-slot="filed-task-detail"] a[href="/p/${projectB}/"]')?.textContent`)).toBe(projectB)
     browser.screenshot(join(artifactsDir, 'global-detail.png'))
   }, 90_000)
 

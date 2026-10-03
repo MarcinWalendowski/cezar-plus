@@ -17,6 +17,7 @@ import {
   SlidersHorizontalIcon,
   UnplugIcon,
   UsersIcon,
+  TicketIcon,
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 
@@ -44,6 +45,7 @@ import { ResourcesSection } from './resources-section'
 import { SourcesSection } from './sources-section'
 import { TeamsSection } from './teams-section'
 import { WorktreesSection } from './worktrees-section'
+import { TrackerSection } from './tracker-section'
 
 /**
  * The Settings section registry (R6 Step 1.3, spec §"Settings"): the ONE place a section is
@@ -85,6 +87,8 @@ export type SettingsSectionId =
   | 'teams'
   | 'backup'
   | 'cluster'
+  | 'skills'
+  | 'tracker'
 
 /**
  * Who a section's value belongs to — and therefore which store it writes.
@@ -178,6 +182,14 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     description: 'Where this checkout lives, what the registry knows, and how to remove it.',
     icon: SlidersHorizontalIcon,
     component: ProjectGeneralSection,
+    appliesTo: 'per-project',
+  },
+  {
+    id: 'tracker',
+    title: 'Issue tracker',
+    description: 'Connect this project to Jira or Linear.',
+    icon: TicketIcon,
+    component: TrackerSection,
     appliesTo: 'per-project',
   },
   {

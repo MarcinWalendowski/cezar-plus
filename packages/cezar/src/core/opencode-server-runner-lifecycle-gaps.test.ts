@@ -16,6 +16,22 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
+const httpHook = vi.hoisted(() => ({
+  request: null as null | typeof import('./opencode-http.ts').opencodeRequest,
+  events: null as null | typeof import('./opencode-http.ts').openOpencodeEventStream,
+}));
+
+vi.mock('./opencode-http.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./opencode-http.ts')>();
+  return {
+    ...actual,
+    opencodeRequest: (...args: Parameters<typeof actual.opencodeRequest>) =>
+      httpHook.request ? httpHook.request(...args) : actual.opencodeRequest(...args),
+    openOpencodeEventStream: (...args: Parameters<typeof actual.openOpencodeEventStream>) =>
+      httpHook.events ? httpHook.events(...args) : actual.openOpencodeEventStream(...args),
+  };
+});
+
 function isError(e: AgentEvent): e is Extract<AgentEvent, { type: 'error' }> {
   return e.type === 'error';
 }
@@ -63,15 +79,17 @@ function fakeChild(): { child: ChildProcessWithoutNullStreams; stdout: PassThrou
 describe('OpencodeServerRunner — child.on(error) without a following exit/close', () => {
   afterEach(() => {
     spawnHook.override = null;
+    httpHook.request = null;
+    httpHook.events = null;
     vi.unstubAllGlobals();
   });
 
   it("resolves this.exited from the 'error' handler so the result promise settles instead of hanging forever", async () => {
     const { child, stdout } = fakeChild();
     spawnHook.override = () => child;
-    vi.stubGlobal('fetch', async () => {
+    httpHook.request = async () => {
       throw new Error('connect ECONNREFUSED 127.0.0.1:1234');
-    });
+    };
 
     const events: AgentEvent[] = [];
     const runner = new OpencodeServerRunner({ bin: 'opencode', timeoutMs: 60_000 });
@@ -99,8 +117,10 @@ describe('OpencodeServerRunner — child.on(error) without a following exit/clos
         message: e instanceof Error ? e.message : String(e),
       }),
     );
-    const clock = new Promise<{ hung: true }>((resolve) => setTimeout(() => resolve({ hung: true }), 2000));
+    let clockTimer: ReturnType<typeof setTimeout> | undefined;
+    const clock = new Promise<{ hung: true }>((resolve) => { clockTimer = setTimeout(() => resolve({ hung: true }), 2000); });
     const race = await Promise.race([settled, clock]);
+    clearTimeout(clockTimer);
 
     expect(race.hung).toBe(false);
     if (!race.hung) {
@@ -117,6 +137,8 @@ describe('OpencodeServerRunner — child.on(error) without a following exit/clos
 describe('OpencodeServerRunner — bootstrap teardown race', () => {
   afterEach(() => {
     spawnHook.override = null;
+    httpHook.request = null;
+    httpHook.events = null;
     vi.unstubAllGlobals();
   });
 
@@ -129,27 +151,20 @@ describe('OpencodeServerRunner — bootstrap teardown race', () => {
     const messagePosted = new Promise<void>((resolve) => {
       onMessagePosted = resolve;
     });
-    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
-      if (url.endsWith('/event')) {
-        return Promise.resolve(new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 200 }));
-      }
+    httpHook.events = async (_url, opts) => {
+      opts.signal?.addEventListener('abort', () => opts.onClose?.(), { once: true });
+      return true;
+    };
+    httpHook.request = (url, init) => {
       if (init?.method === 'POST' && url.endsWith('/session')) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ id: 'ses_race_1' }), {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          }),
-        );
+        return Promise.resolve({ status: 200, body: JSON.stringify({ id: 'ses_race_1' }) });
       }
-      // POST /session/ses_race_1/message — bootstrap()'s unguarded `await this.prompt(first)`.
-      // Never settles on its own; the test rejects it manually AFTER tearing the session down,
-      // standing in for the connection breaking once the (real) server process the fetch was
-      // talking to has actually been killed.
+      // Keep the first-turn POST pending until teardown breaks the connection.
       return new Promise((_resolve, reject) => {
         rejectMessagePost = reject;
         onMessagePosted?.();
       });
-    });
+    };
 
     const events: AgentEvent[] = [];
     const runner = new OpencodeServerRunner({ bin: 'opencode', timeoutMs: 60_000 });

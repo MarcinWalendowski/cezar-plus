@@ -20,6 +20,7 @@ import { CenteredState } from '@/components/centered-state'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { useKeyboardInsetVar } from '@/lib/keyboard-inset'
+import { budgetStop } from '@/lib/attention'
 import { isUnread } from '@/lib/read-state'
 import { displayWorkflowName, taskIssueUrl, taskPrUrl } from '@/lib/tasks-table'
 import { cn, isHttpUrl } from '@/lib/utils'
@@ -27,9 +28,11 @@ import { cn, isHttpUrl } from '@/lib/utils'
 import { AutoResumeHint } from './auto-resume-hint'
 import { RetargetHint } from './retarget-hint'
 import { RunStatusLine } from './run-status-line'
+import { useContinueAction } from './follow-up-engine'
 import { AgentsDock } from './agents-dock'
 import { PlanDock, planCounts } from './plan-dock'
-import { collectSubagents, findSubagent, subagentChildren } from './subagent-dock'
+import { SkillsDock } from './skills-dock'
+import { collectSkills, collectSubagents, findSubagent, subagentChildren } from './subagent-dock'
 import { SubagentSheet } from './subagent-sheet'
 import { ApprovalCard } from './approval-card'
 import { HandoffCard } from './handoff-card'
@@ -67,7 +70,8 @@ import {
  * Data doctrine: `useRun` is authoritative for the record; `useRunHistory` hydrates a bounded
  * visible transcript plus compact current-state context and falls back to `useRunEvents` when
  * the optimized route is unavailable. The rendered rows go through the threshold-switched scroller
- * (thread-scroller.tsx — flat + content-visibility below ~300 rows, virtua above).
+ * (thread-scroller.tsx — flat, with content-visibility where scroll anchoring is available,
+ * below ~300 rows; virtua above).
  */
 export function TaskThreadRoute() {
   const { id } = useParams<{ id: string }>()
@@ -177,9 +181,11 @@ export function ThreadView({
   onMarkedUnread?: (runId: string) => void
 }) {
   const footer = threadFooter(run.status, run.error)
+  const markedUnread = useCallback(() => onMarkedUnread?.(run.id), [onMarkedUnread, run.id])
   // The dock's data: the latest plan snapshot across turns (full replacement — an emptied
   // plan hides the dock and the header mirror alike).
   const plan = latestPlanEntries(currentThread)
+  const budget = budgetStop(run)
   const planTally = plan !== undefined && plan.length > 0 ? planCounts(plan) : undefined
   // The Agents dock's data: the current fan-out's sub-agents, or [] when there is none to
   // show (#474). Derived from the same reduced turns the thread renders — no new subscription.
@@ -192,6 +198,8 @@ export function ThreadView({
   // that has not run. Deliberately `queued` only: review/done/failed/cancelled keep the
   // existing copy and their Continue action.
   const queued = run.status === 'queued'
+  const continueAction = useContinueAction(run)
+  const continuable = !sessionOpen && !queued && continueAction.available
   const hasWaitingQuestion = run.waitingReason === 'question' && Boolean(run.waitingQuestion)
   // …and the fourth — a closed run whose last session can be reopened — lives in
   // `ThreadComposer` now, together with the provider gate and the draft: nothing outside the
@@ -209,6 +217,10 @@ export function ThreadView({
     () => collectSubagents(currentThread.turns, runIsTerminal),
     [currentThread.turns, runIsTerminal],
   )
+  // The Skills dock's data (#1202): the skills governing the run. Separate from `agents` on
+  // purpose — a skill used to be collected as a sub-agent, which reported a fan-out that never
+  // happened. Not scoped to the latest turn: a skill's instructions keep governing the run.
+  const skills = useMemo(() => collectSkills(currentThread.turns), [currentThread.turns])
   // The drill-down's whole state: which agent is open. Ephemeral by design (spec Q2/Q5) —
   // sub-agents have no stable identity outside their run, so there is nothing to persist.
   const [openAgentId, setOpenAgentId] = useState<string | undefined>(undefined)
@@ -261,12 +273,17 @@ export function ThreadView({
   const messageActions = useMemo<Readonly<Record<string, TranscriptMessageActions>> | undefined>(() => {
     if (edit === undefined) return undefined
     const actions: Record<string, TranscriptMessageActions> = {
-      task: { onEdit: edit.onEditTask, editLabel: 'Edit the prompt' },
+      // `draftSurface` (#939) is what makes an unsaved edit survive leaving the task: the bubble
+      // writes it to the run's draft store and re-opens holding it on return.
+      task: { onEdit: edit.onEditTask, editLabel: 'Edit the prompt', draftSurface: 'task-prompt' },
     }
     for (const message of run.queuedMessages ?? []) {
       actions[`queued:${message.id}`] = {
         onEdit: (text) => edit.onEditMessage(message.id, text),
         onRemove: () => edit.onRemoveMessage(message.id),
+        // Per message, so editing one and switching tasks restores THAT editor and leaves its
+        // neighbours closed and empty.
+        draftSurface: `message:${message.id}`,
       }
     }
     return actions
@@ -287,11 +304,19 @@ export function ThreadView({
 
   return (
     <div data-route="task-thread" data-run-id={run.id} className="flex min-h-full flex-col">
-      <RunHeader run={run} planTally={planTally} onMarkedUnread={() => onMarkedUnread?.(run.id)} />
+      <RunHeader
+        run={run}
+        planTally={planTally}
+        onMarkedUnread={markedUnread}
+        // The badge the user already opens to inspect runner/account/model now edits the SAME
+        // continuation choice as the dock. One hook owns both renderings, so a header pick is
+        // exactly what the next composer submission sends — no second, drifting engine state.
+        continuationEngine={continuable ? continueAction.pills : undefined}
+      />
 
       {/* Row spacing lives on each thread row (pb-2.5, both render modes measure alike);
           this gap only separates the sections — rows, empty state, footer, review panel. */}
-      <div className="mx-auto flex w-full max-w-[var(--measure)] flex-1 flex-col gap-3.5 px-4 py-5 md:px-6">
+      <div className="mx-auto flex w-full max-w-[var(--measure)] flex-1 flex-col gap-2.5 px-3 py-3 md:gap-3.5 md:px-6 md:py-5">
         {history ? (
           <HistoryBoundary
             hasOlder={history.hasOlder}
@@ -311,6 +336,7 @@ export function ThreadView({
           messageActions={messageActions}
           scrollControls={scroll}
           renderMode={mode}
+          rowModels={rows}
         />
 
         {thread.turns.length === 0 ? (
@@ -334,6 +360,7 @@ export function ThreadView({
         {run.status === 'running' ? (
           <RunStatusLine
             state={currentThread}
+            since={liveTurnStart(run, currentThread)}
             events={history?.currentEvents ?? []}
             activity={run.activity}
           />
@@ -407,7 +434,7 @@ export function ThreadView({
           publishes an inset. */}
       <div
         data-slot="thread-dock"
-        className="sticky bottom-[var(--kb,0px)] z-10 bg-background px-4 pt-1.5 pb-3 max-md:border-t max-md:border-border md:px-6 md:pb-4"
+        className="sticky bottom-[var(--kb,0px)] z-10 bg-background px-3 pt-1 pb-2 max-md:border-t max-md:border-border md:px-6 md:pt-1.5 md:pb-4"
       >
         {/* The jump pill floats over the thread, just above the dock, centered. */}
         {scroll.pillVisible ? (
@@ -415,14 +442,19 @@ export function ThreadView({
             <JumpToLatestPill onJump={scroll.jumpToLatest} />
           </div>
         ) : null}
-        <div className="mx-auto flex w-full max-w-[var(--measure)] flex-col gap-2.5">
+        <div className="mx-auto flex w-full max-w-[var(--measure)] flex-col gap-1.5 md:gap-2.5">
           {/* Agents above the plan: the fan-out is the more urgent "what is happening now",
               and it is transient — the plan outlives it. Keyed by run id like the plan dock. */}
           <AgentsDock key={`agents:${run.id}`} runId={run.id} agents={agents} onSelect={setOpenAgentId} />
 
+          {/* Below the agents: a skill is standing context for the whole run, not the volatile
+              "what is happening now" the fan-out reports (#1202). */}
+          <SkillsDock skills={skills} />
+
           {plan !== undefined && plan.length > 0 ? (
-            // Keyed by run id: the collapse default re-derives per task (see PlanDock).
-            <PlanDock key={run.id} runId={run.id} entries={plan} />
+            // Keyed by run id: the collapse default re-derives per task (see PlanDock). Settled
+            // on the same rule as the Agents dock: a closed session never advances the plan.
+            <PlanDock key={run.id} runId={run.id} entries={plan} settled={runIsTerminal} />
           ) : null}
 
           {/* A usage-limit stop is the one `failed` state that is still going somewhere — the
@@ -434,7 +466,16 @@ export function ThreadView({
               status (`runActionFlags.retarget`). */}
           <RetargetHint run={run} />
 
-          {run.status === 'waiting' ? (
+          {budget ? (
+            <div
+              data-slot="budget-hint"
+              className="flex items-center gap-2 px-1 text-xs text-muted-foreground"
+            >
+              <StatusDot tone="pending" pulse />
+              Budget reached — spent ${budget.spent.toFixed(2)} of ${budget.ceiling.toFixed(2)}; send a message to continue.
+            </div>
+          ) : run.status === 'waiting' ? (
+
             <div
               data-slot="paused-hint"
               className={cn(
@@ -480,6 +521,7 @@ export function ThreadView({
             run={run}
             sessionOpen={sessionOpen}
             queued={queued}
+            continueAction={continueAction}
             getMentionCandidates={() => threadFilePaths(thread)}
           />
         </div>
@@ -543,6 +585,16 @@ function HistoryBoundary({
       </span>
     </div>
   )
+}
+
+/** Where the Working… counter starts: the open turn's start; between turns (a turn completed but
+ *  the run is still `running` — the next step spinning up), the moment that turn closed; with no
+ *  turn at all yet, the run's own start. */
+export function liveTurnStart(run: ApiRun, thread: ThreadState): string | undefined {
+  const last = thread.turns.at(-1)
+  if (last === undefined) return run.startedAt
+  if (last.completed === undefined) return last.startedAt ?? run.startedAt
+  return last.completed.ts ?? run.startedAt
 }
 
 /** The queued run's honest empty state (legacy #351): a queued run has emitted nothing, so

@@ -11,6 +11,7 @@ describe('findPackGaps', () => {
     'scripts/mock-pi-rpc.mjs',
     'scripts/mock-codex-app-server.mjs',
     'web/cezar.svg',
+    'web/dist/icon.svg',
     'web/dist/index.html',
     'web/dist/assets/index-Ck3fQ2ab.js',
     'web/dist/assets/index-B9dL0xyz.css',

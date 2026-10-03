@@ -444,7 +444,7 @@ function AddSourceDialog({
             <select
               id="source-collection-kind"
               data-slot="source-collection-kind"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
               value={collectionKind}
               onChange={(event) => setCollectionKind(event.target.value as 'database' | 'page-tree')}
             >
@@ -468,7 +468,7 @@ function AddSourceDialog({
             <select
               id="source-mode"
               data-slot="source-mode"
-              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
               value={mode}
               onChange={(event) => setMode(event.target.value as 'mirror' | 'archived')}
             >

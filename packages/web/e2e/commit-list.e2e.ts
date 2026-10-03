@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, cezarCli, fixtureServeEnv } from './agent-browser'
 import record from './fixtures/thread-run.record.json'
 
 /**
@@ -143,6 +143,7 @@ beforeAll(async () => {
     { env: fixtureServeEnv(dataRoot), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   const commits = (await (await fetch(`${baseUrl}/api/v1/runs/${RUN_ID}/commits`)).json()) as {
     commits: Array<{ sha: string }>
   }
@@ -156,12 +157,12 @@ beforeAll(async () => {
   openCommits()
 }, 180_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
+  await stopFixtureServer(server)
   // Cleanup races the dying server (see thread-scroll.e2e.ts) — litter, not a failure.
   try {
-    if (dataRoot) rmSync(dataRoot, { recursive: true, force: true })
+    if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 5 })
   } catch {
     /* the OS reaps it */
   }

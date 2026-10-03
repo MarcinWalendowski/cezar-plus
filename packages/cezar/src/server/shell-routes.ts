@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
 import {
   ASSET_CACHE_CONTROL,
+  SHELL_CACHE_CONTROL,
   BUILD_HINT_HTML,
   assetContentType,
   isSafeAssetFilename,
@@ -75,9 +76,9 @@ export function serveCockpitShell(c: Context): Response | undefined {
       hintLogged = true;
       console.log('cezar: web/dist is missing — run `npm run build:web` to build the cockpit');
     }
-    return new Response(BUILD_HINT_HTML, { headers: { 'content-type': HTML_TYPE } });
+    return new Response(BUILD_HINT_HTML, { headers: { 'content-type': HTML_TYPE, 'cache-control': SHELL_CACHE_CONTROL } });
   }
-  return new Response(readFileSync(distIndex), { headers: { 'content-type': HTML_TYPE } });
+  return new Response(readFileSync(distIndex), { headers: { 'content-type': HTML_TYPE, 'cache-control': SHELL_CACHE_CONTROL } });
 }
 
 /**
@@ -98,6 +99,11 @@ export function cockpitAssetRoutes(): Hono {
       return new Response(readFileSync(path), {
         headers: { 'content-type': assetContentType(file), 'cache-control': ASSET_CACHE_CONTROL },
       });
+    })
+    .get('/icon.svg', (c) => {
+      const path = join(webDistDir(), 'icon.svg');
+      if (!existsSync(path)) return c.json({ error: 'not found' }, 404);
+      return new Response(readFileSync(path), { headers: { 'content-type': 'image/svg+xml' } });
     })
     .get('/cezar.svg', (c) => {
       // Served out of the Vite build: the file is a `public/` asset of the web package, which the

@@ -2,7 +2,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 
-import { readTestEnv } from './agent-browser'
+import { ensureFixtureReady, readTestEnv } from './agent-browser'
 
 /**
  * The shared test env's workspace registry — and the run-wide pin that keeps its SHAPE
@@ -97,7 +97,10 @@ export function writeSharedProjects(projects: RegistryProject[]): void {
 export function snapshotSharedHome(...names: string[]): () => void {
   const before = names.map((name) => {
     const path = sharedFile(name)
-    return { path, content: existsSync(path) ? readFileSync(path, 'utf8') : null }
+    return {
+      path,
+      content: existsSync(path) ? readFileSync(path, 'utf8') : null,
+    }
   })
   return () => {
     for (const { path, content } of before) {
@@ -122,12 +125,22 @@ export async function setup(): Promise<() => void> {
   let bootProject: string
   try {
     const { baseUrl } = readTestEnv()
-    const body = (await (await fetch(`${baseUrl}/api/v1/projects`)).json()) as { bootProject: string }
+    const body = (await (await fetch(`${baseUrl}/api/v1/projects`)).json()) as {
+      bootProject: string
+    }
     bootProject = body.bootProject
   } catch {
     return () => {}
   }
+  // Local identity is process-cached: keep this disposable home's identity valid until the
+  // shared server stops. Private specs remove theirs together with their fixture root.
   const restore = snapshotSharedHome('config.json')
-  writeSharedProjects(readSharedProjects().filter((project) => project.id === bootProject))
-  return restore
+  try {
+    await ensureFixtureReady(readTestEnv().baseUrl)
+    writeSharedProjects(readSharedProjects().filter((project) => project.id === bootProject))
+    return restore
+  } catch (error) {
+    restore()
+    throw error
+  }
 }

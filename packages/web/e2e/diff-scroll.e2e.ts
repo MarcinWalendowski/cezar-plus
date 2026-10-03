@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, stopFixtureServer, ensureFixtureReady, cezarCli, fixtureServeEnv } from './agent-browser'
+import { measureDiffTree } from './diff-tree-geometry'
 
 /**
  * Diff virtualization in a real browser (`components/diff/diff-scroll.ts` §"THE PERFORMANCE
@@ -84,6 +85,7 @@ async function waitForHealth(url: string): Promise<void> {
 function buildFixtureRepo(dir: string): void {
   const git = (args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' })
   git(['init', '-q', '-b', 'main'])
+  writeFileSync(join(dir, '.git/info/exclude'), '.cez-home/\n', 'utf8')
   git(['config', 'user.email', 'e2e@example.com'])
   git(['config', 'user.name', 'cezar e2e'])
   mkdirSync(join(dir, 'src'), { recursive: true })
@@ -130,6 +132,7 @@ beforeAll(async () => {
     { env: fixtureServeEnv(repo), stdio: 'ignore' },
   )
   await waitForHealth(baseUrl)
+  await ensureFixtureReady(baseUrl)
   changedFiles = ((await (await fetch(`${baseUrl}/api/v1/repo/changes`)).json()) as { files: unknown[] }).files.length
   expect(changedFiles).toBeGreaterThanOrEqual(FIXTURE_FILES)
 
@@ -137,13 +140,13 @@ beforeAll(async () => {
   browser.setViewport(1440, 900)
 }, 120_000)
 
-afterAll(() => {
+afterAll(async () => {
   browser?.close()
-  server?.kill()
+  await stopFixtureServer(server)
   // The server may still be flushing its own state into the fixture as it dies; a temp dir
   // that outlives the run is litter, not a failure, so cleanup never fails the suite.
   try {
-    if (repo) rmSync(repo, { recursive: true, force: true })
+    if (repo) rmSync(repo, { recursive: true, force: true, maxRetries: 5 })
   } catch {
     /* the OS reaps it */
   }
@@ -193,25 +196,42 @@ describe(`diff virtualization on a generated ${FIXTURE_FILES}-file changeset`, (
 
   it('keeps the per-file header sticky while virtualized — the layout hazard virtua poses', () => {
     openChanges('virtual')
-    browser.waitForFunction(`(() => { ${MAIN}.scrollTop = 900; return true })()`)
+    browser.waitForFunction(`(() => {
+      const main = ${MAIN}
+      const card = document.querySelector('[data-slot="diff-file"]')
+      const header = card?.querySelector('[data-slot="diff-file-header"]')
+      if (!card || !header) return false
+      const fold = main.getBoundingClientRect().top + parseFloat(getComputedStyle(header.closest('header')).top)
+      const box = card.getBoundingClientRect()
+      main.scrollTop += box.top - fold + Math.min(80, box.height / 2)
+      return true
+    })()`)
+    browser.waitForFunction(`(() => {
+      const fold = ${MAIN}.getBoundingClientRect().top + parseFloat(getComputedStyle(document.querySelector('[data-slot="diff-file-header"]').closest('header')).top)
+      return [...document.querySelectorAll('[data-slot="diff-file"]')].some((card) => card.getBoundingClientRect().top < fold && card.getBoundingClientRect().bottom > fold + 40)
+    })()`)
+
 
     // A header whose card still covers the viewport top must be pinned AT that top edge, not
     // scrolled away with its card. virtua absolutely-positions every item, which is exactly
     // the layout that could silently kill `position: sticky`.
     const pinned = browser.evaluate(`(() => {
       const scroller = ${MAIN}
-      const top = scroller.getBoundingClientRect().top
+      const mainTop = scroller.getBoundingClientRect().top
+      const top = mainTop + parseFloat(getComputedStyle(document.querySelector('[data-slot="diff-file-header"]').closest('header')).top)
       for (const card of document.querySelectorAll('[data-slot="diff-file"]')) {
         const box = card.getBoundingClientRect()
         const header = card.querySelector('[data-slot="diff-file-header"]')
         if (!header) continue
         if (box.top < top && box.bottom > top + 40) {
-          return { straddling: true, headerTop: Math.round(header.getBoundingClientRect().top - top), cardTop: Math.round(box.top - top) }
+          return { straddling: true, mainTop, fold: top, headerTop: Math.round(header.getBoundingClientRect().top - top), cardTop: Math.round(box.top - top) }
         }
       }
-      return { straddling: false }
+      return { straddling: false, mainTop, fold: top, scrollTop: scroller.scrollTop, cards: [...document.querySelectorAll('[data-slot="diff-file"]')].map((card) => ({top: card.getBoundingClientRect().top, bottom:card.getBoundingClientRect().bottom})) }
     })()`) as { straddling: boolean; headerTop?: number; cardTop?: number }
 
+    writeFileSync(join(artifactsDir, 'diff-sticky-geometry.json'), JSON.stringify(pinned, null, 2))
+    browser.screenshot(`${artifactsDir}/diff-sticky-geometry.png`, {viewport:true})
     expect(pinned.straddling, 'no card straddled the fold — the sticky check did not run').toBe(true)
     // Sticky means the header sits at the scrollport top even though its card began above it.
     // Without sticky it would ride at `cardTop`, which is negative here.
@@ -240,5 +260,38 @@ describe(`diff virtualization on a generated ${FIXTURE_FILES}-file changeset`, (
     expect(gap, 'no diff cards mounted at all').not.toBeNull()
     // The topmost mounted card starts at or above the fold — no uncovered band.
     expect(gap!).toBeLessThanOrEqual(0)
+  }, 120_000)
+
+  /**
+   * The file tree is its OWN scroller, not a passenger on the page's. This fixture is the only
+   * place with a tree taller than the viewport (120+ files), which is exactly the shape that was
+   * broken: the pane was `sticky` but unbounded, so it grew the page instead of scrolling, and
+   * the last file could only be reached by dragging `main` — the diff — to the bottom.
+   */
+  it('scrolls the file tree independently of the diff', () => {
+    openChanges('virtual')
+
+    browser.evaluate(`document.querySelector('[data-slot="main"]').scrollTop = 0`)
+    const natural = measureDiffTree(browser)
+    browser.screenshot(`${artifactsDir}/diff-tree-natural.png`, {viewport:true})
+    browser.evaluate(`document.querySelector('[data-slot="main"]').scrollTop = 1200`)
+    const sticky = measureDiffTree(browser)
+    browser.screenshot(`${artifactsDir}/diff-tree-sticky.png`, {viewport:true})
+    browser.setViewport(1440, 640)
+    const resized = measureDiffTree(browser)
+    browser.screenshot(`${artifactsDir}/diff-tree-resized.png`, {viewport:true})
+    const states = {natural,sticky,resized}
+    writeFileSync(join(artifactsDir, 'diff-tree-geometry.json'), JSON.stringify(states,null,2))
+    browser.setViewport(1440, 900)
+    for (const [state, geometry] of Object.entries(states)) {
+      expect(geometry.rows, state).toBeGreaterThan(FIXTURE_FILES / 2)
+      expect(geometry.overflow, `${state}: the tree is unbounded`).toBeGreaterThan(0)
+      expect(geometry.paneBottom, `${state}: the tree hangs below main`).toBeLessThanOrEqual(geometry.mainBottom)
+      expect(geometry.treeTop, state).toBe(geometry.treeMax)
+      expect(geometry.mainAfter, `${state}: scrolling the tree moved main`).toBe(geometry.mainTop)
+      expect(geometry.lastTop, `${state}: last file above pane`).toBeGreaterThanOrEqual(geometry.paneTop - 1)
+      expect(geometry.lastBottom, `${state}: last file below pane`).toBeLessThanOrEqual(geometry.paneBottom + 1)
+    }
+
   }, 120_000)
 })

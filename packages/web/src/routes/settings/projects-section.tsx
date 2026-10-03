@@ -5,6 +5,7 @@ import { useMemo, useRef, useState } from 'react'
 import { putWorkspaceConfig } from '@/api/client'
 import {
   useProjects,
+  useRegisterProject,
   useUpdateProject,
   useWorkspaceConfig,
   workspaceQueryKeys,
@@ -17,6 +18,7 @@ import {
   type WorkspaceConfigResponse,
 } from '@loki-labs/cezar-plus-api-client'
 import { CenteredState } from '@/components/centered-state'
+import { IntegerStepper } from '@/components/integer-stepper'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { toast } from '@/components/ui/toaster'
@@ -360,7 +362,7 @@ function RegistryTable({
   return (
     <SettingsField
       title="Registered projects"
-      hint={`Every folder cezar-plus has run in, plus the ones added from the GUI. “Tags” group connected repositories — give the API, the web app and the design system a shared “storefront” tag and the global Tasks page can show all three as one piece of work. “Max parallel” caps how many of that project's tasks run at once; the workspace limit (${workspaceMax}) still applies as an overall ceiling, so a per-project value above it has no extra effect until the workspace limit is raised. Removing a project only unregisters it — no files on disk are deleted.`}
+      hint={`The folders you have added. While this list is empty the folder cezar-plus is serving is listed as “not registered” with an Add button; once you have projects, starting cezar somewhere new neither registers nor lists that folder — use “Add project” when you want to keep it. “Tags” group connected repositories — give the API, the web app and the design system a shared “storefront” tag and the global Tasks page can show all three as one piece of work. “Max parallel” caps how many of that project's tasks run at once (leave it empty to inherit the workspace limit); the workspace limit (${workspaceMax}) still applies as an overall ceiling, so a per-project value above it has no extra effect until the workspace limit is raised. Removing a project only unregisters it — no files on disk are deleted.`}
     >
       {teamOptions.length > 0 ? (
         <div className="mb-2 flex items-center gap-2">
@@ -391,7 +393,10 @@ function RegistryTable({
       ) : (
         <div className="overflow-x-auto rounded-md border border-border">
           <table className="w-full border-collapse text-sm">
-            <caption className="sr-only">Projects registered in this workspace</caption>
+            {/* Not "registered": this table also renders the folder cezar is serving without
+                having saved it, whose only action is Add project. A screen-reader user was told
+                the list was registered projects and then met a row that is the opposite. */}
+            <caption className="sr-only">Projects in this workspace</caption>
             {/* Explicit widths rather than letting the browser distribute them by content: Tags
                 is the one cell whose content GROWS with use, and auto-layout kept giving it
                 whatever the fixed-size controls left over — which was not enough for one chip. */}
@@ -478,7 +483,13 @@ function ProjectRow({
         >
           {STATUS_LABEL[project.status]}
         </span>
-        {project.status !== 'missing' ? (
+        {project.unregistered ? (
+          // Where `source` (how it got into the registry) would go — it is not in the registry,
+          // and this is the row's whole story, so it says that instead.
+          <span data-slot="project-unregistered" className="ml-1 text-[11px] text-soft-foreground">
+            · not registered
+          </span>
+        ) : project.status !== 'missing' ? (
           <span className="ml-1 text-[11px] text-soft-foreground">· {project.source}</span>
         ) : null}
         {teamOf(project) ? (
@@ -488,36 +499,53 @@ function ProjectRow({
         ) : null}
       </td>
       <td className="px-3 py-2">
-        <ProjectTagsEditor project={project} vocabulary={vocabulary} />
+        {/* Every registry edit is meaningless for a folder that has no registry row: tags and
+            the per-project cap are stored ON the entry, and Remove would 404. The Add button in
+            the Actions cell is the only thing this row can honestly offer. */}
+        {project.unregistered ? (
+          <span className="text-[12px] text-soft-foreground">—</span>
+        ) : (
+          <ProjectTagsEditor project={project} vocabulary={vocabulary} />
+        )}
       </td>
       <td className="px-3 py-2">
-        <MaxParallelSelect project={project} workspaceMax={workspaceMax} />
+        {project.unregistered ? (
+          <span className="text-[12px] text-soft-foreground">—</span>
+        ) : (
+          <MaxParallelStepper project={project} workspaceMax={workspaceMax} />
+        )}
+      </td>
+      <td className="px-3 py-2 tabular-nums text-soft-foreground">
+        {project.unregistered ? '—' : shortDate(project.addedAt)}
       </td>
       {teamOptions ? (
         <td className="px-3 py-2">
           <TeamPicker project={project} teamOptions={teamOptions} />
         </td>
       ) : null}
-      <td className="px-3 py-2 tabular-nums text-soft-foreground">{shortDate(project.addedAt)}</td>
       <td className="px-3 py-2 text-right">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          data-action="project-remove"
-          // Names the gesture precisely for a screen reader, where the row context that makes a
-          // bare "Remove" safe-sounding isn't read out with it — but LEADS with the button's own
-          // word, so the accessible name contains the visible one (WCAG 2.5.3 Label in Name) and
-          // speech input still reaches the control. Same shape as the General page's button.
-          aria-label={`Remove ${project.name} from the workspace — unregisters it, no files are deleted`}
-          // The boot project is refused server-side too (it re-registers itself at every start);
-          // disabling here means the user gets the explanation before the click, not after.
-          title={isBoot ? 'cezar-plus is serving this project — it re-registers itself at every start' : undefined}
-          disabled={disabled || isBoot}
-          onClick={onRemove}
-        >
-          Remove
-        </Button>
+        {project.unregistered ? (
+          <AddBootProjectButton root={project.root} name={project.name} disabled={disabled} />
+        ) : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            data-action="project-remove"
+            // Names the gesture precisely for a screen reader, where the row context that makes a
+            // bare "Remove" safe-sounding isn't read out with it — but LEADS with the button's own
+            // word, so the accessible name contains the visible one (WCAG 2.5.3 Label in Name) and
+            // speech input still reaches the control. Same shape as the General page's button.
+            aria-label={`Remove ${project.name} from the workspace — unregisters it, no files are deleted`}
+            // The boot project is refused server-side too (this server runs out of it);
+            // disabling here means the user gets the explanation before the click, not after.
+            title={isBoot ? 'cezar is serving this project — stop it and use `cezar projects remove`' : undefined}
+            disabled={disabled || isBoot}
+            onClick={onRemove}
+          >
+            Remove
+          </Button>
+        )}
       </td>
     </tr>
   )
@@ -598,6 +626,47 @@ function TeamPicker({
         </option>
       ))}
     </select>
+  )
+}
+
+/**
+ * The one gesture an unregistered boot row can offer: save the folder cezar is currently serving.
+ * It goes through the ordinary `POST /api/v1/projects` — same guards, same 409 on a folder
+ * already registered — so a root the server refuses (`$HOME`, a task worktree, which can also be
+ * boot roots) answers with its own explanation and this button surfaces it verbatim rather than
+ * pre-judging which folders qualify.
+ *
+ * Exported for the project's own General page, which faces the same row and must not invent a
+ * second way to say this — the same reason `MaxParallelStepper` and `STATUS_LABEL` are shared.
+ */
+export function AddBootProjectButton({
+  root,
+  name,
+  disabled = false,
+}: {
+  root: string
+  name: string
+  disabled?: boolean
+}) {
+  const register = useRegisterProject()
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      data-action="project-add-boot"
+      aria-label={`Add ${name} to your projects`}
+      title="cezar is serving this folder — save it to your projects"
+      disabled={disabled || register.isPending}
+      onClick={() =>
+        register.mutate({ root }, {
+          onSuccess: () => toast(`${name} added to your projects`),
+          onError: (error: Error) => toast(error.message, { tone: 'danger' }),
+        })
+      }
+    >
+      Add project
+    </Button>
   )
 }
 
@@ -847,15 +916,16 @@ export function ProjectTagsEditor({
 }
 
 /**
- * Per-project "Max parallel tasks" selector (spec 2026-07-22). `Inherit
- * workspace (N)` is the unset default; `1..16` pins a per-project ceiling.
- * Bound directly to the server value (`project.maxParallel`) and saved on
- * change, mirroring the workspace `Max parallel` control (resources-section.tsx)
- * — a failed save reverts because the value never leaves the server's, and the
- * hook invalidates the projects query so a success re-renders the row. The
- * workspace cap still clamps at runtime, which the section hint explains.
+ * Per-project "Max parallel tasks" stepper (spec 2026-07-22). An empty field is
+ * the unset default — it inherits the workspace limit, which the placeholder
+ * names; `1..16` pins a per-project ceiling. Bound to the server value
+ * (`project.maxParallel`) and saved on commit, mirroring the workspace
+ * `Max parallel` control (resources-section.tsx) — a failed save reverts to the
+ * server's value, and the hook invalidates the projects query so a success
+ * re-renders the row. The workspace cap still clamps at runtime, which the
+ * section hint explains.
  */
-export function MaxParallelSelect({
+export function MaxParallelStepper({
   project,
   workspaceMax,
 }: {
@@ -863,18 +933,19 @@ export function MaxParallelSelect({
   workspaceMax: number
 }) {
   const update = useUpdateProject()
-  // `''` is the inherit sentinel; a number is an explicit per-project ceiling.
-  const value = project.maxParallel === undefined ? '' : String(project.maxParallel)
   return (
-    <select
+    <IntegerStepper
       aria-label={`Max parallel tasks for ${project.name}`}
       data-slot="project-max-parallel"
-      value={value}
-      disabled={update.isPending}
-      onChange={(event) => {
-        const raw = event.target.value
-        const next = raw === '' ? null : Number(raw)
-        update.mutate(
+      value={project.maxParallel ?? null}
+      min={MAX_PARALLEL_MIN}
+      max={MAX_PARALLEL_MAX}
+      allowEmpty
+      emptyStepFrom={Math.min(MAX_PARALLEL_MAX, Math.max(MAX_PARALLEL_MIN, workspaceMax))}
+      placeholder={`Inherit (${workspaceMax})`}
+      className="w-40"
+      onCommit={(next) =>
+        update.mutateAsync(
           { id: project.id, maxParallel: next },
           {
             onSuccess: () =>
@@ -886,18 +957,7 @@ export function MaxParallelSelect({
             onError: (error: Error) => toast(error.message, { tone: 'danger' }),
           },
         )
-      }}
-      className="block w-44 rounded-md border border-input bg-card px-2 py-1.5 text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50"
-    >
-      <option value="">Inherit workspace ({workspaceMax})</option>
-      {Array.from(
-        { length: MAX_PARALLEL_MAX - MAX_PARALLEL_MIN + 1 },
-        (_, i) => i + MAX_PARALLEL_MIN,
-      ).map((n) => (
-        <option key={n} value={n}>
-          {n}
-        </option>
-      ))}
-    </select>
+      }
+    />
   )
 }

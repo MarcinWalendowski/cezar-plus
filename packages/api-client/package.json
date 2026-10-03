@@ -1,6 +1,6 @@
 {
   "name": "@loki-labs/cezar-plus-api-client",
-  "version": "0.10.0",
+  "version": "0.14.0",
   "description": "Typed client and shared contract types for the cezar cockpit HTTP API.",
   "license": "MIT",
   "private": true,
@@ -21,7 +21,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
-    "@loki-labs/cezar-plus-contract": "^0.10.0",
+    "@loki-labs/cezar-plus-contract": "^0.14.0",
     "hono": "^4.6.0"
   },
   "devDependencies": {

@@ -89,7 +89,7 @@ const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
 const connectedProviders = (backends: readonly string[]): ProviderStatusResponse => ({
-  providers: (['claude', 'codex', 'opencode'] as const).map((provider) => ({
+  providers: (['claude', 'codex', 'opencode', 'cursor'] as const).map((provider) => ({
     provider,
     status: backends.includes(provider) ? 'connected' as const : 'not-installed' as const,
     enabled: true,
@@ -101,7 +101,8 @@ const PROVIDERS_NONE: ProviderStatusResponse = {
     { provider: 'claude', status: 'disconnected', enabled: true },
     { provider: 'codex', status: 'unknown', enabled: true },
     { provider: 'opencode', status: 'not-installed', enabled: true },
-  ],
+    { provider: 'cursor', status: 'disconnected', enabled: true },
+        ],
 }
 
 /** Fetch stub in the house style (github.test.tsx): records requests, serves the fixtures,
@@ -141,6 +142,8 @@ function stubFetch(
       }
       if (method === 'GET' && path === '/api/v1/providers/status') return jsonResponse(providers)
       if (method === 'GET' && path === '/api/v1/models?runner=codex') return jsonResponse({ runner: 'codex', models: [{ id: 'gpt-future', label: 'gpt-future', description: 'Newest' }], source: 'live', stale: false })
+      if (method === 'GET' && path === '/api/v1/models?runner=claude') return jsonResponse({ runner: 'claude', models: [{ id: 'opus', label: 'opus', description: 'Opus 5' }, { id: 'sonnet', label: 'sonnet', description: 'Sonnet 5' }], source: 'live', stale: false })
+      if (path === '/api/v1/models?runner=cursor') return jsonResponse({ runner: 'cursor', models: [{ id: 'composer-2.5', label: 'Composer 2.5', description: '' }], source: 'live', stale: false })
       if (method === 'GET' && path === '/api/v1/config') {
         return jsonResponse({ defaultRunner: backends[0] ?? 'claude', defaultModels })
       }
@@ -639,6 +642,7 @@ describe('Run — backend selection (#401)', () => {
           { provider: 'claude', status: 'disconnected', enabled: true },
           { provider: 'codex', status: 'connected', enabled: true },
           { provider: 'opencode', status: 'not-installed', enabled: true },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     )
@@ -668,6 +672,7 @@ describe('Run — backend selection (#401)', () => {
           { provider: 'claude', status: 'connected', enabled: false },
           { provider: 'codex', status: 'connected', enabled: true },
           { provider: 'opencode', status: 'not-installed', enabled: true },
+          { provider: 'cursor', status: 'not-installed', enabled: true },
         ],
       },
     )
