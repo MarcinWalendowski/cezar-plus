@@ -1140,13 +1140,21 @@ describe('RunManager.continueRun override', () => {
     expect(store.getRun(id)?.agentProfile).toBe('klaudiusz');
   });
 
-  it('a runner switch drops the previous agent account instead of carrying it over', async () => {
+  it('a runner switch persists the target default account and starts a fresh provider session', async () => {
     // An account belongs to ONE agent: a claude login says nothing about which codex account
     // should run, and leaving it on the record would re-apply it if a later Continue switched back.
     const id = resumableRun();
     store.updateRun(id, { agentProfile: 'klaudiusz' });
+    store.updateStep(id, 's1', { backend: 'claude', profileId: 'klaudiusz' });
+    const calls: unknown[][] = [];
+    (manager as unknown as { runContinuation: (...args: unknown[]) => Promise<void> }).runContinuation = async (...args) => {
+      calls.push(args);
+    };
     await expect(manager.continueRun(id, { runner: 'codex' })).resolves.toEqual({ ok: true });
-    expect(store.getRun(id)?.agentProfile).toBeUndefined();
+    expect(store.getRun(id)).toMatchObject({ runner: 'codex', agentProfile: 'default' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[3]).toBeUndefined();
+    expect(calls[0]?.[4]).toBe('codex');
   });
 
   it('keeps the account when the continuation stays on the same agent', async () => {

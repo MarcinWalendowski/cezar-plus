@@ -1027,6 +1027,15 @@ Every module is meant to be read in one sitting.
 
 **MIT** © Patryk Lewczuk — full text in [LICENSE](LICENSE).
 
+## Provider-scoped local accounts
+
+Claude and Codex may use the same local profile name. Cezar keeps these as separate
+accounts and records the provider and account that execute each task. Scripts managing
+accounts can use qualified route IDs such as `claude:pb` and `codex:pb`; unique legacy
+bare IDs and `default:provider` remain valid. An ambiguous bare ID returns 409 so it
+cannot select the other provider. Stored profile IDs, composer selections and usage
+response IDs retain their existing values.
+
 ## Upstream 0.14 integration
 
 The workspace Dashboard now includes live summaries, usage and cost, delivery, failure,

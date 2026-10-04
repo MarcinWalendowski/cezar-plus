@@ -109,6 +109,24 @@ describe('agent account usage route', () => {
   });
 
   describe('rows', () => {
+    it('preserves legacy wire IDs for equal-ID accounts while keeping quota and identity isolated', async () => {
+      writeFileSync(agentAccountsPath(), JSON.stringify({ accounts: [
+        { id: 'pb', provider: 'claude', configDir: '/tmp/claude-pb', label: 'Claude PB' },
+        { id: 'pb', provider: 'codex', configDir: '/tmp/codex-pb', label: 'Codex PB' },
+      ] }));
+      const body = await getAfterProbe({ env: ON, ...silentProbes,
+        probeIdentity: async () => ({ loggedIn: true, email: 'claude@example.test' }),
+        probeUsage: async () => ({ takenAt: new Date().toISOString(), windows: [{ usedPercent: 12, label: 'week' }] }),
+        probeQuota: async () => ({ takenAt: new Date().toISOString(), windows: [{ usedPercent: 74, label: 'week' }] }),
+      });
+      const claude = body.accounts.find((row) => row.provider === 'claude' && !row.isDefault);
+      const codex = body.accounts.find((row) => row.provider === 'codex' && !row.isDefault);
+      expect(claude).toMatchObject({ id: 'pb', email: 'claude@example.test', quota: { windows: [{ usedPercent: 12 }] } });
+      expect(codex).toMatchObject({ id: 'pb', quota: { windows: [{ usedPercent: 74 }] } });
+      expect(codex).not.toHaveProperty('email');
+      expect(body.accounts.filter((row) => row.isDefault).map((row) => row.id)).toEqual(['default:claude', 'default:codex']);
+    });
+
     it('lists every profile-capable account, discovered defaults included', async () => {
       writeAccounts();
       const body = await get({ env: ON, ...silentProbes });

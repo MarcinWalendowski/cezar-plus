@@ -1085,14 +1085,16 @@ function AgentBadge({ run, continuationEngine }: { run: ApiRun; continuationEngi
   // absent whenever the run just followed the project, and the project's selection can have been
   // changed since — both would name an account this run may never have touched. The last step that
   // recorded one is what ran; `sessionId` and `profileId` are a pair for exactly this reason.
-  const accountId = [...run.steps].reverse().find((step) => step.profileId)?.profileId
+  const accountStep = [...run.steps].reverse().find((step) => step.profileId)
+  const accountId = accountStep?.profileId
+  const accountProvider = accountStep?.backend ?? runner
   const account = accountId === undefined
     ? undefined
     : accountId === DEFAULT_AGENT_ACCOUNT_ID
       ? 'default'
       // A deleted account still names the folder this run's sessions live in, so the id is shown
       // rather than swallowed — "gone" is the useful half of that answer.
-      : profiles.data?.profiles.find((p) => p.id === accountId)?.label ?? `${accountId} (removed)`
+      : profiles.data?.profiles.find((p) => p.provider === accountProvider && p.id === accountId)?.label ?? `${accountId} (removed)`
   // The canonical `provider/model` the run actually resolved to (#405), shown only when it says
   // something `model` does not (#546). `model` is the free-text the caller ASKED for — `opus`,
   // `auto`, a gateway id — so on a repo whose Claude runner points at a custom endpoint the two

@@ -8,6 +8,8 @@ import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { createApp } from './server.ts';
+import { ProviderAuthService } from '../core/provider-auth.ts';
+import { defaultWorkspaceConfig } from '../workspace/config.ts';
 import { localCliAuthor } from '../runs/task-author.ts';
 
 /**
@@ -54,7 +56,14 @@ describe('POST /api/v1/runs/:id/continue override', () => {
         return { ok: true };
       },
     } as unknown as RunManager;
-    app = createApp({ repoRoot, store, manager, version: '0.0.0-test' });
+    app = createApp({ repoRoot, store, manager, version: '0.0.0-test',
+      providerAuth: new ProviderAuthService({ platform: 'linux', probeJunie: async () => ({ connected: true }),
+        runCommand: async (executable) => ({
+          stdout: executable.includes('claude') ? '{"loggedIn":true}' : executable.includes('codex') ? 'Logged in using ChatGPT' : '└  1 credential',
+          stderr: '', exitCode: 0,
+        }),
+      }),
+    });
   });
 
   afterEach(() => {
@@ -196,6 +205,81 @@ describe('POST /api/v1/runs/:id/continue override', () => {
     const res = await post({ runner: 'codex', agentProfile: 'klaudiusz' });
     expect(res.status).toBe(400);
     expect(captured).toBeUndefined();
+  });
+
+  const configureAccountGate = async (oldConnected: boolean, selectedConnected: boolean) => {
+    delete process.env.CEZ_DRY_RUN;
+    writeFileSync(agentAccountsPath(), JSON.stringify({ accounts: [
+      { id: 'old', provider: 'claude', configDir: join(home, 'old'), label: 'Old' },
+      { id: 'selected', provider: 'claude', configDir: join(home, 'selected'), label: 'Selected' },
+      { id: 'selected', provider: 'codex', configDir: join(home, 'codex-selected'), label: 'Codex selected' },
+    ], selections: { [repoRoot]: { codex: 'selected' } } }));
+    const run = store.createRun({ author: localCliAuthor(), title: 'Account gate', workflow: 'quick-task', task: 'task', runner: 'claude', agentProfile: 'old',
+      steps: [{ id: 'task', name: 'Task', kind: 'agent' }],
+    });
+    runId = run.id;
+    store.updateRun(runId, { status: 'done' });
+    store.updateStep(runId, 'task', { status: 'done', backend: 'claude', profileId: 'old', sessionId: 'session-old' });
+    const config = defaultWorkspaceConfig();
+    config.resources.fallbackAcrossAccountsWhenLimited = false;
+    const auth = new ProviderAuthService({ platform: 'linux', probeJunie: async () => ({ connected: true }),
+      runCommand: async (executable, _args, _timeout, env) => {
+        if (executable.includes('claude')) {
+          const connected = env?.CLAUDE_CONFIG_DIR === join(home, 'selected') ? selectedConnected : oldConnected;
+          return { stdout: JSON.stringify({ loggedIn: connected }), stderr: '', exitCode: connected ? 0 : 1 };
+        }
+        return { stdout: executable.includes('codex') ? 'Logged in using ChatGPT' : '└  1 credential', stderr: '', exitCode: 0 };
+      },
+    });
+    await auth.status();
+    await auth.profileStatus('claude', { id: 'old', configDir: join(home, 'old') });
+    await auth.profileStatus('claude', { id: 'selected', configDir: join(home, 'selected') });
+    await auth.profileStatus('codex', { id: 'selected', configDir: join(home, 'codex-selected') });
+    app = createApp({ repoRoot, store, version: 'test', providerAuth: auth,
+      workspaceConfig: { load: async () => config, mergeWrite: async (mutator) => mutator(config) ?? config },
+      manager: { continueRun: (id: string, opts: ContinueOpts) => { captured = { id, opts }; return { ok: true }; } } as unknown as RunManager,
+    });
+  };
+
+  it('gates the selected account rather than the disconnected old session account', async () => {
+    await configureAccountGate(false, true);
+    expect((await post({ agentProfile: 'selected' })).status).toBe(200);
+    expect(captured?.opts.agentProfile).toBe('selected');
+  });
+
+  it('refuses a disconnected selected account despite a connected old session and leaves the run unchanged', async () => {
+    await configureAccountGate(true, false);
+    const before = JSON.stringify(store.getRun(runId));
+    expect((await post({ agentProfile: 'selected' })).status).toBe(409);
+    expect(captured).toBeUndefined();
+    expect(JSON.stringify(store.getRun(runId))).toBe(before);
+  });
+
+  it('uses the target provider selection when switching providers without an explicit account', async () => {
+    await configureAccountGate(false, false);
+    expect((await post({ runner: 'codex' })).status).toBe(200);
+    expect(captured?.opts.runner).toBe('codex');
+  });
+
+  it('validates an unknown explicit account before an unavailable old account gate', async () => {
+    await configureAccountGate(false, false);
+    expect((await post({ agentProfile: 'missing' })).status).toBe(400);
+    expect(captured).toBeUndefined();
+  });
+
+  it('accepts supported pools only when balancing is enabled', async () => {
+    const saved = process.env.CEZ_ACCOUNT_USAGE;
+    try {
+      delete process.env.CEZ_ACCOUNT_USAGE;
+      expect((await post({ agentProfile: 'pool:claude' })).status).toBe(409);
+      expect(captured).toBeUndefined();
+      process.env.CEZ_ACCOUNT_USAGE = '1';
+      expect((await post({ agentProfile: 'pool:claude' })).status).toBe(200);
+      expect(captured?.opts.agentProfile).toBe('pool:claude');
+    } finally {
+      if (saved === undefined) delete process.env.CEZ_ACCOUNT_USAGE;
+      else process.env.CEZ_ACCOUNT_USAGE = saved;
+    }
   });
 
   it('404s for an unknown run before validating the body', async () => {

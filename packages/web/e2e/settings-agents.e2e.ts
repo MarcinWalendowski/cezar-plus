@@ -84,6 +84,16 @@ const gotoAgents = () => {
   browser.waitForFunction(`document.querySelector('[data-slot="agents-section"]') !== null`)
 }
 
+function waitForRunnerReady(target: string, expectedRunner: string): void {
+  // Config paints the section before the independent provider/account queries enable its radios.
+  browser.waitForFunction(`(() => {
+    const radios = [...document.querySelectorAll('[data-slot="agents-runner"] [role="radio"]')]
+    const target = radios.find((radio) => radio.dataset.value === ${JSON.stringify(target)})
+    return target?.disabled === false && radios.some((radio) =>
+      radio.dataset.value === ${JSON.stringify(expectedRunner)} && radio.getAttribute('aria-checked') === 'true')
+  })()`)
+}
+
 describe('settings → agents against the live dry-run server', () => {
   it('renders every knob, agent-agnostically named', () => {
     gotoAgents()
@@ -102,6 +112,8 @@ describe('settings → agents against the live dry-run server', () => {
 
   it('default runner: click writes config.json and GET /api/v1/config reads it back', async () => {
     gotoAgents()
+    const before = await waitForConfig(() => true)
+    waitForRunnerReady('codex', before.defaultRunner)
     browser.click('[data-slot="agents-runner"] [data-value="codex"]')
     await waitForConfig((c) => c.defaultRunner === 'codex')
     // The saved API value can arrive before the query invalidation updates the controlled UI.
@@ -175,6 +187,7 @@ describe('settings → agents against the live dry-run server', () => {
     browser.screenshot(`${artifactsDir}/settings-agents.png`)
 
     // Neutralize for the suites that follow (afterAll restores the file itself too).
+    waitForRunnerReady('claude', 'codex')
     browser.click('[data-slot="agents-runner"] [data-value="claude"]')
     await waitForConfig((c) => c.defaultRunner === 'claude')
   })

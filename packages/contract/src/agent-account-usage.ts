@@ -68,7 +68,8 @@ export const accountQuotaSchema = z.object({
 export type AccountQuota = z.infer<typeof accountQuotaSchema>;
 
 export const accountUsageRowSchema = z.object({
-  /** `agentAccountRouteId()`'s encoding — `default:<provider>` or the stored slug. */
+  /** Released wire ID: `default:<provider>` or the bare stored slug. Pair it with `provider`
+   *  for identity; `agentAccountRouteId(row)` qualifies management/cache keys, not this value. */
   id: z.string(),
   provider: providerIdSchema,
   label: z.string(),

@@ -516,10 +516,14 @@ describe('out-of-quota fallback — a resume pinned to a now-held account', () =
     await expect.poll(() => store.getRun(record.id)?.status, { timeout: 20_000 }).toBe('done');
     const resumed = await manager.continueRun(record.id, { text: 'mock:done keep going' });
     expect(resumed.ok).toBe(true);
+    await expect.poll(() => store.getRun(record.id)?.steps.find((step) => step.id === 'continue-1')?.status,
+      { timeout: 20_000 }).toBe('done');
     await expect.poll(() => store.getRun(record.id)?.status, { timeout: 20_000 }).toBe('done');
     const events = store.readEvents(record.id).map((e) => String(e.message ?? ''));
     expect(events.some((m) => m.includes('out of quota'))).toBe(false);
-    expect(store.getRun(record.id)?.agentProfile).toBeUndefined();
+    expect(store.getRun(record.id)?.agentProfile).toBe('default');
+    expect(store.getRun(record.id)?.steps.find((step) => step.id === 'continue-1'))
+      .toMatchObject({ backend: 'claude', profileId: 'default' });
     expect(store.getRun(record.id)?.runner).toBe('claude');
   }, 40_000);
 });

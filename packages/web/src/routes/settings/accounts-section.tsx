@@ -249,7 +249,7 @@ function AccountsPane({ data }: { data: AgentProfilesResponse }) {
               onClick={() => {
                 const target = confirming
                 if (!target) return
-                remove.mutate(target.id, {
+                remove.mutate(agentAccountRouteId(target), {
                   onSuccess: () => {
                     setConfirming(null)
                     toast(`Removed ${target.label}`)
@@ -337,7 +337,7 @@ function AgentTab({
 
       <ul className="divide-y divide-border/60 rounded-md border border-border bg-card">
         {accounts.map((account) => (
-          <AccountRow key={account.id} account={account} onRemove={() => onRemove(account)} />
+          <AccountRow key={agentAccountRouteId(account)} account={account} onRemove={() => onRemove(account)} />
         ))}
       </ul>
 
@@ -594,6 +594,7 @@ function AccountRow({ account, onRemove }: { account: AgentProfile; onRemove: ()
     <li
       data-slot="account-row"
       data-account={account.id}
+      data-provider={account.provider}
       className="flex flex-col gap-2 px-3.5 py-3"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -731,7 +732,7 @@ function AccountRow({ account, onRemove }: { account: AgentProfile; onRemove: ()
  */
 function AccountUsageDetail({ routeId }: { routeId: string }) {
   const usage = useAccountUsage()
-  const quota = usage.data?.accounts.find((account) => account.id === routeId)?.quota
+  const quota = usage.data?.accounts.find((account) => agentAccountRouteId(account) === routeId)?.quota
   if (!quota) return null
   return (
     <div data-slot="account-usage-detail" className="mt-3 border-t border-border/60 pt-2.5">
@@ -878,7 +879,7 @@ function AccountDetails({
                 disabled={rename.isPending || draft.trim() === '' || draft.trim() === account.label}
                 onClick={() =>
                   rename.mutate(
-                    { id: account.id, label: draft.trim() },
+                    { id: routeId, label: draft.trim() },
                     {
                       onSuccess: () => setRenaming(false),
                       onError: (error) => toast(error.message, { tone: 'danger' }),

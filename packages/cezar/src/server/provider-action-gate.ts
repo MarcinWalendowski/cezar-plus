@@ -1,5 +1,6 @@
 import {
   DEFAULT_AGENT_ACCOUNT_ID,
+  isAgentPoolId,
   parseAgentRoute,
   type AgentRoute,
   type LockableRunner,
@@ -162,13 +163,9 @@ export function viabilityRefusalMessage(viability: Viability): string {
 function runLevelProvider(
   route: AgentRoute,
   fallback: ProviderId,
-  accounts: Pick<AgentAccountStore, 'accounts'>,
 ): ProviderId | undefined {
   if (route.kind === 'pool') return route.provider;
-  if (route.accountId === DEFAULT_AGENT_ACCOUNT_ID) return fallback;
-  // An unknown id degrades to the pinned provider's default, mirroring `selectProfile`'s own
-  // degrade — the account this dispatch would actually land on if nothing else moved it.
-  return accounts.accounts.find((a) => a.id === route.accountId)?.provider ?? fallback;
+  return fallback;
 }
 
 export interface WorkflowRunRequirementsInput {
@@ -208,7 +205,7 @@ export function requirementsForWorkflowRun(input: WorkflowRunRequirementsInput):
     : parseAgentRoute(overrideAgentProfile ?? selectionFor(accounts, repoRoot, fallback));
   const requirements: DispatchRequirement[] = [
     {
-      provider: runnerLock ?? runLevelProvider(runRoute, fallback, accounts),
+      provider: runnerLock ?? runLevelProvider(runRoute, fallback),
       route: runRoute,
       reroutable: runRoute.kind === 'pool' ? true : fallbackAcrossAccountsWhenLimited,
     },
@@ -234,10 +231,8 @@ export function requirementsForWorkflowRun(input: WorkflowRunRequirementsInput):
   return requirements;
 }
 
-/** The `DispatchRequirement` for an action against an EXISTING run's own session/account — sites
- *  3b (the reopen branch of `/runs/:id/messages`) and 4 (`/runs/:id/continue`). The route is the
- *  account that owns the run's last session, exactly what `runContinuation`'s own reroute resolves
- *  (`run.ts:4322-4340`); `overrideProvider` is a runner override on `/continue`, when given. */
+/** Existing-run admission mirrors Continue: explicit account, target selection on provider
+ *  switch, otherwise the recorded concrete affinity. A pool owns its provider choice. */
 export function requirementForExistingRun(
   run: RunRecord,
   overrideProvider: ProviderId | undefined,
@@ -246,13 +241,26 @@ export function requirementForExistingRun(
    *  provider-scoped-account reason as D6a — the route is RE-DERIVED for it (a `pool:*` naming the
    *  locked provider) rather than inherited from a session that may belong to the other provider. */
   runnerLock: LockableRunner | undefined,
+  context: {
+    agentProfile?: string;
+    accounts?: Pick<AgentAccountStore, 'accounts' | 'selections' | 'defaults'>;
+    repoRoot?: string;
+  } = {},
 ): DispatchRequirement {
   const sessionStep = [...run.steps].reverse().find((step) => step.sessionId);
+  const provider = runnerLock ?? providerForExistingRun(run, overrideProvider);
+  const providerSwitched = provider !== (run.runner ?? 'claude');
+  const account = context.agentProfile
+    ?? (providerSwitched
+      ? context.accounts ? selectionFor(context.accounts, context.repoRoot, provider) : DEFAULT_AGENT_ACCOUNT_ID
+      : run.agentProfile && !isAgentPoolId(run.agentProfile)
+        ? run.agentProfile
+        : sessionStep?.profileId ?? DEFAULT_AGENT_ACCOUNT_ID);
   const route = runnerLock
     ? ({ kind: 'pool', provider: runnerLock } as const)
-    : parseAgentRoute(sessionStep?.profileId ?? run.agentProfile);
+    : parseAgentRoute(account);
   return {
-    provider: runnerLock ?? providerForExistingRun(run, overrideProvider),
+    provider: runnerLock ?? runLevelProvider(route, provider),
     route,
     reroutable: route.kind === 'pool' ? true : fallbackAcrossAccountsWhenLimited,
   };

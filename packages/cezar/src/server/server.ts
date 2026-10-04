@@ -3277,23 +3277,32 @@ export function createApp(deps: ServerDeps) {
     files: await accountFiles(profile),
   });
 
-  /**
-   * Resolve `:id` to an account for the per-account reads below. Unlike `resolveWorkspaceProfile`
-   * this accepts the reserved `default` for a NAMED provider, which these routes cannot infer — so
-   * the id may be `default:<provider>` as well as a stored account id.
-   */
-  const accountById = async (id: string): Promise<ResolvedAgentProfile | null> => {
-    const [head, tail] = id.split(':');
-    if (head === DEFAULT_AGENT_ACCOUNT_ID) {
-      const provider = PROVIDER_IDS.find((p) => p === tail);
-      return provider ? defaultAgentProfile(provider) : null;
+  type AccountLookupError = { error: string; status: 404 | 409 };
+  const storedAccountById = (
+    accounts: readonly AgentAccount[],
+    routeId: string,
+  ): { account: AgentAccount } | AccountLookupError => {
+    const separator = routeId.indexOf(':');
+    const matches = accounts.filter((account) => separator === -1
+      ? account.id === routeId
+      : account.provider === routeId.slice(0, separator) && account.id === routeId.slice(separator + 1));
+    if (matches.length > 1) return { error: `ambiguous account: ${routeId}; use a provider-qualified account ID`, status: 409 };
+    const account = matches[0];
+    return account ? { account } : { error: `unknown account: ${routeId}`, status: 404 };
+  };
+
+  class AccountLookupFailure extends Error {
+    constructor(readonly lookup: AccountLookupError) { super(lookup.error); }
+  }
+
+  const accountById = async (id: string): Promise<{ profile: ResolvedAgentProfile } | AccountLookupError> => {
+    if (id.startsWith(`${DEFAULT_AGENT_ACCOUNT_ID}:`)) {
+      const provider = PROVIDER_IDS.find((p) => p === id.slice(DEFAULT_AGENT_ACCOUNT_ID.length + 1));
+      return provider ? { profile: defaultAgentProfile(provider) } : { error: `unknown account: ${id}`, status: 404 };
     }
-    try {
-      const stored = (await loadAgentAccounts()).accounts.find((a) => a.id === id);
-      return stored ? resolveStoredProfile(stored) : null;
-    } catch {
-      return null;
-    }
+    const accounts = await loadAgentAccounts().catch(() => defaultAgentAccountStore());
+    const found = storedAccountById(accounts.accounts, id);
+    return 'error' in found ? found : { profile: resolveStoredProfile(found.account) };
   };
 
   /** Validate a client-supplied config dir. Returns the error text, or null when it is usable. */
@@ -3432,7 +3441,7 @@ export function createApp(deps: ServerDeps) {
       let created: AgentAccount | undefined;
       try {
         await mergeWriteAgentAccounts((store) => {
-          const id = allocateAgentProfileId(label ?? configDir, store.accounts.map((a) => a.id));
+          const id = allocateAgentProfileId(label ?? configDir, store.accounts.filter((a) => a.provider === provider).map((a) => a.id));
           created = {
             id,
             provider,
@@ -3479,24 +3488,30 @@ export function createApp(deps: ServerDeps) {
         } catch {
           // unreadable store — treated as unknown, like DELETE and PATCH /projects
         }
-        const current = existing.find((a) => a.id === id);
-        if (!current) return c.json({ error: `unknown account: ${id}` }, 404);
+        const found = storedAccountById(existing, id);
+        if ('error' in found) return c.json({ error: found.error }, found.status);
+        const current = found.account;
         if (configDir !== undefined) {
-          const conflict = await conflictingProfile(existing, current.provider, expandTilde(configDir), id);
+          const conflict = await conflictingProfile(existing, current.provider, expandTilde(configDir), current.id);
           if (conflict !== null) return c.json({ error: conflict }, 409);
         }
 
         let updated: AgentAccount | undefined;
         try {
           await mergeWriteAgentAccounts((store) => {
-            const entry = store.accounts.find((a) => a.id === id);
-            if (!entry) return; // lost a race with a concurrent delete — answered below
+            const checked = storedAccountById(store.accounts, id);
+            if ('error' in checked) throw new AccountLookupFailure(checked);
+            const entry = checked.account;
+            if (entry.provider !== current.provider || entry.id !== current.id) {
+              throw new AccountLookupFailure({ error: `unknown account: ${id}`, status: 404 });
+            }
             // Mutated in place so `.passthrough()` keys on the row survive.
             if (label !== undefined) entry.label = label.trim() || entry.id;
             if (configDir !== undefined) entry.configDir = configDir;
             updated = entry;
           });
         } catch (err) {
+          if (err instanceof AccountLookupFailure) return c.json({ error: err.lookup.error }, err.lookup.status);
           return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
         }
         if (!updated) return c.json({ error: `unknown account: ${id}` }, 404);
@@ -3530,8 +3545,9 @@ export function createApp(deps: ServerDeps) {
       queryZodValidator(z.object({ refresh: queryValue.refine((v) => v === undefined || v === '1') }), { message: 'refresh must be 1 when provided' }),
       async (c) => {
         if (!capabilities().localHandoff) return c.json(hostedProfileRefusal, 409);
-        const account = await accountById(c.req.param('id'));
-        if (!account) return c.json({ error: `unknown account: ${c.req.param('id')}` }, 404);
+        const found = await accountById(c.req.param('id'));
+        if ('error' in found) return c.json({ error: found.error }, found.status);
+        const account = found.profile;
         const refresh = c.req.valid('query').refresh === '1';
         // The discovered account's row is the one `GET /api/v1/providers/status` owns, so it comes
         // from there — enablement included, which a bare probe does not know about.
@@ -3566,8 +3582,9 @@ export function createApp(deps: ServerDeps) {
       paramZodValidator(z.object({ id: z.string() })),
       async (c) => {
         if (!capabilities().localHandoff) return c.json(hostedProfileRefusal, 409);
-        const account = await accountById(c.req.param('id'));
-        if (!account) return c.json({ error: `unknown account: ${c.req.param('id')}` }, 404);
+        const found = await accountById(c.req.param('id'));
+        if ('error' in found) return c.json({ error: found.error }, found.status);
+        const account = found.profile;
         return c.json(await readAccountIdentity(account.provider, account.path));
       },
     )
@@ -3586,8 +3603,9 @@ export function createApp(deps: ServerDeps) {
       jsonZodValidator(() => openAgentAccountFileSchema),
       async (c) => {
         if (!capabilities().localHandoff) return c.json(hostedProfileRefusal, 409);
-        const account = await accountById(c.req.param('id'));
-        if (!account) return c.json({ error: `unknown account: ${c.req.param('id')}` }, 404);
+        const found = await accountById(c.req.param('id'));
+        if ('error' in found) return c.json({ error: found.error }, found.status);
+        const account = found.profile;
         const { file, target } = c.req.valid('json');
 
         let path: string;
@@ -3700,36 +3718,30 @@ export function createApp(deps: ServerDeps) {
       async (c) => {
         if (!capabilities().localHandoff) return c.json(hostedProfileRefusal, 409);
         const id = c.req.param('id');
-        let removed = false;
-        // Captured inside the mutator, because after the write there is nothing left to ask which
-        // provider this account belonged to — and the eviction below is keyed by it.
-        let removedProvider: ProviderId | undefined;
+        const current = await loadAgentAccounts().catch(() => defaultAgentAccountStore());
+        const found = storedAccountById(current.accounts, id);
+        if ('error' in found) return c.json({ error: found.error }, found.status);
+        const target = found.account;
         try {
           await mergeWriteAgentAccounts((store) => {
-            const before = store.accounts.length;
-            removedProvider = store.accounts.find((a) => a.id === id)?.provider;
-            store.accounts = store.accounts.filter((a) => a.id !== id);
-            removed = store.accounts.length < before;
-            if (!removed) return;
-            // Scrub every reference IN THE SAME MUTATOR — the reason selections share this file.
-            // A two-call delete-then-scrub can be observed mid-way by another cezar process on
-            // this machine, which would then resolve a dangling id; harmless today (it degrades
-            // to the default) but only by luck.
+            const checked = storedAccountById(store.accounts, id);
+            if ('error' in checked) throw new AccountLookupFailure(checked);
+            if (checked.account.provider !== target.provider || checked.account.id !== target.id) {
+              throw new AccountLookupFailure({ error: `unknown account: ${id}`, status: 404 });
+            }
+            store.accounts = store.accounts.filter((account) => account.provider !== target.provider || account.id !== target.id);
+            if (store.defaults[target.provider] === target.id) delete store.defaults[target.provider];
             for (const [root, selection] of Object.entries(store.selections)) {
-              for (const key of Object.keys(selection) as Array<keyof typeof selection>) {
-                if (selection[key] === id) delete selection[key];
-              }
+              if (selection[target.provider] === target.id) delete selection[target.provider];
               if (Object.keys(selection).length === 0) delete store.selections[root];
             }
           });
         } catch (err) {
+          if (err instanceof AccountLookupFailure) return c.json({ error: err.lookup.error }, err.lookup.status);
           return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
         }
-        if (!removed) return c.json({ error: `unknown account: ${id}` }, 404);
-        // Only this account's answer: it is about to stop existing, and holding it would let a
-        // re-added account with the same id read the deleted one's state.
-        providerAuth.forgetProfileStatus(removedProvider, id);
-        return c.json({ removed: true as const, id });
+        providerAuth.forgetProfileStatus(target.provider, target.id);
+        return c.json({ removed: true as const, id: target.id });
       },
     );
 
@@ -6296,24 +6308,30 @@ export function createApp(deps: ServerDeps) {
       if (agentModelsLocked(repoRoot) && parsed.data.model?.trim()) {
         return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
       }
-      const workspace = await workspaceConfig.load();
+      const [workspace, accounts] = await Promise.all([
+        workspaceConfig.load(),
+        loadAgentAccounts().catch(() => defaultAgentAccountStore()),
+      ]);
+      if (parsed.data.agentProfile !== undefined) {
+        if (isAgentPoolId(parsed.data.agentProfile)) {
+          if (!capabilities().accountUsage) {
+            return c.json({ error: 'account balancing is off on this server (CEZ_ACCOUNT_USAGE=1)' }, 409);
+          }
+        } else {
+          const provider = workspace.runnerLock ?? providerForExistingRun(run, parsed.data.runner);
+          const account = await resolveWorkspaceProfile(provider, parsed.data.agentProfile);
+          if ('error' in account) return c.json({ error: account.error }, 400);
+        }
+      }
       const requirement = requirementForExistingRun(
         run,
         parsed.data.runner,
         workspace.resources.fallbackAcrossAccountsWhenLimited,
         workspace.runnerLock ?? undefined,
+        { agentProfile: parsed.data.agentProfile, accounts, repoRoot },
       );
       const blocked = await providerActionError([requirement], repoRoot);
       if (blocked) return c.json({ error: blocked }, 409);
-      // The follow-up pill names an account the user just picked, so an id that has been deleted
-      // since the thread loaded is answered honestly — the same asymmetry `POST /runs` keeps: a
-      // USER can act on "unknown account", and reopening the session on another login silently
-      // would cross the very billing boundary accounts exist to draw.
-      if (parsed.data.agentProfile !== undefined) {
-        const provider = providerForExistingRun(run, parsed.data.runner);
-        const account = await resolveWorkspaceProfile(provider, parsed.data.agentProfile);
-        if ('error' in account) return c.json({ error: account.error }, 400);
-      }
       const result = await manager.continueRun(id, {
         text: parsed.data.text,
         images: parsed.data.images?.map((image) => toPastedContent(image)),

@@ -5,10 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { queryKeys, workspaceQueryKeys } from '@/api/queries'
 import { createQueryClient } from '@/api/query-client'
-import type {
-  AgentProfile,
-  AgentProfilesResponse,
-  DiscoveredAgentAccount,
+import {
+  agentAccountRouteId,
+  type AgentProfile,
+  type AgentProfilesResponse,
+  type DiscoveredAgentAccount,
 } from '@loki-labs/cezar-plus-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 import { AppRoutes } from '@/routes'
@@ -66,10 +67,12 @@ function serve(
     createStatus?: number
     createError?: string
     details?: unknown
+    detailsByRoute?: Record<string, unknown>
     openStatus?: number
     openError?: string
     targets?: unknown
     status?: unknown
+    statusByRoute?: Record<string, unknown>
     /** `GET …/agent-profiles/discovered` — the Claude logins found on the machine. Defaults to an
      *  empty list, which is what every pre-autodetect test in this file expects to see. */
     discovered?: DiscoveredAgentAccount[]
@@ -85,6 +88,9 @@ function serve(
   let state = response
   const json = (payload: unknown, status = 200) =>
     new Response(JSON.stringify(payload), { status, headers: { 'content-type': 'application/json' } })
+  const routeId = (url: string) => decodeURIComponent(url.split('/')[5] ?? '')
+  const matchesRoute = (account: AgentProfile, id: string) =>
+    agentAccountRouteId(account) === id || (!id.includes(':') && !account.isDefault && account.id === id)
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -98,19 +104,23 @@ function serve(
       }
       if (url.startsWith('/api/v1/workspace/agent-profiles/') && method === 'DELETE') {
         if (options.deleteStatus) return json({ error: options.deleteError }, options.deleteStatus)
-        const id = url.split('/').pop()!
-        state = { ...state, profiles: state.profiles.filter((p) => p.isDefault || p.id !== id) }
+        const id = routeId(url)
+        const matching = state.profiles.filter((p) => matchesRoute(p, id))
+        if (matching.length !== 1) return json({ error: 'ambiguous account route' }, 409)
+        state = { ...state, profiles: state.profiles.filter((p) => p.isDefault || !matchesRoute(p, id)) }
         return json({ removed: true, id })
       }
       if (url.startsWith('/api/v1/workspace/agent-profiles/') && method === 'PATCH') {
-        const id = url.split('/').pop()!
+        const id = routeId(url)
+        const matching = state.profiles.filter((p) => matchesRoute(p, id))
+        if (matching.length !== 1) return json({ error: 'ambiguous account route' }, 409)
         state = {
           ...state,
           profiles: state.profiles.map((p) =>
-            !p.isDefault && p.id === id ? { ...p, label: String(body?.label ?? p.label) } : p,
+            !p.isDefault && matchesRoute(p, id) ? { ...p, label: String(body?.label ?? p.label) } : p,
           ),
         }
-        return json({ profile: state.profiles.find((p) => !p.isDefault && p.id === id) })
+        return json({ profile: state.profiles.find((p) => !p.isDefault && matchesRoute(p, id)) })
       }
       if (url === '/api/v1/workspace/agent-profiles' && method === 'POST') {
         if (options.createStatus) return json({ error: options.createError }, options.createStatus)
@@ -126,7 +136,7 @@ function serve(
       }
       if (url.includes('/agent-profiles/') && url.endsWith('/details') && method === 'GET') {
         detailReads.push(url)
-        return json(options.details ?? { available: true, fields: [
+        return json(options.detailsByRoute?.[routeId(url)] ?? options.details ?? { available: true, fields: [
           { label: 'Email', value: 'me@example.com' },
           { label: 'Organization', value: "me@example.com's Organization" },
         ] })
@@ -137,7 +147,7 @@ function serve(
       }
       if (url.includes('/agent-profiles/') && url.includes('/status') && method === 'GET') {
         statusReads.push(url)
-        return json({ status: options.status ?? { provider: 'claude', status: 'connected' } })
+        return json({ status: options.statusByRoute?.[routeId(url)] ?? options.status ?? { provider: 'claude', status: 'connected' } })
       }
       if (url.endsWith('/open-targets') && method === 'GET') {
         return json({ targets: options.targets ?? [
@@ -237,6 +247,110 @@ const openDetails = async (id: string) => {
   await waitFor(() => expect(row.querySelector('[data-slot="account-details"]')).not.toBeNull())
   return row
 }
+
+describe('equal account IDs belonging to different providers', () => {
+  const accounts = (): AgentProfilesResponse => ({
+    defaults: { claude: 'pb', codex: 'pb' },
+    editable: true,
+    profileCapableProviders: ['claude', 'codex'],
+    selections: {},
+    profiles: [
+      ...DEFAULTS,
+      profile({ id: 'pb', label: 'Claude PB', status: undefined }),
+      profile({ id: 'pb', provider: 'codex', label: 'Codex PB', configDir: '~/.codex-pb', status: undefined }),
+    ],
+  })
+  const quota = (usedPercent: number) => ({
+    takenAt: new Date().toISOString(),
+    windows: [{ label: 'week', usedPercent }],
+  })
+
+  it('keeps status, private identity and quota separate when switching provider tabs', async () => {
+    serve(accounts(), {
+      statusByRoute: {
+        'claude:pb': { provider: 'claude', status: 'connected' },
+        'codex:pb': { provider: 'codex', status: 'disconnected' },
+      },
+      detailsByRoute: {
+        'claude:pb': { available: true, fields: [{ label: 'Email', value: 'claude@example.test' }] },
+        'codex:pb': { available: true, fields: [{ label: 'Email', value: 'codex@example.test' }] },
+      },
+      usage: {
+        enabled: true,
+        accounts: [
+          { id: 'pb', provider: 'codex', isDefault: false, label: 'Codex PB', inflight: 0, limited: false, quota: quota(91) },
+          { id: 'pb', provider: 'claude', isDefault: false, label: 'Claude PB', inflight: 0, limited: false, quota: quota(22) },
+        ],
+      },
+    })
+    renderAccounts()
+    await waitFor(() => expect(rowFor('pb')?.textContent).toContain('Connected'))
+    expect(detailReads).toEqual([])
+    expect(document.body.textContent).not.toContain('claude@example.test')
+    let row = await openDetails('pb')
+    await waitFor(() => expect(row.querySelector('[data-slot="account-identity"]')?.textContent).toContain('claude@example.test'))
+    await waitFor(() => expect(row.querySelector<HTMLElement>('[data-slot="quota-fill"]')?.dataset.percent).toBe('22'))
+
+    await openTab('codex')
+    await waitFor(() => expect(rowFor('pb')?.textContent).toContain('Not connected'))
+    expect(document.body.textContent).not.toContain('codex@example.test')
+    row = await openDetails('pb')
+    await waitFor(() => expect(row.querySelector('[data-slot="account-identity"]')?.textContent).toContain('codex@example.test'))
+    await waitFor(() => expect(row.querySelector<HTMLElement>('[data-slot="quota-fill"]')?.dataset.percent).toBe('91'))
+    expect(row.textContent).not.toContain('claude@example.test')
+    expect(statusReads).toEqual(expect.arrayContaining([
+      '/api/v1/workspace/agent-profiles/claude%3Apb/status',
+      '/api/v1/workspace/agent-profiles/codex%3Apb/status',
+    ]))
+    expect(detailReads).toEqual([
+      '/api/v1/workspace/agent-profiles/claude%3Apb/details',
+      '/api/v1/workspace/agent-profiles/codex%3Apb/details',
+    ])
+    fireEvent.click(row.querySelector('[data-action="account-recheck"]')!)
+    await waitFor(() => expect(statusReads).toContain('/api/v1/workspace/agent-profiles/codex%3Apb/status?refresh=1'))
+    fireEvent.pointerDown(row.querySelector('[data-slot="account-open-folder"]')!)
+    await waitFor(() => expect(screen.getByRole('menuitem', { name: 'System default' })).not.toBeNull())
+    fireEvent.click(screen.getByRole('menuitem', { name: 'System default' }))
+    await waitFor(() => expect(requests.find((request) => request.url.endsWith('/codex%3Apb/open'))).toMatchObject({
+      method: 'POST', body: { file: 'folder' },
+    }))
+    await openTab('claude')
+    await waitFor(() => expect(rowFor('pb')?.textContent).toContain('Connected'))
+  })
+
+  it('renames the intended provider without changing the equal-ID account', async () => {
+    serve(accounts())
+    renderAccounts()
+    await openTab('codex')
+    const row = await openDetails('pb')
+    fireEvent.click(row.querySelector('[data-action="account-rename"]')!)
+    fireEvent.change(screen.getByLabelText('Name for Codex PB'), { target: { value: 'Codex Work' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(rowFor('pb')?.textContent).toContain('Codex Work'))
+    expect(requests.find((request) => request.method === 'PATCH')).toMatchObject({
+      url: '/api/v1/workspace/agent-profiles/codex%3Apb', body: { label: 'Codex Work' },
+    })
+    await openTab('claude')
+    expect(rowFor('pb')?.textContent).toContain('Claude PB')
+    expect(rowFor('pb')?.textContent).not.toContain('Codex Work')
+  })
+
+  it('removes the intended provider while retaining its equal-ID counterpart', async () => {
+    serve(accounts())
+    renderAccounts()
+    await openTab('codex')
+    const row = await openDetails('pb')
+    fireEvent.click(row.querySelector('[data-action="account-remove"]')!)
+    await waitFor(() => expect(document.querySelector('[data-slot="accounts-remove-confirm"]')).not.toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    await waitFor(() => expect(rowFor('pb')).toBeNull())
+    expect(requests.find((request) => request.method === 'DELETE')?.url).toBe('/api/v1/workspace/agent-profiles/codex%3Apb')
+    expect(rowFor('default')).not.toBeNull()
+    await openTab('claude')
+    expect(rowFor('pb')?.textContent).toContain('Claude PB')
+    expect(rowFor('default')).not.toBeNull()
+  })
+})
 
 describe('the agent accounts section', () => {
   it('lists the discovered account with no edit controls at all', async () => {

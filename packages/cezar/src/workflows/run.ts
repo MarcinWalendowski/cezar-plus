@@ -148,7 +148,7 @@ import {
   type AgentAccountUsageStore,
   type InflightStep,
 } from '../workspace/agent-account-usage.ts';
-import { loadAgentAccounts } from '../workspace/agent-accounts.ts';
+import { loadAgentAccounts, selectionFor } from '../workspace/agent-accounts.ts';
 import { listAgentProfiles, type ResolvedAgentProfile } from '../workspace/agent-profiles.ts';
 import { PROFILE_CAPABLE_PROVIDERS } from '../core/agent-profiles.ts';
 import {
@@ -156,11 +156,13 @@ import {
   DEFAULT_AGENT_ACCOUNT_ID,
   formatAgentRoute,
   isAgentPoolId,
+  parseAgentRoute,
   runAccountKey,
   usageHoldAccountKey,
   type LockableRunner,
 } from '@loki-labs/cezar-plus-contract';
 import {
+  poolCandidates,
   resolvePoolForDispatch,
   resolvePoolForProvider,
   selectPoolAccount,
@@ -6128,7 +6130,7 @@ export class RunManager {
     // Site f (D4/D6): the follow-up composer's engine override keeps its MODEL choice and loses
     // its PROVIDER choice while a lock is set.
     const continueDecision = applyRunnerLock(this.runnerLock(), opts.runner ?? run.runner ?? 'claude');
-    const targetRunner = continueDecision.runner;
+    let targetRunner = continueDecision.runner;
     // Session ids are provider-owned opaque values. New records carry explicit
     // affinity; for legacy records, the run's current runner is the conservative
     // owner until a continuation emits a new, attributed session id (#562).
@@ -6139,76 +6141,55 @@ export class RunManager {
     // open a fresh conversation while the thread claimed it had resumed. A step that recorded no
     // account predates the feature and therefore ran under the discovered one.
     const sessionAccount = sessionStep.profileId ?? DEFAULT_AGENT_ACCOUNT_ID;
-    // The account this turn must run on: the composer's pick, else the one the run already
-    // chose. The run's own choice counts too — a record whose newest session predates an
-    // account switch (a fresh continuation that recorded no session id) must not be resumed
-    // under the account the user switched away from.
-    const targetAccount = opts.agentProfile
-      ?? (targetRunner === (run.runner ?? 'claude') ? run.agentProfile : undefined);
-    const accountSwitched = targetAccount !== undefined && targetAccount !== sessionAccount;
-    const resume = sessionBackend === targetRunner && !accountSwitched;
-
-    // Follow-up runner/model/account override (#401, spec 2026-07-29-agent-profiles): the composer
-    // lets the user pick which backend, model and login handle this continuation — the same flat
-    // pill the /new composer offers. Omitted → the run's current backend/model/account is kept
-    // (backward compat). A provided choice is persisted BEFORE scheduling, so it becomes the
-    // run's current backend — `runContinuation` reads it off the record, later continuations
-    // default to it, and the header reflects the active engine. An empty model ('') clears the
-    // pin, letting the runner pick the model (auto).
-    if (opts.runner !== undefined || opts.model !== undefined || opts.agentProfile !== undefined || continueDecision.locked) {
-      // Guard the pairing before persisting anything: the model override applies to the runner
-      // this continuation will actually use (`opts.runner ?? record.runner ?? 'claude'` — the
-      // same resolution `runContinuation` reads off the record). A model that is recognizably
-      // another runner's preset would corrupt the run; free-form/custom ids pass untouched.
-      if (opts.model && modelConflictsWithRunner(opts.model, targetRunner)) {
-        return { ok: false, error: `model '${opts.model}' is not a ${targetRunner} model` };
-      }
-      // A runner switch that carries NO explicit model must not leave the previous backend's pin
-      // on the record: the guard above only sees `opts.model`, so without this an inherited
-      // `opus` would survive a switch to codex and `runContinuation` would hand it to the codex
-      // runner. Clearing (not rejecting) is right — the pin belonged to the old backend and is
-      // meaningless for the new one, which is exactly what the composer already displays (auto).
-      // Only a recognizably foreign preset is cleared; a free-form/custom id is left alone.
-      const inheritedPinIsForeign =
-        opts.model === undefined &&
-        run.model !== undefined &&
-        modelConflictsWithRunner(run.model, targetRunner);
-      // An account belongs to ONE agent, so a runner switch that names no account must not leave
-      // the previous backend's login on the record. It is inert immediately (resolution applies
-      // the run's account only to steps on the run's own runner) and wrong later, when a further
-      // continuation switches back and inherits a login the user picked for a different task.
-      const inheritedAccountIsForeign =
-        opts.agentProfile === undefined &&
-        run.agentProfile !== undefined &&
-        targetRunner !== (run.runner ?? 'claude');
-      this.store.updateRun(runId, {
-        // `targetRunner`, not `opts.runner`: under a lock the effective provider is the lock's,
-        // and the record has to name what will actually run or `runContinuation` resolves the
-        // account against the wrong provider's login list.
-        ...(opts.runner !== undefined || continueDecision.locked ? { runner: targetRunner } : {}),
-        // D6a: a lock-forced provider change drops a foreign account id rather than carrying it.
-        ...(continueDecision.locked
-          ? { agentProfile: await this.accountForLockedProvider(run.agentProfile, targetRunner) }
-          : {}),
-        ...(opts.model !== undefined
-          ? { model: opts.model === '' ? undefined : opts.model }
-          : inheritedPinIsForeign
-            ? { model: undefined }
-            : {}),
-        // Persisted BEFORE scheduling, like the runner/model pair: `runContinuation` resolves the
-        // account off the record, and every later continuation then defaults to it.
-        ...(opts.agentProfile !== undefined
-          ? { agentProfile: opts.agentProfile }
-          : inheritedAccountIsForeign
-            ? { agentProfile: undefined }
-            : {}),
+    const providerSwitched = targetRunner !== (run.runner ?? 'claude');
+    const accounts = await loadAgentAccounts();
+    let targetAccount = opts.agentProfile
+      ?? (providerSwitched
+        ? selectionFor(accounts, this.repoRoot, targetRunner)
+        : run.agentProfile && !isAgentPoolId(run.agentProfile)
+          ? run.agentProfile
+          : sessionAccount);
+    if (continueDecision.locked) {
+      targetAccount = await this.accountForLockedProvider(targetAccount, targetRunner)
+        ?? selectionFor(accounts, this.repoRoot, targetRunner);
+    }
+    targetAccount ??= DEFAULT_AGENT_ACCOUNT_ID;
+    let pooled: PoolChoice | undefined;
+    const route = parseAgentRoute(targetAccount);
+    if (route.kind === 'pool') {
+      const [usage, config] = await Promise.all([loadAgentAccountUsage(), loadWorkspaceConfig()]);
+      const profiles = listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS);
+      const lock = this.runnerLock();
+      const candidates = poolCandidates(lock ? { kind: 'pool', provider: lock } : route, profiles, config.disabledProviders);
+      const { runnable } = this.partitionByTier(candidates, usage);
+      pooled = selectPoolAccount({ candidates: runnable, store: usage, inflight: this.semaphore.accountInflight() });
+      if (!pooled) return { ok: false, error: 'No runnable account is available in the selected pool.' };
+      targetRunner = pooled.provider;
+      targetAccount = pooled.accountId;
+    }
+    // Pool resolution is pure until the actual provider/model pair has been admitted.
+    if (opts.model && modelConflictsWithRunner(opts.model, targetRunner)) {
+      return { ok: false, error: `model '${opts.model}' is not a ${targetRunner} model` };
+    }
+    const resume = sessionBackend === targetRunner && targetAccount === sessionAccount;
+    const inheritedPinIsForeign =
+      opts.model === undefined && run.model !== undefined && modelConflictsWithRunner(run.model, targetRunner);
+    if (pooled) {
+      const dispatchKey = accountUsageKey(pooled.provider, pooled.accountId);
+      await mergeWriteAgentAccountUsage((usage) => recordDispatch(usage, dispatchKey));
+    }
+    this.store.updateRun(runId, {
+      runner: targetRunner,
+      agentProfile: targetAccount,
+      ...(opts.model !== undefined
+        ? { model: opts.model === '' ? undefined : opts.model }
+        : inheritedPinIsForeign ? { model: undefined } : {}),
+    });
+    if (continueDecision.locked) {
+      this.store.appendEvent(runId, {
+        type: 'note',
+        message: `this workspace is locked to ${targetRunner}, so this follow-up runs there instead of ${continueDecision.wouldHaveBeen}`,
       });
-      if (continueDecision.locked) {
-        this.store.appendEvent(runId, {
-          type: 'note',
-          message: `this workspace is locked to ${targetRunner}, so this follow-up runs there instead of ${continueDecision.wouldHaveBeen}`,
-        });
-      }
     }
 
     // Everything that could refuse this continuation has now passed, so a pending usage-limit

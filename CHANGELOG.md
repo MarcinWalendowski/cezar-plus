@@ -1,3 +1,9 @@
+# Fork account routing fixes (2026-10-04)
+
+- Preserve equal account IDs on different providers, such as Claude `pb` and Codex `pb`, without changing stored IDs or project selections.
+- Add provider-qualified account management routes (`claude:pb`, `codex:pb`). Unique legacy bare IDs and `default:provider` remain supported; ambiguous bare IDs refuse with 409 before reading account details, probing or mutating. Usage response IDs keep their existing values.
+- Scope account settings and task labels by provider and account. Continue checks its selected account and resolves requested pools before deciding session affinity. Pools exclude disabled providers, preserve the chosen concrete account across restart, and advance the dispatch cursor only after admission.
+
 # Fork integration notes (2026-10-03)
 
 Upstream 0.14.0 history below is retained alongside fork history. Upstream default-on

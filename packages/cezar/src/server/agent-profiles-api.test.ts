@@ -7,6 +7,7 @@ import { agentAccountsPath } from '../paths.ts';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { loadAgentAccounts, mergeWriteAgentAccounts } from '../workspace/agent-accounts.ts';
+import * as accountStoreModule from '../workspace/agent-accounts.ts';
 import { clearProjectProbeCache, registerProject } from '../workspace/projects.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { ProviderAuthService } from '../core/provider-auth.ts';
@@ -97,6 +98,113 @@ describe('agent profiles API', () => {
     writeFileSync(join(dir, 'settings.json'), '{}', 'utf8');
     return dir;
   };
+
+  describe('provider-scoped account management', () => {
+    const duplicates = async () => {
+      const claude = claudeDir('claude-pb');
+      const codex = join(home, 'codex-pb');
+      mkdirSync(codex, { recursive: true });
+      writeFileSync(join(claude, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'claude@example.test' } }));
+      const claims = Buffer.from(JSON.stringify({ email: 'codex@example.test' })).toString('base64url');
+      writeFileSync(join(codex, 'auth.json'), JSON.stringify({ tokens: { id_token: `x.${claims}.x` } }));
+      await mergeWriteAgentAccounts((current) => {
+        current.accounts = [
+          { id: 'pb', provider: 'claude', label: 'Claude PB', configDir: claude, addedAt: '2026-10-04T00:00:00Z' },
+          { id: 'pb', provider: 'codex', label: 'Codex PB', configDir: codex, addedAt: '2026-10-04T00:00:00Z' },
+        ];
+        current.defaults = { claude: 'pb', codex: 'pb' };
+        current.selections = { [repoRoot]: { claude: 'pb', codex: 'pb' } };
+      });
+      return { claude, codex };
+    };
+
+    it('reads and opens each qualified provider account without crossing identities', async () => {
+      const dirs = await duplicates();
+      const opened: string[] = [];
+      const app = makeApp({ openFile: async (path) => { opened.push(path); return true; } });
+      for (const provider of ['claude', 'codex'] as const) {
+        const base = `/api/v1/workspace/agent-profiles/${provider}:pb`;
+        const status = await apiRequest(app, `${base}/status`);
+        expect(status.status).toBe(200);
+        expect(await status.json()).toMatchObject({ status: { provider, profileId: 'pb' } });
+        const details = await apiRequest(app, `${base}/details`);
+        expect(details.status).toBe(200);
+        expect(await details.json()).toMatchObject({ fields: [{ label: 'Email', value: `${provider}@example.test` }] });
+        const open = await apiRequest(app, `${base}/open`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ file: 'folder' }),
+        });
+        expect(open.status).toBe(200);
+      }
+      expect(opened).toEqual([dirs.claude, dirs.codex]);
+    });
+
+    it('refuses every ambiguous legacy operation before probing, opening or rewriting the file', async () => {
+      await duplicates();
+      const before = readFileSync(agentAccountsPath(), 'utf8');
+      const opened = vi.fn(async () => true);
+      const auth = new ProviderAuthService();
+      const forgotten = vi.spyOn(auth, 'forgetProfileStatus');
+      const app = makeApp({ openFile: opened, providerAuth: auth });
+      const operations = [
+        ['GET', '/pb/status?refresh=1', undefined], ['GET', '/pb/details', undefined],
+        ['POST', '/pb/open', { file: 'folder' }], ['PATCH', '/pb', { label: 'Wrong account' }], ['DELETE', '/pb', undefined],
+      ] as const;
+      for (const [method, suffix, body] of operations) {
+        const response = await apiRequest(app, `/api/v1/workspace/agent-profiles${suffix}`, {
+          method, ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+        });
+        expect(response.status, `${method} ${suffix}`).toBe(409);
+        expect(await response.json()).toMatchObject({ error: expect.stringContaining('ambiguous') });
+        expect(readFileSync(agentAccountsPath(), 'utf8')).toBe(before);
+      }
+      expect(opened).not.toHaveBeenCalled();
+      expect(forgotten).not.toHaveBeenCalled();
+    });
+
+    it('updates and deletes only the qualified pair and clears only its references', async () => {
+      await duplicates();
+      expect((await send('PATCH', '/api/v1/workspace/agent-profiles/codex:pb', { label: 'Updated Codex' })).status).toBe(200);
+      let current = await loadAgentAccounts();
+      expect(current.accounts.map((account) => account.label)).toEqual(['Claude PB', 'Updated Codex']);
+      expect((await send('DELETE', '/api/v1/workspace/agent-profiles/codex:pb')).status).toBe(200);
+      current = await loadAgentAccounts();
+      expect(current.accounts.map((account) => [account.provider, account.id])).toEqual([['claude', 'pb']]);
+      expect(current.defaults).toEqual({ claude: 'pb' });
+      expect(current.selections[repoRoot]).toEqual({ claude: 'pb' });
+      expect((await apiRequest(makeApp(), '/api/v1/workspace/agent-profiles/pb/status')).status).toBe(200);
+    });
+
+    it('rechecks legacy ambiguity inside the atomic mutator and leaves a concurrently added pair intact', async () => {
+      for (const method of ['PATCH', 'DELETE']) {
+        await duplicates();
+        const current = await loadAgentAccounts();
+        current.accounts = current.accounts.filter((account) => account.provider === 'claude');
+        writeFileSync(agentAccountsPath(), JSON.stringify(current));
+        const merge = accountStoreModule.mergeWriteAgentAccounts;
+        let concurrent = '';
+        const intercept = vi.spyOn(accountStoreModule, 'mergeWriteAgentAccounts').mockImplementationOnce(async (mutator) => {
+          current.accounts.push({ id: 'pb', provider: 'codex', label: 'Concurrent Codex', configDir: join(home, 'concurrent-codex'), addedAt: 'now' });
+          concurrent = JSON.stringify(current);
+          writeFileSync(agentAccountsPath(), concurrent);
+          return merge(mutator);
+        });
+        try {
+          const response = await send(method, '/api/v1/workspace/agent-profiles/pb', method === 'PATCH' ? { label: 'Do not write' } : undefined);
+          expect(response.status).toBe(409);
+          expect(readFileSync(agentAccountsPath(), 'utf8')).toBe(concurrent);
+        } finally {
+          intercept.mockRestore();
+        }
+      }
+    });
+
+    it('allocates the same slug independently per provider without duplicating within a provider', async () => {
+      const first = await send('POST', '/api/v1/workspace/agent-profiles', { provider: 'claude', label: 'pb', configDir: claudeDir('first') });
+      const second = await send('POST', '/api/v1/workspace/agent-profiles', { provider: 'codex', label: 'pb', configDir: join(home, 'codex') });
+      const third = await send('POST', '/api/v1/workspace/agent-profiles', { provider: 'claude', label: 'pb', configDir: claudeDir('third') });
+      expect([first.body.profile.id, second.body.profile.id, third.body.profile.id]).toEqual(['pb', 'pb', 'pb-2']);
+    });
+  });
 
   describe('GET', () => {
     it('lists only the discovered defaults out of the box — the zero-config state', async () => {

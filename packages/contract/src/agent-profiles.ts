@@ -114,12 +114,14 @@ export type AgentProfile = z.infer<typeof agentProfileSchema>;
  *
  * Every DISCOVERED account shares `id: "default"` — that spelling is load-bearing in the selection
  * routes, where it means "back to the discovered account" — so it cannot identify which agent's
- * default is meant. These two routes therefore take `default:<provider>` for a discovered account
- * and the stored slug otherwise. Defined once, here, so the client and the server cannot disagree
- * about the encoding; still opaque, still not a path.
+ * default is meant. Per-account routes take `default:<provider>` for a discovered account and
+ * `<provider>:<storedId>` for a stored account, since different providers may use the same slug.
+ * Unique legacy bare IDs remain accepted; ambiguous bare IDs refuse with 409. This management
+ * route identity is never persisted or sent as a composer selection or published usage-row ID.
+ * Defined once, here, so the client and the server cannot disagree about the encoding.
  */
 export function agentAccountRouteId(profile: Pick<AgentProfile, 'id' | 'provider' | 'isDefault'>): string {
-  return profile.isDefault ? `default:${profile.provider}` : profile.id;
+  return profile.isDefault ? `default:${profile.provider}` : `${profile.provider}:${profile.id}`;
 }
 
 /** One project's account choice, per provider. An absent key = the discovered account. */

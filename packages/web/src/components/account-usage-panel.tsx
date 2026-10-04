@@ -1,4 +1,5 @@
 import type { AccountQuota, AccountQuotaWindow, AccountUsageRow } from '@loki-labs/cezar-plus-api-client'
+import { agentAccountRouteId } from '@loki-labs/cezar-plus-api-client'
 import { useAccountUsage } from '@/api/queries'
 import { cn } from '@/lib/utils'
 
@@ -173,9 +174,10 @@ export function AccountUsagePanel() {
         const status = statusText(account)
         return (
           <div
-            key={account.id}
+            key={agentAccountRouteId(account)}
             data-slot="account-usage-row"
             data-account={account.id}
+            data-provider={account.provider}
             data-limited={account.limited ? 'true' : undefined}
             className="rounded-md px-1 py-1"
           >

@@ -197,13 +197,41 @@ describe('agent accounts store', () => {
       expect((await loadAgentAccounts()).accounts).toEqual([]);
     });
 
-    it('dedupes ids first-wins, so two consumers never resolve one id differently', async () => {
+    it('dedupes same-provider ids first-wins, so one provider resolves an id consistently', async () => {
       write({
         accounts: [account('work', { configDir: '~/first' }), account('work', { configDir: '~/second' })],
       });
       const { accounts } = await loadAgentAccounts();
       expect(accounts).toHaveLength(1);
       expect(accounts[0]?.configDir).toBe('~/first');
+    });
+
+    it('preserves equal account ids across providers while first-wins remains provider-scoped', async () => {
+      const claude = account('pb', { configDir: '~/.claude-pb', futureRowKey: 'claude' });
+      const codex = account('pb', { provider: 'codex', configDir: '~/.codex-pb', futureRowKey: 'codex' });
+      write({ accounts: [claude, codex, account('pb', { configDir: '~/ignored-claude' }), account('pb', { provider: 'codex', configDir: '~/ignored-codex' })] });
+      expect((await loadAgentAccounts()).accounts).toEqual([claude, codex]);
+    });
+
+    it('keeps both provider accounts and bare selections through an unrelated merge-write', async () => {
+      const accounts = [account('pb'), account('pb', { provider: 'codex', configDir: '~/.codex-pb' })];
+      const defaults = { claude: 'pb', codex: 'pb' };
+      const selections = { '/repo-a': { claude: 'pb' }, '/repo-b': { codex: 'pb' } };
+      write({ accounts, defaults, selections, futureTopLevel: 'preserved' });
+      await mergeWriteAgentAccounts((store) => {
+        store.accounts.find((row) => row.provider === 'claude' && row.id === 'pb')!.label = 'Renamed Claude';
+      });
+      const reloaded = await loadAgentAccounts();
+      expect(reloaded.accounts).toEqual([{ ...accounts[0], label: 'Renamed Claude' }, accounts[1]]);
+      expect(reloaded.defaults).toEqual(defaults);
+      expect(reloaded.selections).toEqual(selections);
+      expect(selectionFor(reloaded, '/repo-a', 'claude')).toBe('pb');
+      expect(selectionFor(reloaded, '/repo-b', 'codex')).toBe('pb');
+      const onDisk = JSON.parse(readFileSync(agentAccountsPath(), 'utf8'));
+      expect(onDisk.accounts.map((row: { provider: string; id: string }) => [row.provider, row.id])).toEqual([['claude', 'pb'], ['codex', 'pb']]);
+      expect(onDisk.futureTopLevel).toBe('preserved');
+      expect(onDisk.defaults).toEqual(defaults);
+      expect(onDisk.selections).toEqual(selections);
     });
 
     it('degrades display fields per key rather than dropping the row', async () => {

@@ -1,8 +1,9 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createQueryClient } from '@/api/query-client'
+import { workspaceQueryKeys } from '@/api/queries'
 import type { AccountUsageResponse, AccountUsageRow } from '@loki-labs/cezar-plus-api-client'
 import { AccountUsagePanel } from './account-usage-panel'
 
@@ -75,6 +76,32 @@ function bars(): HTMLElement[] {
 function row(id: string): HTMLElement | null {
   return document.querySelector<HTMLElement>(`[data-account="${id}"]`)
 }
+
+it('keeps equal stored IDs separate across providers through reordered usage snapshots', async () => {
+  const accounts: AccountUsageRow[] = [
+    { ...CLAUDE, id: 'pb', isDefault: false, label: 'Claude PB', quota: { takenAt: new Date().toISOString(), windows: [{ usedPercent: 22 }] } },
+    { ...CODEX, id: 'pb', isDefault: false, label: 'Codex PB' },
+  ]
+  stubFetch({ enabled: true, accounts })
+  const client = createQueryClient()
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    render(<QueryClientProvider client={client}><AccountUsagePanel /></QueryClientProvider>)
+    await waitFor(() => expect(document.querySelectorAll('[data-slot="account-usage-row"]')).toHaveLength(2))
+    const scopedRow = (provider: string) => document.querySelector(`[data-slot="account-usage-row"][data-provider="${provider}"][data-account="pb"]`)
+    expect(scopedRow('claude')?.textContent).toContain('Claude PB')
+    expect(scopedRow('claude')?.querySelector<HTMLElement>('[data-slot="quota-fill"]')?.dataset.percent).toBe('22')
+    expect(scopedRow('codex')?.querySelector<HTMLElement>('[data-slot="quota-fill"]')?.dataset.percent).toBe('43')
+    await act(async () => client.setQueryData(workspaceQueryKeys.accountUsage, { enabled: true, accounts: [...accounts].reverse() }))
+    expect(scopedRow('claude')?.textContent).toContain('Claude PB')
+    expect(scopedRow('codex')?.textContent).toContain('Codex PB')
+    expect(scopedRow('claude')?.querySelector<HTMLElement>('[data-slot="quota-fill"]')?.dataset.percent).toBe('22')
+    expect(scopedRow('codex')?.querySelector<HTMLElement>('[data-slot="quota-fill"]')?.dataset.percent).toBe('43')
+    expect(errors.mock.calls.some((call) => call.some((value) => String(value).includes('same key')))).toBe(false)
+  } finally {
+    errors.mockRestore()
+  }
+})
 
 describe('a bar means allowance, and only allowance', () => {
   it('draws no bar on a row whose provider reported no allowance', async () => {

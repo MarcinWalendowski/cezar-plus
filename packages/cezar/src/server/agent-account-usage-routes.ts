@@ -212,7 +212,7 @@ export function createAgentAccountUsageRoutes(deps: AgentAccountUsageRouteDeps =
         isDefault: profile.isDefault,
       });
       const row: AccountUsageRow = {
-        id: routeId,
+        id: profile.isDefault ? `default:${profile.provider}` : profile.id,
         provider: profile.provider,
         label: profile.label,
         isDefault: profile.isDefault,

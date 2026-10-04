@@ -146,9 +146,11 @@ const storeSchema = z
         const seen = new Set<string>();
         return entries.flatMap((entry) => {
           const parsed = agentAccountSchema.safeParse(entry);
-          // First-wins on a duplicated id, so two consumers never resolve the same id differently.
-          if (!parsed.success || seen.has(parsed.data.id)) return [];
-          seen.add(parsed.data.id);
+          if (!parsed.success) return [];
+          // IDs are provider-scoped; equal Claude/Codex slugs must survive unrelated merge-writes.
+          const key = `${parsed.data.provider}:${parsed.data.id}`;
+          if (seen.has(key)) return [];
+          seen.add(key);
           return [parsed.data];
         });
       }),

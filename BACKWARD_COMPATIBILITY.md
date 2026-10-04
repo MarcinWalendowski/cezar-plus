@@ -52,6 +52,14 @@ Breaking: renaming/removing a command, flag, alias or env var; changing a defaul
 
 ## 2. HTTP API of the cockpit server (`packages/cezar/src/server/server.ts`)
 
+- **Provider-scoped account management (2026-10-04):** per-account routes also accept
+  `provider:storedId`, for example `codex:pb`, while preserving `default:provider`
+  and unique legacy bare IDs. An ambiguous bare ID returns 409 before any probe or
+  mutation; use the qualified route to select a provider. Stored account IDs,
+  provider-scoped composer selections and usage response `id` values are unchanged.
+  Equal IDs on different providers are retained; duplicates within one provider
+  still use the first valid row. No operator file migration or rewrite is required.
+
 **Added 2026-10-03 by upstream 0.14.0 integration:** imported routes below retain the
 fork's authentication and project scope gates. Automations require `CEZ_AUTOMATIONS=1`.
 Hosted self-update writes require an authenticated organization owner or admin.

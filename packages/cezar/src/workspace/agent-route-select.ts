@@ -14,6 +14,7 @@ import {
 } from './agent-account-usage.ts';
 import { loadAgentAccounts, selectionFor } from './agent-accounts.ts';
 import { listAgentProfiles, type ResolvedAgentProfile } from './agent-profiles.ts';
+import { loadWorkspaceConfig } from './config.ts';
 
 /**
  * Which login a pool route resolves to (`.ai/specs/2026-08-16-agent-account-usage-routing.md`,
@@ -106,9 +107,11 @@ function usageBand(quota: { windows: readonly { usedPercent: number }[] } | unde
 export function poolCandidates(
   route: AgentRoute,
   profiles: readonly ResolvedAgentProfile[],
+  disabledProviders: readonly ProviderId[] = [],
 ): ResolvedAgentProfile[] {
   if (route.kind !== 'pool') return [];
-  return route.provider ? profiles.filter((profile) => profile.provider === route.provider) : [...profiles];
+  return profiles.filter((profile) =>
+    !disabledProviders.includes(profile.provider) && (!route.provider || profile.provider === route.provider));
 }
 
 /**
@@ -258,7 +261,7 @@ export async function resolvePoolForDispatch(options: {
   lock?: ProviderId;
 }): Promise<PoolChoice | undefined> {
   try {
-    const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
+    const [accounts, usage, config] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage(), loadWorkspaceConfig()]);
     // The task's own choice first, then the project's stored selection — `selectProfile`'s order,
     // reused rather than restated. Reading only the task's choice was a real gap: a pool chosen in
     // Settings is stored as the project's selection and never appears on a run's input, so it would
@@ -275,6 +278,7 @@ export async function resolvePoolForDispatch(options: {
     const all = poolCandidates(
       options.lock ? { kind: 'pool', provider: options.lock } : route,
       listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS),
+      config.disabledProviders,
     );
     const skipped = all.filter((profile) => tierOf(profile) === 'disconnected');
     const candidates = all.filter((profile) => tierOf(profile) !== 'disconnected');
@@ -345,7 +349,7 @@ export async function resolvePoolForProvider(options: {
   tier?: (profile: ResolvedAgentProfile) => AccountTier;
 }): Promise<PoolChoice | undefined> {
   try {
-    const [accounts, usage] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage()]);
+    const [accounts, usage, config] = await Promise.all([loadAgentAccounts(), loadAgentAccountUsage(), loadWorkspaceConfig()]);
     const route = parseAgentRoute(selectionFor(accounts, options.repoRoot, options.provider));
     if (route.kind !== 'pool') return undefined;
     const tierOf = options.tier ?? (() => 'runnable' as const);
@@ -354,6 +358,7 @@ export async function resolvePoolForProvider(options: {
     const all = poolCandidates(
       { kind: 'pool', provider: options.provider },
       listAgentProfiles(accounts, PROFILE_CAPABLE_PROVIDERS),
+      config.disabledProviders,
     );
     const skipped = all.filter((profile) => tierOf(profile) === 'disconnected');
     const candidates = all.filter((profile) => tierOf(profile) !== 'disconnected');

@@ -67,6 +67,13 @@ describe('candidates', () => {
     expect(poolCandidates(parseAgentRoute('pool:*'), [CLAUDE_A, CLAUDE_B, CODEX])).toHaveLength(3);
   });
 
+  it('excludes disabled providers from both wildcard and provider pools', () => {
+    const profiles = [CLAUDE_A, CLAUDE_B, CODEX];
+    expect(poolCandidates(parseAgentRoute('pool:*'), profiles, ['codex'])).toEqual([CLAUDE_A, CLAUDE_B]);
+    expect(poolCandidates(parseAgentRoute('pool:codex'), profiles, ['codex'])).toEqual([]);
+    expect(poolCandidates(parseAgentRoute('pool:claude'), profiles, ['codex'])).toEqual([CLAUDE_A, CLAUDE_B]);
+  });
+
   it('an account route has no candidates at all', () => {
     // Not "all of them" — an account route must never reach the balancer, and returning everything
     // here would make a specific-account choice silently balance.

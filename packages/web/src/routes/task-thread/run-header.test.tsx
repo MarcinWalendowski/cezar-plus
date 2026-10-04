@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactNode } from 'react'
 
 import { createQueryClient } from '@/api/query-client'
-import type { ApiRun, RunStatus, StepState } from '@loki-labs/cezar-plus-api-client'
+import { workspaceQueryKeys } from '@/api/queries'
+import type { AgentProfilesResponse, ApiRun, RunStatus, StepState } from '@loki-labs/cezar-plus-api-client'
 import { Toaster, resetToasts } from '@/components/ui/toaster'
 
 import { RunHeader } from './run-header'
@@ -103,9 +104,12 @@ function renderHeader(
   onMarkedUnread?: () => void,
   planTally?: { done: number; total: number },
   continuationEngine?: ReactNode,
+  profiles?: AgentProfilesResponse,
 ) {
+  const queryClient = createQueryClient()
+  if (profiles) queryClient.setQueryData(workspaceQueryKeys.agentProfiles, profiles)
   return render(
-    <QueryClientProvider client={createQueryClient()}>
+    <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[`/tasks/${record.id}`]}>
         <Routes>
           <Route
@@ -1370,6 +1374,59 @@ describe('meta line, tabs, pill and resume hint', () => {
       }))
       const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
       await within(meta).findByRole('button', { name: /account deleted-one \(removed\)/ })
+    })
+
+    const equalIdAccounts = () => withAccounts({
+      '/api/v1/workspace/agent-profiles': () => jsonResponse({
+        editable: true,
+        profileCapableProviders: ['claude', 'codex'],
+        selections: {},
+        defaults: {},
+        profiles: [
+          { id: 'pb', provider: 'claude', label: 'Claude PB', configDir: '~/.claude-pb', path: '/home/u/.claude-pb', exists: true, looksValid: true, isDefault: false, files: [] },
+          { id: 'pb', provider: 'codex', label: 'Codex PB', configDir: '~/.codex-pb', path: '/home/u/.codex-pb', exists: true, looksValid: true, isDefault: false, files: [] },
+        ],
+      }),
+    })
+
+    it('uses the recorded backend to distinguish equal account IDs', async () => {
+      equalIdAccounts()
+      renderHeader(run('done', {
+        runner: 'claude',
+        steps: [
+          step({ id: 'earlier', sessionId: 'claude-session', backend: 'claude', profileId: 'pb' }),
+          step({ id: 'latest', sessionId: 'codex-session', backend: 'codex', profileId: 'pb' }),
+          step({ id: 'later-check', kind: 'check' }),
+        ],
+      }))
+      const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
+      await within(meta).findByRole('button', { name: /account Codex PB/ })
+      expect(meta.querySelector('[data-slot="agent-badge-summary"]')?.textContent).not.toContain('Claude PB')
+    })
+
+    it('uses the run backend for historical steps without recorded backend affinity', async () => {
+      equalIdAccounts()
+      renderHeader(run('done', {
+        runner: 'codex',
+        steps: [step({ sessionId: 'old-session', profileId: 'pb' })],
+      }))
+      const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
+      await within(meta).findByRole('button', { name: /Agent: codex, account Codex PB/ })
+    })
+
+    it('does not borrow an equal-ID label from another provider after removal', async () => {
+      const profiles: AgentProfilesResponse = {
+        editable: true,
+        profileCapableProviders: ['claude', 'codex'], selections: {}, defaults: {},
+        profiles: [{ id: 'pb', provider: 'claude', label: 'Claude PB', configDir: '~/.claude-pb', path: '/home/u/.claude-pb', exists: true, looksValid: true, isDefault: false, files: [] }],
+      }
+      withAccounts({ '/api/v1/workspace/agent-profiles': () => jsonResponse(profiles) })
+      renderHeader(run('done', {
+        runner: 'codex',
+        steps: [step({ sessionId: 'codex-session', backend: 'codex', profileId: 'pb' })],
+      }), undefined, undefined, undefined, profiles)
+      const meta = document.querySelector('[data-slot="run-meta"]') as HTMLElement
+      await within(meta).findByRole('button', { name: /account pb \(removed\)/ })
     })
   })
 
